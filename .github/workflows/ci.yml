@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:  # Permette di avviare manualmente la CI da GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
@@ -22,5 +22,5 @@ jobs:
           distribution: temurin
           cache: maven
 
-      - name: Build with Maven
+      - name: Build with Maven (custom command)
         run: mvn clean install -DskipTests -pl '!native-io'
