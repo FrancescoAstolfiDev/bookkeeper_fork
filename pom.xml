@@ -69,9 +69,7 @@
     <module>shaded</module>
     <module>microbenchmarks</module>
     <module>bookkeeper-slogger</module>
-    <module>tests</module>
     <module>native-io</module>
-    <module>testtools</module>
   </modules>
   <mailingLists>
     <mailingList>
@@ -994,14 +992,7 @@
       </plugins>
     </pluginManagement>
     <plugins>
-      <plugin>
-        <groupId>com.github.spotbugs</groupId>
-        <artifactId>spotbugs-maven-plugin</artifactId>
-        <version>${spotbugs-maven-plugin.version}</version>
-        <configuration>
-          <excludeFilterFile>${session.executionRootDirectory}/buildtools/src/main/resources/bookkeeper/findbugsExclude.xml</excludeFilterFile>
-        </configuration>
-      </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
@@ -1194,21 +1185,6 @@
         <artifactId>exec-maven-plugin</artifactId>
         <version>${exec-maven-plugin.version}</version>
       </plugin>
-      <plugin>
-        <groupId>com.diffplug.spotless</groupId>
-        <artifactId>spotless-maven-plugin</artifactId>
-        <version>${spotless.version}</version>
-        <configuration>
-          <groovy>
-            <includes>
-              <include>src/main/groovy/**/*.groovy</include>
-              <include>src/test/groovy/**/*.groovy</include>
-            </includes>
-            <importOrder/>
-            <removeSemicolons/>
-          </groovy>
-        </configuration>
-      </plugin>
     </plugins>
   </build>
   <profiles>
@@ -1216,42 +1192,7 @@
       <id>owasp-dependency-check</id>
       <build>
         <plugins>
-          <plugin>
-            <groupId>org.owasp</groupId>
-            <artifactId>dependency-check-maven</artifactId>
-            <version>${dependency-check-maven.version}</version>
-            <inherited>false</inherited>
-            <configuration>
-              <!-- https://issues.apache.org/jira/projects/INFRA/issues/INFRA-26000 -->
-              <nvdApiKeyEnvironmentVariable>NIST_NVD_API_KEY</nvdApiKeyEnvironmentVariable>
-              <!-- Uncomment the following to use the NVD data feed provided by the Dependency-Check project -->
-              <!-- <nvdDatafeedUrl>https://jeremylong.github.io/DependencyCheck/hb_nvd/</nvdDatafeedUrl> -->
-              <suppressionFiles>
-                <suppressionFile>src/owasp-dependency-check-suppressions.xml</suppressionFile>
-              </suppressionFiles>
-              <failBuildOnCVSS>7</failBuildOnCVSS>
-              <msbuildAnalyzerEnabled>false</msbuildAnalyzerEnabled>
-              <nodeAnalyzerEnabled>false</nodeAnalyzerEnabled>
-              <yarnAuditAnalyzerEnabled>false</yarnAuditAnalyzerEnabled>
-              <pyDistributionAnalyzerEnabled>false</pyDistributionAnalyzerEnabled>
-              <pyPackageAnalyzerEnabled>false</pyPackageAnalyzerEnabled>
-              <pipAnalyzerEnabled>false</pipAnalyzerEnabled>
-              <pipfileAnalyzerEnabled>false</pipfileAnalyzerEnabled>
-              <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>
-              <msbuildAnalyzerEnabled>false</msbuildAnalyzerEnabled>
-              <mixAuditAnalyzerEnabled>false</mixAuditAnalyzerEnabled>
-              <nugetconfAnalyzerEnabled>false</nugetconfAnalyzerEnabled>
-              <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
-              <skipSystemScope>true</skipSystemScope>
-            </configuration>
-            <executions>
-              <execution>
-                <goals>
-                  <goal>aggregate</goal>
-                </goals>
-              </execution>
-            </executions>
-          </plugin>
+
           <!-- skip maven source plugin due to
           Error: Failed to execute goal org.apache.maven.plugins:maven-source-plugin:3.3.0:jar-no-fork (attach-sources) on project buildtools:
           Presumably you have configured maven-source-plugin to execute twice times in your build.
@@ -1274,34 +1215,6 @@
       </properties>
       <build>
         <plugins>
-          <plugin>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok-maven-plugin</artifactId>
-            <version>${lombok-maven-plugin.version}</version>
-            <inherited>true</inherited>
-            <dependencies>
-              <dependency>
-                <groupId>org.projectlombok</groupId>
-                <artifactId>lombok</artifactId>
-                <version>${lombok.version}</version>
-              </dependency>
-            </dependencies>
-            <executions>
-              <execution>
-                <phase>generate-sources</phase>
-                <goals>
-                  <goal>delombok</goal>
-                </goals>
-                <configuration>
-                  <sourceDirectory>${project.basedir}/src/main/java</sourceDirectory>
-                  <outputDirectory>${project.build.directory}/generated-sources/delombok</outputDirectory>
-                  <formatPreferences>
-                    <pretty />
-                  </formatPreferences>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-javadoc-plugin</artifactId>
