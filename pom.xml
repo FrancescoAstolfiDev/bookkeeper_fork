@@ -108,6 +108,7 @@
   <properties>
     <maven.compiler.source>8</maven.compiler.source>
     <maven.compiler.target>8</maven.compiler.target>
+    <jacoco.version>0.8.11</jacoco.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <redirectTestOutputToFile>true</redirectTestOutputToFile>
@@ -964,6 +965,89 @@
             </execution>
           </executions>
         </plugin>
+
+
+
+<!--GENERATE A REPORT FOR ALL THE CLASSES OF BOOKKEEPER I WANT THE REPORT OF SINGLE CLASS -->
+
+
+        <plugin>
+          <groupId>org.jacoco</groupId>
+          <artifactId>jacoco-maven-plugin</artifactId>
+          <version>${jacoco.version}</version>
+          <executions>
+            <execution>
+              <id>prepare-agent</id>
+              <goals>
+                <goal>prepare-agent</goal>
+              </goals>
+            </execution>
+            <execution>
+              <id>report-aggregate</id>
+              <phase>verify</phase>
+              <goals>
+                <goal>report-aggregate</goal>
+              </goals>
+            </execution>
+          </executions>
+        </plugin>
+
+
+
+
+        <!--THE REPORT OF SINGLE CLASS -->
+
+
+<!--        <plugin>-->
+<!--          <groupId>org.jacoco</groupId>-->
+<!--          <artifactId>jacoco-maven-plugin</artifactId>-->
+<!--          <version>${jacoco.version}</version>-->
+<!--          <executions>-->
+<!--            <execution>-->
+<!--              <id>prepare-agent</id>-->
+<!--              <goals>-->
+<!--                <goal>prepare-agent</goal>-->
+<!--              </goals>-->
+<!--            </execution>-->
+<!--            <execution>-->
+<!--              <id>report</id>-->
+<!--              <phase>verify</phase>-->
+<!--              <goals>-->
+<!--                <goal>report</goal>-->
+<!--              </goals>-->
+<!--              <configuration>-->
+<!--                <includes>-->
+<!--                  <include>**/LedgerDescriptorImpl.class</include>-->
+<!--                </includes>-->
+<!--              </configuration>-->
+<!--            </execution>-->
+<!--          </executions>-->
+<!--        </plugin>-->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
@@ -972,6 +1056,8 @@
             <excludedGroups>flaky</excludedGroups>
           </configuration>
         </plugin>
+
+
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-failsafe-plugin</artifactId>
