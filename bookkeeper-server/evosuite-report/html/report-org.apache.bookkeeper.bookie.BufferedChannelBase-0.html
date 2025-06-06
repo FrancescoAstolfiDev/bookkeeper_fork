@@ -1,0 +1,123 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Frameset//EN" "http://www.w3.org/TR/html4/frameset.dtd">
+<html>
+<head>
+<title>
+org.apache.bookkeeper.bookie.BufferedChannelBase
+</title>
+<link href="files/prettify.css" type="text/css" rel="stylesheet" />
+<link href="files/style.css" rel="stylesheet" type="text/css" media="screen" />
+<script type="text/javascript" src="files/prettify.js"></script>
+<script type="text/javascript" src="files/jquery.js"></script>
+<script type="text/javascript" src="files/foldButton.js"></script>
+<script type="text/javascript">
+  $(document).ready(function() {
+    $('H2#tests').foldButton();
+    $('H2#source').foldButton();
+    $('H2#parameters').foldButton();
+  });</script>
+<link href="files/foldButton.css" rel="stylesheet" type="text/css">
+</head>
+<body onload="prettyPrint()">
+<div id="wrapper">
+<img src="files/evosuite.png" height="40"/>
+<br><br><h2 class=title>Summary</h2>
+<ul><li>Target class: org.apache.bookkeeper.bookie.BufferedChannelBase: 0.35694444444444445</ul>
+<ul>
+<li>29.0 fitness evaluations, 0 generations, null statements, 2 tests.
+<li>Covered null/null branches, <li>Covered null/null methods, <li>Covered 12/39 total goals
+</ul>
+<div id="page">
+<div id="page-bgtop">
+<div id="page-bgbtm">
+<div id="content">
+<div id="post">
+<h2 class=title id=tests>Test suite</h2>
+<div class=tests>
+<h3>Test case 1</h3>
+<pre class="prettyprint" style="border: 1px solid #888;padding: 2px">
+<span class="nocode"><a name="1">  1: </a></span>BufferedChannelBase.BufferedChannelClosedException bufferedChannelBase_BufferedChannelClosedException0 = new BufferedChannelBase.BufferedChannelClosedException();
+</pre>
+<h3>Test case 2</h3>
+<pre class="prettyprint" style="border: 1px solid #888;padding: 2px">
+<span class="nocode"><a name="1">  1: </a></span>MockFileOutputStream mockFileOutputStream0 = new MockFileOutputStream(&quot;j[q&gt;&gt;ln,&quot;, false);
+<span class="nocode"><a name="2">  2: </a></span>FileChannel fileChannel0 = mockFileOutputStream0.getChannel();
+<span class="nocode"><a name="3">  3: </a></span>BufferedReadChannel bufferedReadChannel0 = new BufferedReadChannel(fileChannel0, 0, false);
+</pre>
+</div><div id="post">
+<h2 class=title id=source>Source Code</h2>
+<div class=source>
+<p><pre class="prettyprint" style="border: 1px solid #888;padding: 2px"><span class="nocode"><a name="1">  1: </a></span>/*
+<span class="nocode"><a name="2">  2: </a></span> * Licensed to the Apache Software Foundation (ASF) under one
+<span class="nocode"><a name="3">  3: </a></span> * or more contributor license agreements.  See the NOTICE file
+<span class="nocode"><a name="4">  4: </a></span> * distributed with this work for additional information
+<span class="nocode"><a name="5">  5: </a></span> * regarding copyright ownership.  The ASF licenses this file
+<span class="nocode"><a name="6">  6: </a></span> * to you under the Apache License, Version 2.0 (the
+<span class="nocode"><a name="7">  7: </a></span> * &quot;License&quot;); you may not use this file except in compliance
+<span class="nocode"><a name="8">  8: </a></span> * with the License.  You may obtain a copy of the License at
+<span class="nocode"><a name="9">  9: </a></span> *
+<span class="nocode"><a name="10"> 10: </a></span> *     http://www.apache.org/licenses/LICENSE-2.0
+<span class="nocode"><a name="11"> 11: </a></span> *
+<span class="nocode"><a name="12"> 12: </a></span> * Unless required by applicable law or agreed to in writing, software
+<span class="nocode"><a name="13"> 13: </a></span> * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+<span class="nocode"><a name="14"> 14: </a></span> * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<span class="nocode"><a name="15"> 15: </a></span> * See the License for the specific language governing permissions and
+<span class="nocode"><a name="16"> 16: </a></span> * limitations under the License.
+<span class="nocode"><a name="17"> 17: </a></span> */
+<span class="nocode"><a name="18"> 18: </a></span>package org.apache.bookkeeper.bookie;
+<span class="nocode"><a name="19"> 19: </a></span>
+<span class="nocode"><a name="20"> 20: </a></span>import java.io.IOException;
+<span class="nocode"><a name="21"> 21: </a></span>import java.nio.channels.FileChannel;
+<span class="nocode"><a name="22"> 22: </a></span>
+<span class="nocode"><a name="23"> 23: </a></span>/**
+<span class="nocode"><a name="24"> 24: </a></span> * A {@code BufferedChannelBase} adds functionality to an existing file channel, the ability
+<span class="nocode"><a name="25"> 25: </a></span> * to buffer the input and output data. This class is a base class for wrapping the {@link FileChannel}.
+<span class="nocode"><a name="26"> 26: </a></span> */
+<span class="nocode"><a name="27"> 27: </a></span>public abstract class BufferedChannelBase {
+<span class="nocode"><a name="28"> 28: </a></span>    static class BufferedChannelClosedException extends IOException {
+<span class="nocode"><a name="29"> 29: </a></span>        BufferedChannelClosedException() {
+<span class="nocode"><a name="30"> 30: </a></span>            super(&quot;Attempting to access a file channel that has already been closed&quot;);
+<span class="nocode"><a name="31"> 31: </a></span>        }
+<span class="nocode"><a name="32"> 32: </a></span>    }
+<span class="nocode"><a name="33"> 33: </a></span>
+<span class="nocode"><a name="34"> 34: </a></span>    protected final FileChannel fileChannel;
+<span class="nocode"><a name="35"> 35: </a></span>
+<span class="nocode"><a name="36"> 36: </a></span>    protected BufferedChannelBase(FileChannel fc) {
+<span class="nocode"><a name="37"> 37: </a></span>        this.fileChannel = fc;
+<span class="nocode"><a name="38"> 38: </a></span>    }
+<span class="nocode"><a name="39"> 39: </a></span>
+<span class="nocode"><a name="40"> 40: </a></span>    protected FileChannel validateAndGetFileChannel() throws IOException {
+<span class="nocode"><a name="41"> 41: </a></span>        // Even if we have BufferedChannelBase objects in the cache, higher layers should
+<span class="nocode"><a name="42"> 42: </a></span>        // guarantee that once a log file has been closed and possibly deleted during garbage
+<span class="nocode"><a name="43"> 43: </a></span>        // collection, attempts will not be made to read from it
+<span class="nocode"><a name="44"> 44: </a></span>        if (!fileChannel.isOpen()) {
+<span class="nocode"><a name="45"> 45: </a></span>            throw new BufferedChannelClosedException();
+<span class="nocode"><a name="46"> 46: </a></span>        }
+<span class="nocode"><a name="47"> 47: </a></span>        return fileChannel;
+<span class="nocode"><a name="48"> 48: </a></span>    }
+<span class="nocode"><a name="49"> 49: </a></span>
+<span class="nocode"><a name="50"> 50: </a></span>    /**
+<span class="nocode"><a name="51"> 51: </a></span>     * Get the current size of the underlying FileChannel.
+<span class="nocode"><a name="52"> 52: </a></span>     * @return
+<span class="nocode"><a name="53"> 53: </a></span>     */
+<span class="nocode"><a name="54"> 54: </a></span>    public long size() throws IOException {
+<span class="nocode"><a name="55"> 55: </a></span>        return validateAndGetFileChannel().size();
+<span class="nocode"><a name="56"> 56: </a></span>    }
+<span class="nocode"><a name="57"> 57: </a></span>
+<span class="nocode"><a name="58"> 58: </a></span>}
+</pre>
+</p>
+</div>
+<div id="post">
+<h2 id=parameters>EvoSuite Parameters</h2>
+<div class=statistics><ul>
+<li>TARGET_CLASS: org.apache.bookkeeper.bookie.BufferedChannelBase
+<li>criterion: LINE;BRANCH;EXCEPTION;WEAKMUTATION;OUTPUT;METHOD;METHODNOEXCEPTION;CBRANCH
+<li>Coverage: 0.35694444444444445
+<li>Total_Goals: 39
+<li>Covered_Goals: 12
+</ul></div>
+</div>
+<p><br><a href="../report-generation.html">Back to Overview</a></p>
+</div>
+</body>
+</html>

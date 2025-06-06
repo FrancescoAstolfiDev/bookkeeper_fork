@@ -1,0 +1,924 @@
+<?xml version="1.0"?>
+<!--
+   Licensed to the Apache Software Foundation (ASF) under one or more
+   contributor license agreements.  See the NOTICE file distributed with
+   this work for additional information regarding copyright ownership.
+   The ASF licenses this file to You under the Apache License, Version 2.0
+   (the "License"); you may not use this file except in compliance with
+   the License.  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <repositories>
+        <repository>
+            <id>local-repository</id>
+            <url>file://${project.basedir}/libs</url>
+        </repository>
+    </repositories>
+    <modelVersion>4.0.0</modelVersion>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+
+    </properties>
+
+    <parent>
+        <artifactId>bookkeeper</artifactId>
+        <groupId>org.apache.bookkeeper</groupId>
+        <version>4.18.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>bookkeeper-server</artifactId>
+    <name>Apache BookKeeper :: Server</name>
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-common</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-common-allocator</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-proto</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-slogger-slf4j</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-slogger-api</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-tools-framework</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>native-io</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.rocksdb</groupId>
+            <artifactId>rocksdbjni</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>testtools</artifactId>
+            <version>${project.parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+            <classifier>linux-x86_64</classifier>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+            <classifier>linux-aarch_64</classifier>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-tcnative-boringssl-static</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper.http</groupId>
+            <artifactId>http-server</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>circe-checksum</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-cli</groupId>
+            <artifactId>commons-cli</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-collections4</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bc-fips</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.beust</groupId>
+            <artifactId>jcommander</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpclient</artifactId>
+        </dependency>
+        <!-- import for rxjava3 in maven -->
+        <dependency>
+            <groupId>io.reactivex.rxjava3</groupId>
+            <artifactId>rxjava</artifactId>
+        </dependency>
+        <!-- used on test and main method like `LocalBookKeeper` -->
+        <dependency>
+            <!-- needed by ZooKeeper server -->
+            <groupId>org.xerial.snappy</groupId>
+            <artifactId>snappy-java</artifactId>
+            <scope>runtime</scope>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <!-- needed by ZooKeeper server -->
+            <groupId>io.dropwizard.metrics</groupId>
+            <artifactId>metrics-core</artifactId>
+            <scope>runtime</scope>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>com.carrotsearch</groupId>
+            <artifactId>hppc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-slf4j2-impl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lmax</groupId>
+            <artifactId>disruptor</artifactId>
+        </dependency>
+
+
+
+
+        <!-- testing dependencies -->
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-common</artifactId>
+            <version>${project.parent.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.kerby</groupId>
+            <artifactId>kerby-config</artifactId>
+            <version>${kerby.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.kerby</groupId>
+            <artifactId>kerb-simplekdc</artifactId>
+            <version>${kerby.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- needed by ZooKeeper server tests utilities -->
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper.stats</groupId>
+            <artifactId>prometheus-metrics-provider</artifactId>
+            <version>${project.parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper.stats</groupId>
+            <artifactId>otel-metrics-provider</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bookkeeper.http</groupId>
+            <artifactId>vertx-http-server</artifactId>
+            <version>${project.parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+
+
+
+
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-buffer</artifactId>
+            <version>${netty.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.yetus</groupId>
+            <artifactId>audience-annotations</artifactId>
+            <version>0.13.0</version>
+        </dependency>
+
+
+        <dependency>
+            <groupId>io.etcd</groupId>
+            <artifactId>jetcd-core</artifactId>
+            <version>${jetcd.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.etcd</groupId>
+            <artifactId>jetcd-common</artifactId>
+            <version>${jetcd.version}</version>
+        </dependency>
+
+
+        <!-- Test Dependencies -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>${junit5.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <version>${junit5.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-slf4j2-impl</artifactId>
+            <version>${log4j.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.evosuite</groupId>
+            <artifactId>evosuite-standalone-runtime</artifactId>
+            <version>1.2.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/libs/evosuite-1.2.0.jar</systemPath>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+
+        </dependency>
+
+        <!-- for evosuite -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-configuration2</artifactId>
+            <version>2.8.0</version>
+            <scope>system</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>1.33</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Per VFS support -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-vfs2</artifactId>
+            <version>2.9.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.bookkeeper</groupId>
+            <artifactId>bookkeeper-common</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+
+        <!-- Hadoop HDFS -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-hdfs-client</artifactId>
+            <version>3.2.4</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>3.2.4</version>
+            <scope>test</scope>
+        </dependency>
+
+
+        <!-- Commons VFS SFTP -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-vfs2</artifactId>
+            <version>2.9.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.jcraft</groupId>
+            <artifactId>jsch</artifactId>
+            <version>0.1.55</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Commons Configuration Expression Language support -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-jexl3</artifactId>
+            <version>3.2.1</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Zookeeper -->
+        <dependency>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+            <version>3.6.3</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>log4j</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- Test dependencies -->
+        <!-- Test dependencies -->
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>2.28.2</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.powermock</groupId>
+            <artifactId>powermock-module-junit4</artifactId>
+            <version>2.0.2</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.powermock</groupId>
+            <artifactId>powermock-api-mockito2</artifactId>
+            <version>2.0.2</version>
+            <scope>test</scope>
+        </dependency>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.rat</groupId>
+                <artifactId>apache-rat-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <!-- exclude generated file //-->
+                        <exclude>**/target/**/*</exclude>
+                        <exclude>**/.classpath</exclude>
+                        <exclude>**/.gitignore</exclude>
+                        <exclude>**/.project</exclude>
+                        <exclude>**/.checkstyle</exclude>
+                        <exclude>**/.settings/*</exclude>
+                        <exclude>src/test/resources/server-key.pem</exclude>
+                        <exclude>src/test/resources/server-key.p12</exclude>
+                        <exclude>src/test/resources/server-key.jks</exclude>
+                        <exclude>src/test/resources/server-cert.pem</exclude>
+                        <exclude>src/test/resources/client-key.pem</exclude>
+                        <exclude>src/test/resources/client-key.p12</exclude>
+                        <exclude>src/test/resources/client-key.jks</exclude>
+                        <exclude>src/test/resources/client-cert.pem</exclude>
+                        <exclude>src/test/resources/keyStoreClientPassword.txt</exclude>
+                        <exclude>src/test/resources/keyStoreServerPassword.txt</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <trimStackTrace>false</trimStackTrace>
+                    <properties>
+                        <property>
+                            <name>listener</name>
+                            <value>org.apache.bookkeeper.common.testing.util.TimedOutTestsListener</value>
+                        </property>
+                    </properties>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <sourcepath>${src.dir}</sourcepath>
+                    <!-- Avoid for missing javadoc comments to be marked as errors -->
+                    <doclint>none</doclint>
+                    <!--
+                    <subpackages>org.apache.bookkeeper.client:org.apache.bookkeeper.conf:org.apache.bookkeeper.feature</subpackages>
+                    -->
+                    <groups>
+                        <group>
+                            <title>Bookkeeper</title>
+                            <packages>org.apache.bookkeeper*</packages>
+                        </group>
+                    </groups>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.0.0-M5</version>
+                <configuration>
+                    <forkCount>1</forkCount>
+                    <reuseForks>false</reuseForks>
+                    <argLine>-Xmx1024m</argLine>
+                    <systemPropertyVariables>
+                        <java.io.tmpdir>${project.build.directory}</java.io.tmpdir>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+
+
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <configuration>
+                    <!-- Specifica quali classi analizzare -->
+                    <includes>
+                        <include>org/apache/bookkeeper/**/*</include>
+                    </includes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.pitest</groupId>
+                <artifactId>pitest-maven</artifactId>
+                <version>1.15.0</version> <!-- o ultima disponibile -->
+                <configuration>
+                </configuration>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.pitest</groupId>
+                        <artifactId>pitest-junit5-plugin</artifactId>
+                        <version>1.1.0</version> <!-- deve essere compatibile con la versione PIT -->
+                    </dependency>
+                </dependencies>
+            </plugin>
+
+        </plugins>
+    </build>
+    <profiles>
+        <profile>
+            <id>vertx-http-server</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.apache.bookkeeper.http</groupId>
+                    <artifactId>vertx-http-server</artifactId>
+                    <version>${project.parent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>tls-certs</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>Generate Self-Signed Certificates</id>
+                                <phase>generate-test-resources</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <workingDirectory>${basedir}/src/test/resources</workingDirectory>
+                                    <executable>${basedir}/src/test/resources/generateKeysAndCerts.sh</executable>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- test profiles -->
+        <profile>
+            <id>skipBookKeeperServerTests</id>
+            <activation>
+                <property>
+                    <name>skipBookKeeperServerTests</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <skipTests>true</skipTests>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>francesco_tests</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>${maven-surefire-plugin.version}</version>
+                        <configuration>
+                            <forkCount>1</forkCount>
+                            <reuseForks>true</reuseForks>
+                            <!-- Usa @{argLine} per permettere a JaCoCo di iniettare i suoi argomenti -->
+                            <argLine>@{argLine} -Xmx1024m</argLine>
+                        </configuration>
+                    </plugin>
+
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <version>${jacoco.version}</version>
+                        <configuration>
+                            <!-- Specifica quali classi analizzare -->
+                            <includes>
+                                <include>org/apache/bookkeeper/**/*</include>
+                            </includes>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>prepare-agent</id>
+                                <goals>
+                                    <goal>prepare-agent</goal>
+                                </goals>
+                            </execution>
+                            <execution>
+                                <id>report</id>
+                                <phase>test</phase>
+                                <goals>
+                                    <goal>report</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <plugin>
+                        <groupId>org.pitest</groupId>
+                        <artifactId>pitest-maven</artifactId>
+                        <version>1.15.0</version> <!-- o ultima disponibile -->
+                        <configuration>
+                        </configuration>
+                        <dependencies>
+                            <dependency>
+                                <groupId>org.pitest</groupId>
+                                <artifactId>pitest-junit5-plugin</artifactId>
+                                <version>1.1.0</version> <!-- deve essere compatibile con la versione PIT -->
+                            </dependency>
+                        </dependencies>
+                    </plugin>
+
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>jdk8</id>
+            <activation>
+                <jdk>1.8</jdk>
+            </activation>
+            <dependencies>
+                <!-- Netty dependencies con versioni corrette e disponibili -->
+                <dependency>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty-all</artifactId>
+                    <version>4.1.77.Final</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty-handler</artifactId>
+                    <version>4.1.77.Final</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty-buffer</artifactId>
+                    <version>4.1.77.Final</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty-transport-native-epoll</artifactId>
+                    <version>4.1.77.Final</version>
+                    <classifier>linux-x86_64</classifier>
+                </dependency>
+                <dependency>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty-transport-native-epoll</artifactId>
+                    <version>4.1.77.Final</version>
+                    <classifier>linux-aarch_64</classifier>
+                </dependency>
+                <dependency>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty-tcnative-boringssl-static</artifactId>
+                    <version>2.0.52.Final</version>
+                </dependency>
+
+                <!-- Altre dipendenze con versioni corrette -->
+                <dependency>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-core</artifactId>
+                    <version>2.12.7</version>
+                </dependency>
+                <dependency>
+                    <groupId>com.google.guava</groupId>
+                    <artifactId>guava</artifactId>
+                    <version>31.1-jre</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.etcd</groupId>
+                    <artifactId>jetcd-core</artifactId>
+                    <version>0.5.11</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.etcd</groupId>
+                    <artifactId>jetcd-common</artifactId>
+                    <version>0.5.11</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.reactivex.rxjava3</groupId>
+                    <artifactId>rxjava</artifactId>
+                    <version>3.0.13</version>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.logging.log4j</groupId>
+                    <artifactId>log4j-core</artifactId>
+                    <version>2.17.2</version>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.logging.log4j</groupId>
+                    <artifactId>log4j-slf4j-impl</artifactId>
+                    <version>2.17.2</version>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-collections4</artifactId>
+                    <version>4.4</version>
+                </dependency>
+                <dependency>
+                    <groupId>io.dropwizard.metrics</groupId>
+                    <artifactId>metrics-core</artifactId>
+                    <version>4.1.12.1</version>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.zookeeper</groupId>
+                    <artifactId>zookeeper</artifactId>
+                    <version>3.6.3</version>
+                </dependency>
+                <!-- Testing dependencies -->
+                <dependency>
+                    <groupId>org.junit.jupiter</groupId>
+                    <artifactId>junit-jupiter-api</artifactId>
+                    <version>5.7.2</version>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.mockito</groupId>
+                    <artifactId>mockito-core</artifactId>
+                    <version>3.12.4</version>
+                    <scope>test</scope>
+                </dependency>
+
+                <dependency>
+                    <groupId>org.junit.jupiter</groupId>
+                    <artifactId>junit-jupiter</artifactId>
+                    <version>5.8.2</version>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.junit.jupiter</groupId>
+                    <artifactId>junit-jupiter-api</artifactId>
+                    <version>5.8.2</version>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.junit.jupiter</groupId>
+                    <artifactId>junit-jupiter-engine</artifactId>
+                    <version>5.8.2</version>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.junit.jupiter</groupId>
+                    <artifactId>junit-jupiter-params</artifactId>
+                    <version>5.8.2</version>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.junit.platform</groupId>
+                    <artifactId>junit-platform-launcher</artifactId>
+                    <version>1.8.2</version>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.junit.platform</groupId>
+                    <artifactId>junit-platform-engine</artifactId>
+                    <version>1.8.2</version>
+                    <scope>test</scope>
+                </dependency>
+
+            </dependencies>
+
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <version>3.8.1</version>
+                        <configuration>
+                            <source>1.8</source>
+                            <target>1.8</target>
+                            <showDeprecation>true</showDeprecation>
+                            <showWarnings>true</showWarnings>
+                            <compilerArgs>
+                                <arg>-Xlint:all</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.0.0-M5</version>
+                        <configuration>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                            <argLine>-Djdk.attach.allowAttachSelf=true -XX:+StartAttachListener </argLine>
+                            <systemPropertyVariables>
+                                <mockito.mock.maker>inline</mockito.mock.maker>
+                            </systemPropertyVariables>
+                            <useSystemClassLoader>true</useSystemClassLoader>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.0.0-M5</version>
+                        <configuration>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                            <argLine>-Djdk.attach.allowAttachSelf=true -XX:+StartAttachListener </argLine>
+                            <systemPropertyVariables>
+                                <mockito.mock.maker>inline</mockito.mock.maker>
+                            </systemPropertyVariables>
+                            <useSystemClassLoader>true</useSystemClassLoader>
+                        </configuration>
+                        <dependencies>
+                            <dependency>
+                                <groupId>org.junit.jupiter</groupId>
+                                <artifactId>junit-jupiter-engine</artifactId>
+                                <version>5.7.2</version>
+                            </dependency>
+                        </dependencies>
+                    </plugin>
+
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+    <reporting>
+        <plugins>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.11</version>
+            </plugin>
+        </plugins>
+    </reporting>
+</project>
