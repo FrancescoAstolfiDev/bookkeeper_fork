@@ -1,0 +1,468 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SortedLedgerStorage.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">SortedLedgerStorage.java</span></div><h1>SortedLedgerStorage.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.RateLimiter;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import java.io.IOException;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.PrimitiveIterator;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.bookie.CheckpointSource.Checkpoint;
+import org.apache.bookkeeper.common.util.Watcher;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.proto.BookieProtocol;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.IteratorUtility;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A {@code SortedLedgerStorage} is an extension of {@link InterleavedLedgerStorage}. It
+ * is comprised of two {@code MemTable}s and a {@code InterleavedLedgerStorage}. All the
+ * entries will be first added into a {@code MemTable}, and then be flushed back to the
+ * {@code InterleavedLedgerStorage} when the {@code MemTable} becomes full.
+ */
+public class SortedLedgerStorage
+        implements LedgerStorage, CacheCallback, SkipListFlusher,
+            CompactableLedgerStorage, DefaultEntryLogger.EntryLogListener {
+<span class="fc" id="L55">    private static final Logger LOG = LoggerFactory.getLogger(SortedLedgerStorage.class);</span>
+
+    EntryMemTable memTable;
+    private ScheduledExecutorService scheduler;
+    private StateManager stateManager;
+    private ServerConfiguration conf;
+    private StatsLogger statsLogger;
+    private final InterleavedLedgerStorage interleavedLedgerStorage;
+
+    public SortedLedgerStorage() {
+<span class="fc" id="L65">        this(new InterleavedLedgerStorage());</span>
+<span class="fc" id="L66">    }</span>
+
+    @VisibleForTesting
+<span class="fc" id="L69">    protected SortedLedgerStorage(InterleavedLedgerStorage ils) {</span>
+<span class="fc" id="L70">        interleavedLedgerStorage = ils;</span>
+<span class="fc" id="L71">    }</span>
+
+    @Override
+    public void initialize(ServerConfiguration conf,
+                           LedgerManager ledgerManager,
+                           LedgerDirsManager ledgerDirsManager,
+                           LedgerDirsManager indexDirsManager,
+                           StatsLogger statsLogger,
+                           ByteBufAllocator allocator)
+            throws IOException {
+<span class="nc" id="L81">        this.conf = conf;</span>
+<span class="nc" id="L82">        this.statsLogger = statsLogger;</span>
+
+<span class="nc" id="L84">        interleavedLedgerStorage.initializeWithEntryLogListener(</span>
+            conf,
+            ledgerManager,
+            ledgerDirsManager,
+            indexDirsManager,
+            // uses sorted ledger storage's own entry log listener
+            // since it manages entry log rotations and checkpoints.
+            this,
+            statsLogger,
+            allocator);
+
+<span class="nc" id="L95">        this.scheduler = newScheduledExecutorService();</span>
+<span class="nc" id="L96">    }</span>
+
+    @VisibleForTesting
+    static ScheduledExecutorService newScheduledExecutorService() {
+<span class="nc" id="L100">        return Executors.newSingleThreadScheduledExecutor(</span>
+                new ThreadFactoryBuilder()
+<span class="nc" id="L102">                        .setNameFormat(&quot;SortedLedgerStorage-%d&quot;)</span>
+<span class="nc" id="L103">                        .setPriority((Thread.NORM_PRIORITY + Thread.MAX_PRIORITY) / 2).build());</span>
+    }
+
+    @Override
+    public void setStateManager(StateManager stateManager) {
+<span class="nc" id="L108">        interleavedLedgerStorage.setStateManager(stateManager);</span>
+<span class="nc" id="L109">        this.stateManager = stateManager;</span>
+<span class="nc" id="L110">    }</span>
+    @Override
+    public void setCheckpointSource(CheckpointSource checkpointSource) {
+<span class="nc" id="L113">        interleavedLedgerStorage.setCheckpointSource(checkpointSource);</span>
+
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (conf.isEntryLogPerLedgerEnabled()) {</span>
+<span class="nc" id="L116">            this.memTable = new EntryMemTableWithParallelFlusher(conf, checkpointSource, statsLogger);</span>
+        } else {
+<span class="nc" id="L118">            this.memTable = new EntryMemTable(conf, checkpointSource, statsLogger);</span>
+        }
+<span class="nc" id="L120">    }</span>
+    @Override
+    public void setCheckpointer(Checkpointer checkpointer) {
+<span class="nc" id="L123">        interleavedLedgerStorage.setCheckpointer(checkpointer);</span>
+<span class="nc" id="L124">    }</span>
+
+    @VisibleForTesting
+    ScheduledExecutorService getScheduler() {
+<span class="nc" id="L128">        return scheduler;</span>
+    }
+
+    @Override
+    public void start() {
+        try {
+<span class="nc" id="L134">            flush();</span>
+<span class="nc" id="L135">        } catch (IOException e) {</span>
+<span class="nc" id="L136">            LOG.error(&quot;Exception thrown while flushing ledger cache.&quot;, e);</span>
+<span class="nc" id="L137">        }</span>
+<span class="nc" id="L138">        interleavedLedgerStorage.start();</span>
+<span class="nc" id="L139">    }</span>
+
+    @Override
+    public void shutdown() throws InterruptedException {
+        // Wait for any jobs currently scheduled to be completed and then shut down.
+<span class="nc" id="L144">        scheduler.shutdown();</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (!scheduler.awaitTermination(3, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L146">            scheduler.shutdownNow();</span>
+        }
+        try {
+<span class="nc" id="L149">            memTable.close();</span>
+<span class="nc" id="L150">        } catch (Exception e) {</span>
+<span class="nc" id="L151">            LOG.error(&quot;Error while closing the memtable&quot;, e);</span>
+<span class="nc" id="L152">        }</span>
+<span class="nc" id="L153">        interleavedLedgerStorage.shutdown();</span>
+<span class="nc" id="L154">    }</span>
+
+    @Override
+    public boolean ledgerExists(long ledgerId) throws IOException {
+        // Done this way because checking the skip list is an O(logN) operation compared to
+        // the O(1) for the ledgerCache.
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (!interleavedLedgerStorage.ledgerExists(ledgerId)) {</span>
+<span class="nc" id="L161">            EntryKeyValue kv = memTable.getLastEntry(ledgerId);</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            if (null == kv) {</span>
+<span class="nc" id="L163">                return interleavedLedgerStorage.ledgerExists(ledgerId);</span>
+            }
+        }
+<span class="nc" id="L166">        return true;</span>
+    }
+
+    @Override
+    public boolean entryExists(long ledgerId, long entryId) throws IOException {
+        // can probably be implemented as above, but I'm not going to test it
+<span class="nc" id="L172">        throw new UnsupportedOperationException(&quot;Not supported for SortedLedgerStorage&quot;);</span>
+    }
+
+    @Override
+    public boolean setFenced(long ledgerId) throws IOException {
+        // it return true if the ledger it wasnt already fenced, and the value now is changed
+        // otherwise it return false if the ledger was already fenced.
+<span class="nc" id="L179">        return interleavedLedgerStorage.setFenced(ledgerId);</span>
+    }
+
+    @Override
+    public boolean isFenced(long ledgerId) throws IOException {
+<span class="nc" id="L184">        return interleavedLedgerStorage.isFenced(ledgerId);</span>
+    }
+
+    @Override
+    public void setMasterKey(long ledgerId, byte[] masterKey) throws IOException {
+<span class="nc" id="L189">        interleavedLedgerStorage.setMasterKey(ledgerId, masterKey);</span>
+<span class="nc" id="L190">    }</span>
+
+    @Override
+    public byte[] readMasterKey(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L194">        return interleavedLedgerStorage.readMasterKey(ledgerId);</span>
+    }
+
+    @Override
+    public long addEntry(ByteBuf entry) throws IOException {
+<span class="fc" id="L199">        long ledgerId = entry.getLong(entry.readerIndex() + 0);</span>
+<span class="nc" id="L200">        long entryId = entry.getLong(entry.readerIndex() + 8);</span>
+<span class="nc" id="L201">        long lac = entry.getLong(entry.readerIndex() + 16);</span>
+
+<span class="nc" id="L203">        memTable.addEntry(ledgerId, entryId, entry.nioBuffer(), this);</span>
+<span class="nc" id="L204">        interleavedLedgerStorage.ledgerCache.updateLastAddConfirmed(ledgerId, lac);</span>
+<span class="nc" id="L205">        return entryId;</span>
+    }
+
+    /**
+     * Get the last entry id for a particular ledger.
+     * @param ledgerId
+     * @return
+     */
+    private ByteBuf getLastEntryId(long ledgerId) throws IOException {
+<span class="nc" id="L214">        EntryKeyValue kv = memTable.getLastEntry(ledgerId);</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        if (null != kv) {</span>
+<span class="nc" id="L216">            return kv.getValueAsByteBuffer();</span>
+        }
+        // If it doesn't exist in the skip list, then fallback to the ledger cache+index.
+<span class="nc" id="L219">        return interleavedLedgerStorage.getEntry(ledgerId, BookieProtocol.LAST_ADD_CONFIRMED);</span>
+    }
+
+    @Override
+    public ByteBuf getEntry(long ledgerId, long entryId) throws IOException, BookieException {
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (entryId == BookieProtocol.LAST_ADD_CONFIRMED) {</span>
+<span class="nc" id="L225">            return getLastEntryId(ledgerId);</span>
+        }
+        ByteBuf buffToRet;
+        try {
+<span class="nc" id="L229">            buffToRet = interleavedLedgerStorage.getEntry(ledgerId, entryId);</span>
+<span class="nc" id="L230">        } catch (Bookie.NoEntryException nee) {</span>
+<span class="nc" id="L231">            EntryKeyValue kv = memTable.getEntry(ledgerId, entryId);</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (null == kv) {</span>
+                // The entry might have been flushed since we last checked, so query the ledger cache again.
+                // If the entry truly doesn't exist, then this will throw a NoEntryException
+<span class="nc" id="L235">                buffToRet = interleavedLedgerStorage.getEntry(ledgerId, entryId);</span>
+            } else {
+<span class="nc" id="L237">                buffToRet = kv.getValueAsByteBuffer();</span>
+            }
+<span class="nc" id="L239">        }</span>
+        // buffToRet will not be null when we reach here.
+<span class="nc" id="L241">        return buffToRet;</span>
+    }
+
+    @Override
+    public long getLastAddConfirmed(long ledgerId) throws IOException {
+<span class="nc" id="L246">        return interleavedLedgerStorage.getLastAddConfirmed(ledgerId);</span>
+    }
+
+    @Override
+    public boolean waitForLastAddConfirmedUpdate(long ledgerId,
+                                                 long previousLAC,
+                                                 Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher)
+            throws IOException {
+<span class="nc" id="L254">        return interleavedLedgerStorage.waitForLastAddConfirmedUpdate(ledgerId, previousLAC, watcher);</span>
+    }
+
+    @Override
+    public void cancelWaitForLastAddConfirmedUpdate(long ledgerId,
+                                                    Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher)
+            throws IOException {
+<span class="nc" id="L261">        interleavedLedgerStorage.cancelWaitForLastAddConfirmedUpdate(ledgerId, watcher);</span>
+<span class="nc" id="L262">    }</span>
+
+    @Override
+    public void checkpoint(final Checkpoint checkpoint) throws IOException {
+<span class="nc" id="L266">        long numBytesFlushed = memTable.flush(this, checkpoint);</span>
+<span class="nc" id="L267">        interleavedLedgerStorage.getEntryLogger().prepareSortedLedgerStorageCheckpoint(numBytesFlushed);</span>
+<span class="nc" id="L268">        interleavedLedgerStorage.checkpoint(checkpoint);</span>
+<span class="nc" id="L269">    }</span>
+
+    @Override
+    public void deleteLedger(long ledgerId) throws IOException {
+<span class="nc" id="L273">        interleavedLedgerStorage.deleteLedger(ledgerId);</span>
+<span class="nc" id="L274">    }</span>
+
+    @Override
+    public void registerLedgerDeletionListener(LedgerDeletionListener listener) {
+<span class="nc" id="L278">        interleavedLedgerStorage.registerLedgerDeletionListener(listener);</span>
+<span class="nc" id="L279">    }</span>
+
+    @Override
+    public void setExplicitLac(long ledgerId, ByteBuf lac) throws IOException {
+<span class="nc" id="L283">        interleavedLedgerStorage.setExplicitLac(ledgerId, lac);</span>
+<span class="nc" id="L284">    }</span>
+
+    @Override
+    public ByteBuf getExplicitLac(long ledgerId) {
+<span class="nc" id="L288">        return interleavedLedgerStorage.getExplicitLac(ledgerId);</span>
+    }
+
+    @Override
+    public void process(long ledgerId, long entryId,
+                        ByteBuf buffer) throws IOException {
+<span class="nc" id="L294">        interleavedLedgerStorage.processEntry(ledgerId, entryId, buffer, false);</span>
+<span class="nc" id="L295">    }</span>
+
+    @Override
+    public void flush() throws IOException {
+<span class="nc" id="L299">        memTable.flush(this, Checkpoint.MAX);</span>
+<span class="nc" id="L300">        interleavedLedgerStorage.flush();</span>
+<span class="nc" id="L301">    }</span>
+
+    // CacheCallback functions.
+    @Override
+    public void onSizeLimitReached(final Checkpoint cp) throws IOException {
+<span class="nc" id="L306">        LOG.info(&quot;Reached size {}&quot;, cp);</span>
+        // when size limit reached, we get the previous checkpoint from snapshot mem-table.
+        // at this point, we are safer to schedule a checkpoint, since the entries added before
+        // this checkpoint already written to entry logger.
+        // but it would be better not to let mem-table flush to different entry log files,
+        // so we roll entry log files in SortedLedgerStorage itself.
+        // After that, we could make the process writing data to entry logger file not bound with checkpoint.
+        // otherwise, it hurts add performance.
+        //
+        // The only exception for the size limitation is if a file grows to be more than hard limit 2GB,
+        // we have to force rolling log, which it might cause slight performance effects
+<span class="nc" id="L317">        scheduler.execute(new Runnable() {</span>
+            @Override
+            public void run() {
+                try {
+<span class="nc" id="L321">                    LOG.info(&quot;Started flushing mem table.&quot;);</span>
+<span class="nc" id="L322">                    interleavedLedgerStorage.getEntryLogger().prepareEntryMemTableFlush();</span>
+<span class="nc" id="L323">                    memTable.flush(SortedLedgerStorage.this);</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                    if (interleavedLedgerStorage.getEntryLogger().commitEntryMemTableFlush()) {</span>
+<span class="nc" id="L325">                        interleavedLedgerStorage.checkpointer.startCheckpoint(cp);</span>
+                    }
+<span class="nc" id="L327">                } catch (Exception e) {</span>
+<span class="nc" id="L328">                    stateManager.transitionToReadOnlyMode();</span>
+<span class="nc" id="L329">                    LOG.error(&quot;Exception thrown while flushing skip list cache.&quot;, e);</span>
+<span class="nc" id="L330">                }</span>
+<span class="nc" id="L331">            }</span>
+        });
+<span class="nc" id="L333">    }</span>
+
+    @Override
+    public void onRotateEntryLog() {
+        // override the behavior at interleaved ledger storage.
+        // we don't trigger any checkpoint logic when an entry log file is rotated, because entry log file rotation
+        // can happen because compaction. in a sorted ledger storage, checkpoint should happen after the data is
+        // flushed to the entry log file.
+<span class="nc" id="L341">    }</span>
+
+    BookieStateManager getStateManager(){
+<span class="nc" id="L344">        return (BookieStateManager) stateManager;</span>
+    }
+
+    public DefaultEntryLogger getEntryLogger() {
+<span class="nc" id="L348">        return interleavedLedgerStorage.getEntryLogger();</span>
+    }
+
+    @Override
+    public Iterable&lt;Long&gt; getActiveLedgersInRange(long firstLedgerId, long lastLedgerId) throws IOException {
+<span class="nc" id="L353">        return interleavedLedgerStorage.getActiveLedgersInRange(firstLedgerId, lastLedgerId);</span>
+    }
+
+    @Override
+    public void updateEntriesLocations(Iterable&lt;EntryLocation&gt; locations) throws IOException {
+<span class="nc" id="L358">        interleavedLedgerStorage.updateEntriesLocations(locations);</span>
+<span class="nc" id="L359">    }</span>
+
+    @Override
+    public void flushEntriesLocationsIndex() throws IOException {
+<span class="nc" id="L363">        interleavedLedgerStorage.flushEntriesLocationsIndex();</span>
+<span class="nc" id="L364">    }</span>
+
+    @Override
+    public LedgerStorage getUnderlyingLedgerStorage() {
+<span class="nc" id="L368">        return interleavedLedgerStorage;</span>
+    }
+
+    @Override
+    public void forceGC() {
+<span class="nc" id="L373">        interleavedLedgerStorage.forceGC();</span>
+<span class="nc" id="L374">    }</span>
+
+    @Override
+    public void forceGC(boolean forceMajor, boolean forceMinor) {
+<span class="nc" id="L378">        interleavedLedgerStorage.forceGC(forceMajor, forceMinor);</span>
+<span class="nc" id="L379">    }</span>
+
+    @Override
+    public void suspendMinorGC() {
+<span class="nc" id="L383">        interleavedLedgerStorage.suspendMinorGC();</span>
+<span class="nc" id="L384">    }</span>
+
+    @Override
+    public void suspendMajorGC() {
+<span class="nc" id="L388">        interleavedLedgerStorage.suspendMajorGC();</span>
+<span class="nc" id="L389">    }</span>
+
+    @Override
+    public void resumeMinorGC() {
+<span class="nc" id="L393">        interleavedLedgerStorage.resumeMinorGC();</span>
+<span class="nc" id="L394">    }</span>
+
+    @Override
+    public void resumeMajorGC() {
+<span class="nc" id="L398">        interleavedLedgerStorage.resumeMajorGC();</span>
+<span class="nc" id="L399">    }</span>
+
+    @Override
+    public boolean isMajorGcSuspended() {
+<span class="nc" id="L403">        return interleavedLedgerStorage.isMajorGcSuspended();</span>
+    }
+
+    @Override
+    public boolean isMinorGcSuspended() {
+<span class="nc" id="L408">        return interleavedLedgerStorage.isMinorGcSuspended();</span>
+    }
+
+    @Override
+    public List&lt;DetectedInconsistency&gt; localConsistencyCheck(Optional&lt;RateLimiter&gt; rateLimiter) throws IOException {
+<span class="nc" id="L413">        return interleavedLedgerStorage.localConsistencyCheck(rateLimiter);</span>
+    }
+
+    @Override
+    public boolean isInForceGC() {
+<span class="nc" id="L418">        return interleavedLedgerStorage.isInForceGC();</span>
+    }
+
+    @Override
+    public List&lt;GarbageCollectionStatus&gt; getGarbageCollectionStatus() {
+<span class="nc" id="L423">        return interleavedLedgerStorage.getGarbageCollectionStatus();</span>
+    }
+
+    @Override
+    public PrimitiveIterator.OfLong getListOfEntriesOfLedger(long ledgerId) throws IOException {
+<span class="nc" id="L428">        PrimitiveIterator.OfLong entriesInMemtableItr = memTable.getListOfEntriesOfLedger(ledgerId);</span>
+<span class="nc" id="L429">        PrimitiveIterator.OfLong entriesFromILSItr = interleavedLedgerStorage.getListOfEntriesOfLedger(ledgerId);</span>
+<span class="nc" id="L430">        return IteratorUtility.mergePrimitiveLongIterator(entriesInMemtableItr, entriesFromILSItr);</span>
+    }
+
+    @Override
+    public void setLimboState(long ledgerId) throws IOException {
+<span class="nc" id="L435">        throw new UnsupportedOperationException(</span>
+                &quot;Limbo state only supported for DbLedgerStorage&quot;);
+    }
+
+    @Override
+    public boolean hasLimboState(long ledgerId) throws IOException {
+<span class="nc" id="L441">        throw new UnsupportedOperationException(</span>
+                &quot;Limbo state only supported for DbLedgerStorage&quot;);
+    }
+
+    @Override
+    public void clearLimboState(long ledgerId) throws IOException {
+<span class="nc" id="L447">        throw new UnsupportedOperationException(</span>
+                &quot;Limbo state only supported for DbLedgerStorage&quot;);
+    }
+
+    @Override
+    public EnumSet&lt;StorageState&gt; getStorageStateFlags() throws IOException {
+<span class="nc" id="L453">        return EnumSet.noneOf(StorageState.class);</span>
+    }
+
+    @Override
+    public void setStorageStateFlag(StorageState flags) throws IOException {
+<span class="nc" id="L458">        throw new UnsupportedOperationException(</span>
+                &quot;Storage state only flags supported for DbLedgerStorage&quot;);
+    }
+
+    @Override
+    public void clearStorageStateFlag(StorageState flags) throws IOException {
+<span class="nc" id="L464">        throw new UnsupportedOperationException(</span>
+                &quot;Storage state flags only supported for DbLedgerStorage&quot;);
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

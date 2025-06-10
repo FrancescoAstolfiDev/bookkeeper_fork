@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SanityTestCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookie</a> &gt; <span class="el_source">SanityTestCommand.java</span></div><h1>SanityTestCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.bookie;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import com.beust.jcommander.Parameter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.bookie.LocalBookieEnsemblePlacementPolicy;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.LedgerEntry;
+import org.apache.bookkeeper.client.LedgerHandle;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.tools.cli.commands.bookie.SanityTestCommand.SanityFlags;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A bookie command to sanity test for local bookie.
+ */
+public class SanityTestCommand extends BookieCommand&lt;SanityFlags&gt; {
+
+<span class="nc" id="L51">    private static final Logger LOG = LoggerFactory.getLogger(SanityTestCommand.class);</span>
+    private static final String NAME = &quot;sanitytest&quot;;
+    private static final String DESC = &quot;Sanity test for local bookie. &quot;
+                                           + &quot;Create ledger and write/reads entries on local bookie.&quot;;
+
+    public SanityTestCommand() {
+<span class="nc" id="L57">        this(new SanityFlags());</span>
+<span class="nc" id="L58">    }</span>
+
+    public SanityTestCommand(SanityFlags flags) {
+<span class="nc" id="L61">        super(CliSpec.&lt;SanityFlags&gt;newBuilder().withFlags(flags).withName(NAME).withDescription(DESC).build());</span>
+<span class="nc" id="L62">    }</span>
+
+    /**
+     * Flags for sanity command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L68">    @Setter</span>
+<span class="nc" id="L69">    public static class SanityFlags extends CliFlags{</span>
+
+<span class="nc" id="L71">        @Parameter(names = {&quot;-e&quot;, &quot;--entries&quot;}, description = &quot;Total entries to be added for the test (default 10)&quot;)</span>
+        private int entries = 10;
+
+<span class="nc" id="L74">        @Parameter(names = { &quot;-t&quot;,</span>
+            &quot;--timeout&quot; }, description = &quot;Timeout for write/read operations in seconds (default 1)&quot;)
+        private int timeout = 1;
+
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, SanityFlags cmdFlags) {
+        try {
+<span class="nc" id="L83">            return handle(conf, cmdFlags);</span>
+<span class="nc" id="L84">        } catch (Exception e) {</span>
+<span class="nc" id="L85">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    private static boolean handle(ServerConfiguration conf, SanityFlags cmdFlags) throws Exception {
+        try {
+<span class="nc" id="L91">            return handleAsync(conf, cmdFlags).get();</span>
+<span class="nc" id="L92">        } catch (Exception e) {</span>
+<span class="nc" id="L93">            LOG.warn(&quot;Error in bookie sanity test&quot;, e);</span>
+<span class="nc" id="L94">            return false;</span>
+        }
+    }
+
+    public static CompletableFuture&lt;Boolean&gt; handleAsync(ServerConfiguration conf, SanityFlags cmdFlags) {
+<span class="nc" id="L99">        CompletableFuture&lt;Boolean&gt; result = new CompletableFuture&lt;Boolean&gt;();</span>
+<span class="nc" id="L100">        ClientConfiguration clientConf = new ClientConfiguration();</span>
+<span class="nc" id="L101">        clientConf.addConfiguration(conf);</span>
+<span class="nc" id="L102">        clientConf.setEnsemblePlacementPolicy(LocalBookieEnsemblePlacementPolicy.class);</span>
+<span class="nc" id="L103">        clientConf.setAddEntryTimeout(cmdFlags.timeout);</span>
+<span class="nc" id="L104">        clientConf.setReadEntryTimeout(cmdFlags.timeout);</span>
+
+        BookKeeper bk;
+        try {
+<span class="nc" id="L108">            bk = new BookKeeper(clientConf);</span>
+<span class="nc" id="L109">        } catch (BKException | IOException | InterruptedException e) {</span>
+<span class="nc" id="L110">            LOG.warn(&quot;Failed to initialize bookkeeper client&quot;, e);</span>
+<span class="nc" id="L111">            result.completeExceptionally(e);</span>
+<span class="nc" id="L112">            return result;</span>
+<span class="nc" id="L113">        }</span>
+
+<span class="nc" id="L115">        bk.asyncCreateLedger(1, 1, BookKeeper.DigestType.MAC, new byte[0], (rc, lh, ctx) -&gt; {</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">            if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L117">                LOG.warn(&quot;ledger creation failed for sanity command {}&quot;, rc);</span>
+<span class="nc" id="L118">                result.completeExceptionally(BKException.create(rc));</span>
+<span class="nc" id="L119">                return;</span>
+            }
+<span class="nc" id="L121">            List&lt;CompletableFuture&lt;Void&gt;&gt; entriesFutures = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            for (int i = 0; i &lt; cmdFlags.entries; i++) {</span>
+<span class="nc" id="L123">                String content = &quot;entry-&quot; + i;</span>
+<span class="nc" id="L124">                CompletableFuture&lt;Void&gt; entryFuture = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L125">                entriesFutures.add(entryFuture);</span>
+<span class="nc" id="L126">                lh.asyncAddEntry(content.getBytes(UTF_8), (arc, alh, entryId, actx) -&gt; {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                    if (arc != BKException.Code.OK) {</span>
+<span class="nc" id="L128">                        LOG.warn(&quot;ledger add entry failed for {}-{}&quot;, alh.getId(), arc);</span>
+<span class="nc" id="L129">                        entryFuture.completeExceptionally(BKException.create(arc));</span>
+<span class="nc" id="L130">                        return;</span>
+                    }
+<span class="nc" id="L132">                    entryFuture.complete(null);</span>
+<span class="nc" id="L133">                }, null);</span>
+            }
+<span class="nc" id="L135">            CompletableFuture&lt;LedgerHandle&gt; lhFuture = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L136">            CompletableFuture&lt;Void&gt; readEntryFuture = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L137">            FutureUtils.collect(entriesFutures).thenCompose(_r -&gt; lh.closeAsync()).thenCompose(_r -&gt; {</span>
+<span class="nc" id="L138">                bk.asyncOpenLedger(lh.getId(), BookKeeper.DigestType.MAC, new byte[0], (orc, olh, octx) -&gt; {</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                    if (orc != BKException.Code.OK) {</span>
+<span class="nc" id="L140">                        LOG.warn(&quot;open sanity ledger failed for {}-{}&quot;, lh.getId(), orc);</span>
+<span class="nc" id="L141">                        lhFuture.completeExceptionally(BKException.create(orc));</span>
+<span class="nc" id="L142">                        return;</span>
+                    }
+<span class="nc" id="L144">                    long lac = olh.getLastAddConfirmed();</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                    if (lac != (cmdFlags.entries - 1)) {</span>
+<span class="nc" id="L146">                        lhFuture.completeExceptionally(new Exception(&quot;Invalid last entry found on ledger. expecting: &quot;</span>
+<span class="nc" id="L147">                                + (cmdFlags.entries - 1) + &quot; -- found: &quot; + lac));</span>
+<span class="nc" id="L148">                        return;</span>
+                    }
+<span class="nc" id="L150">                    lhFuture.complete(lh);</span>
+<span class="nc" id="L151">                }, null);</span>
+<span class="nc" id="L152">                return lhFuture;</span>
+<span class="nc" id="L153">            }).thenCompose(rlh -&gt; {</span>
+<span class="nc" id="L154">                rlh.asyncReadEntries(0, cmdFlags.entries - 1, (rrc, rlh2, entries, rctx) -&gt; {</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                    if (rrc != BKException.Code.OK) {</span>
+<span class="nc" id="L156">                        LOG.warn(&quot;reading sanity ledger failed for {}-{}&quot;, lh.getId(), rrc);</span>
+<span class="nc" id="L157">                        readEntryFuture.completeExceptionally(BKException.create(rrc));</span>
+<span class="nc" id="L158">                        return;</span>
+                    }
+<span class="nc" id="L160">                    int i = 0;</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                    while (entries.hasMoreElements()) {</span>
+<span class="nc" id="L162">                        LedgerEntry entry = entries.nextElement();</span>
+<span class="nc" id="L163">                        String actualMsg = new String(entry.getEntry(), UTF_8);</span>
+<span class="nc" id="L164">                        String expectedMsg = &quot;entry-&quot; + (i++);</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                        if (!expectedMsg.equals(actualMsg)) {</span>
+<span class="nc" id="L166">                            readEntryFuture.completeExceptionally(</span>
+                                    new Exception(&quot;Failed validation of received message - Expected: &quot; + expectedMsg
+                                            + &quot;, Actual: &quot; + actualMsg));
+<span class="nc" id="L169">                            return;</span>
+                        }
+<span class="nc" id="L171">                    }</span>
+<span class="nc" id="L172">                    LOG.info(&quot;Read {} entries from ledger {}&quot;, i, lh.getId());</span>
+<span class="nc" id="L173">                    LOG.info(&quot;Bookie sanity test succeeded&quot;);</span>
+<span class="nc" id="L174">                    readEntryFuture.complete(null);</span>
+<span class="nc" id="L175">                }, null);</span>
+<span class="nc" id="L176">                return readEntryFuture;</span>
+<span class="nc" id="L177">            }).thenAccept(_r -&gt; {</span>
+<span class="nc" id="L178">                close(bk, lh);</span>
+<span class="nc" id="L179">                result.complete(true);</span>
+<span class="nc" id="L180">            }).exceptionally(ex -&gt; {</span>
+<span class="nc" id="L181">                close(bk, lh);</span>
+<span class="nc" id="L182">                result.completeExceptionally(ex.getCause());</span>
+<span class="nc" id="L183">                return null;</span>
+            });
+<span class="nc" id="L185">        }, null);</span>
+<span class="nc" id="L186">        return result;</span>
+    }
+
+    public static void close(BookKeeper bk, LedgerHandle lh) {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (lh != null) {</span>
+<span class="nc" id="L191">            bk.asyncDeleteLedger(lh.getId(), (rc, ctx) -&gt; {</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">                if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L193">                    LOG.info(&quot;Failed to delete ledger id {}&quot;, lh.getId());</span>
+                }
+<span class="nc" id="L195">                close(bk);</span>
+<span class="nc" id="L196">            }, null);</span>
+        } else {
+<span class="nc" id="L198">            close(bk);</span>
+        }
+<span class="nc" id="L200">    }</span>
+
+    private static void close(BookKeeper bk) {
+        try {
+<span class="nc" id="L204">            bk.close();</span>
+<span class="nc" id="L205">        } catch (Exception e) {</span>
+<span class="nc" id="L206">            LOG.info(&quot;Failed to close bookkeeper client {}&quot;, e.getMessage(), e);</span>
+<span class="nc" id="L207">        }</span>
+<span class="nc" id="L208">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

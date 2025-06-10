@@ -1,0 +1,1127 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ByteBufVisitor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.util</a> &gt; <span class="el_source">ByteBufVisitor.java</span></div><h1>ByteBufVisitor.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.util;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.util.ByteProcessor;
+import io.netty.util.concurrent.FastThreadLocal;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
+import java.nio.channels.GatheringByteChannel;
+import java.nio.channels.ScatteringByteChannel;
+import java.nio.charset.Charset;
+
+/**
+ * This class visits the possible wrapped child buffers of a Netty {@link ByteBuf} for a given offset and length.
+ * &lt;p&gt;
+ * The Netty ByteBuf API does not provide a method to visit the wrapped child buffers. The
+ * {@link ByteBuf#unwrap()} method is not suitable for this purpose as it loses the
+ * {@link ByteBuf#readerIndex()} state, resulting in incorrect offset and length information.
+ * &lt;p&gt;
+ * Despite Netty not having a public API for visiting the sub buffers, it is possible to achieve this using
+ * the {@link ByteBuf#getBytes(int, ByteBuf, int, int)} method. This class uses this method to visit the
+ * wrapped child buffers by providing a suitable {@link ByteBuf} implementation. This implementation supports
+ * the role of the destination buffer for the getBytes call. It requires implementing the
+ * {@link ByteBuf#setBytes(int, ByteBuf, int, int)} and {@link ByteBuf#setBytes(int, byte[], int, int)} methods
+ * and other methods required by getBytes such as {@link ByteBuf#hasArray()}, {@link ByteBuf#hasMemoryAddress()},
+ * {@link ByteBuf#nioBufferCount()} and {@link ByteBuf#capacity()}.
+ * All other methods in the internal ByteBuf implementation are not supported and will throw an exception.
+ * This is to ensure correctness and to fail fast if some ByteBuf implementation is not following the expected
+ * and supported interface contract.
+ */
+public class ByteBufVisitor {
+    private static final int DEFAULT_VISIT_MAX_DEPTH = 10;
+
+    private ByteBufVisitor() {
+        // prevent instantiation
+    }
+
+    /**
+     * This method traverses the potential nested composite buffers of the provided buffer, given a specific offset and
+     * length. The traversal continues until it encounters a buffer that is backed by an array or a memory address,
+     * which allows for the inspection of individual buffer segments without the need for data duplication.
+     * If no such wrapped buffer is found, the callback function is invoked with the original buffer, offset,
+     * and length as parameters.
+     *
+     * @param buffer   the buffer to visit
+     * @param offset   the offset for the buffer
+     * @param length   the length for the buffer
+     * @param callback the callback to call for each visited buffer
+     * @param context  the context to pass to the callback
+     */
+    public static &lt;T&gt; void visitBuffers(ByteBuf buffer, int offset, int length, ByteBufVisitorCallback&lt;T&gt; callback,
+                                        T context) {
+<span class="nc" id="L74">        visitBuffers(buffer, offset, length, callback, context, DEFAULT_VISIT_MAX_DEPTH);</span>
+<span class="nc" id="L75">    }</span>
+
+    /**
+     * The callback interface for visiting buffers.
+     * In case of a heap buffer that is backed by an byte[] array, the visitArray method is called. This
+     * is due to the internal implementation detail of the {@link ByteBuf#getBytes(int, ByteBuf, int, int)}
+     * method for heap buffers.
+     */
+    public interface ByteBufVisitorCallback&lt;T&gt; {
+        void visitBuffer(T context, ByteBuf visitBuffer, int visitIndex, int visitLength);
+        void visitArray(T context, byte[] visitArray, int visitIndex, int visitLength);
+        default boolean preferArrayOrMemoryAddress(T context) {
+<span class="nc" id="L87">            return true;</span>
+        }
+        default boolean acceptsMemoryAddress(T context) {
+<span class="nc" id="L90">            return false;</span>
+        }
+    }
+
+    /**
+     * See @{@link #visitBuffers(ByteBuf, int, int, ByteBufVisitorCallback, Object)}. This method
+     * allows to specify the maximum depth of recursion for visiting wrapped buffers.
+     */
+    public static &lt;T&gt; void visitBuffers(ByteBuf buffer, int offset, int length, ByteBufVisitorCallback&lt;T&gt; callback,
+                                        T context, int maxDepth) {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (length == 0) {</span>
+            // skip visiting empty buffers
+<span class="nc" id="L102">            return;</span>
+        }
+<span class="nc" id="L104">        InternalContext&lt;T&gt; internalContext = new InternalContext&lt;&gt;();</span>
+<span class="nc" id="L105">        internalContext.maxDepth = maxDepth;</span>
+<span class="nc" id="L106">        internalContext.callbackContext = context;</span>
+<span class="nc" id="L107">        internalContext.callback = callback;</span>
+<span class="nc" id="L108">        internalContext.recursivelyVisitBuffers(buffer, offset, length);</span>
+<span class="nc" id="L109">    }</span>
+
+    private static final int TL_COPY_BUFFER_SIZE = 64 * 1024;
+<span class="nc" id="L112">    private static final FastThreadLocal&lt;byte[]&gt; TL_COPY_BUFFER = new FastThreadLocal&lt;byte[]&gt;() {</span>
+        @Override
+        protected byte[] initialValue() {
+<span class="nc" id="L115">            return new byte[TL_COPY_BUFFER_SIZE];</span>
+        }
+    };
+
+<span class="nc" id="L119">    private static class InternalContext&lt;T&gt; {</span>
+        int depth;
+        int maxDepth;
+        ByteBuf parentBuffer;
+        int parentOffset;
+        int parentLength;
+        T callbackContext;
+        ByteBufVisitorCallback&lt;T&gt; callback;
+<span class="nc" id="L127">        GetBytesCallbackByteBuf&lt;T&gt; callbackByteBuf = new GetBytesCallbackByteBuf(this);</span>
+
+        void recursivelyVisitBuffers(ByteBuf visitBuffer, int visitIndex, int visitLength) {
+            // visit the wrapped buffers recursively if the buffer is not backed by an array or memory address
+            // and the max depth has not been reached
+<span class="nc bnc" id="L132" title="All 6 branches missed.">            if (depth &lt; maxDepth &amp;&amp; !visitBuffer.hasMemoryAddress() &amp;&amp; !visitBuffer.hasArray()) {</span>
+<span class="nc" id="L133">                parentBuffer = visitBuffer;</span>
+<span class="nc" id="L134">                parentOffset = visitIndex;</span>
+<span class="nc" id="L135">                parentLength = visitLength;</span>
+<span class="nc" id="L136">                depth++;</span>
+                // call getBytes to trigger the wrapped buffer visit
+<span class="nc" id="L138">                visitBuffer.getBytes(visitIndex, callbackByteBuf, 0, visitLength);</span>
+<span class="nc" id="L139">                depth--;</span>
+            } else {
+<span class="nc" id="L141">                passBufferToCallback(visitBuffer, visitIndex, visitLength);</span>
+            }
+<span class="nc" id="L143">        }</span>
+
+        void handleBuffer(ByteBuf visitBuffer, int visitIndex, int visitLength) {
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            if (visitLength == 0) {</span>
+                // skip visiting empty buffers
+<span class="nc" id="L148">                return;</span>
+            }
+<span class="nc bnc" id="L150" title="All 6 branches missed.">            if (visitBuffer == parentBuffer &amp;&amp; visitIndex == parentOffset &amp;&amp; visitLength == parentLength) {</span>
+                // further recursion would cause unnecessary recursion up to the max depth of recursion
+<span class="nc" id="L152">                passBufferToCallback(visitBuffer, visitIndex, visitLength);</span>
+            } else {
+                // use the doRecursivelyVisitBuffers method to visit the wrapped buffer, possibly recursively
+<span class="nc" id="L155">                recursivelyVisitBuffers(visitBuffer, visitIndex, visitLength);</span>
+            }
+<span class="nc" id="L157">        }</span>
+
+        private void passBufferToCallback(ByteBuf visitBuffer, int visitIndex, int visitLength) {
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (callback.preferArrayOrMemoryAddress(callbackContext)) {</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if (visitBuffer.hasArray()) {</span>
+<span class="nc" id="L162">                    handleArray(visitBuffer.array(), visitBuffer.arrayOffset() + visitIndex, visitLength);</span>
+<span class="nc bnc" id="L163" title="All 4 branches missed.">                } else if (visitBuffer.hasMemoryAddress() &amp;&amp; callback.acceptsMemoryAddress(callbackContext)) {</span>
+<span class="nc" id="L164">                    callback.visitBuffer(callbackContext, visitBuffer, visitIndex, visitLength);</span>
+                } else {
+                    // fallback to reading the visited buffer into the copy buffer in a loop
+<span class="nc" id="L167">                    byte[] copyBuffer = TL_COPY_BUFFER.get();</span>
+<span class="nc" id="L168">                    int remaining = visitLength;</span>
+<span class="nc" id="L169">                    int currentOffset = visitIndex;</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                    while (remaining &gt; 0) {</span>
+<span class="nc" id="L171">                        int readLen = Math.min(remaining, copyBuffer.length);</span>
+<span class="nc" id="L172">                        visitBuffer.getBytes(currentOffset, copyBuffer, 0, readLen);</span>
+<span class="nc" id="L173">                        handleArray(copyBuffer, 0, readLen);</span>
+<span class="nc" id="L174">                        remaining -= readLen;</span>
+<span class="nc" id="L175">                        currentOffset += readLen;</span>
+<span class="nc" id="L176">                    }</span>
+<span class="nc" id="L177">                }</span>
+            } else {
+<span class="nc" id="L179">                callback.visitBuffer(callbackContext, visitBuffer, visitIndex, visitLength);</span>
+            }
+<span class="nc" id="L181">        }</span>
+
+        void handleArray(byte[] visitArray, int visitIndex, int visitLength) {
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            if (visitLength == 0) {</span>
+                // skip visiting empty arrays
+<span class="nc" id="L186">                return;</span>
+            }
+            // pass array to callback
+<span class="nc" id="L189">            callback.visitArray(callbackContext, visitArray, visitIndex, visitLength);</span>
+<span class="nc" id="L190">        }</span>
+    }
+
+    /**
+     * A ByteBuf implementation that can be used as the destination buffer for
+     * a {@link ByteBuf#getBytes(int, ByteBuf)} for visiting the wrapped child buffers.
+     */
+    static class GetBytesCallbackByteBuf&lt;T&gt; extends ByteBuf {
+        private final InternalContext&lt;T&gt; internalContext;
+
+<span class="nc" id="L200">        GetBytesCallbackByteBuf(InternalContext&lt;T&gt; internalContext) {</span>
+<span class="nc" id="L201">            this.internalContext = internalContext;</span>
+<span class="nc" id="L202">        }</span>
+
+        @Override
+        public ByteBuf setBytes(int index, ByteBuf src, int srcIndex, int length) {
+<span class="nc" id="L206">            internalContext.handleBuffer(src, srcIndex, length);</span>
+<span class="nc" id="L207">            return this;</span>
+        }
+
+        @Override
+        public ByteBuf setBytes(int index, byte[] src, int srcIndex, int length) {
+<span class="nc" id="L212">            internalContext.handleArray(src, srcIndex, length);</span>
+<span class="nc" id="L213">            return this;</span>
+        }
+
+        @Override
+        public boolean hasArray() {
+            // return false so that the wrapped buffer is visited
+<span class="nc" id="L219">            return false;</span>
+        }
+
+        @Override
+        public boolean hasMemoryAddress() {
+            // return false so that the wrapped buffer is visited
+<span class="nc" id="L225">            return false;</span>
+        }
+
+        @Override
+        public int nioBufferCount() {
+            // return 0 so that the wrapped buffer is visited
+<span class="nc" id="L231">            return 0;</span>
+        }
+
+        @Override
+        public int capacity() {
+            // should return sufficient capacity for the total length
+<span class="nc" id="L237">            return Integer.MAX_VALUE;</span>
+        }
+
+        @Override
+        public ByteBuf capacity(int newCapacity) {
+<span class="nc" id="L242">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int maxCapacity() {
+<span class="nc" id="L247">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBufAllocator alloc() {
+<span class="nc" id="L252">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteOrder order() {
+<span class="nc" id="L257">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf order(ByteOrder endianness) {
+<span class="nc" id="L262">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf unwrap() {
+<span class="nc" id="L267">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean isDirect() {
+<span class="nc" id="L272">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean isReadOnly() {
+<span class="nc" id="L277">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf asReadOnly() {
+<span class="nc" id="L282">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readerIndex() {
+<span class="nc" id="L287">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readerIndex(int readerIndex) {
+<span class="nc" id="L292">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int writerIndex() {
+<span class="nc" id="L297">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writerIndex(int writerIndex) {
+<span class="nc" id="L302">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setIndex(int readerIndex, int writerIndex) {
+<span class="nc" id="L307">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readableBytes() {
+<span class="nc" id="L312">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int writableBytes() {
+<span class="nc" id="L317">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int maxWritableBytes() {
+<span class="nc" id="L322">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean isReadable() {
+<span class="nc" id="L327">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean isReadable(int size) {
+<span class="nc" id="L332">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean isWritable() {
+<span class="nc" id="L337">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean isWritable(int size) {
+<span class="nc" id="L342">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf clear() {
+<span class="nc" id="L347">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf markReaderIndex() {
+<span class="nc" id="L352">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf resetReaderIndex() {
+<span class="nc" id="L357">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf markWriterIndex() {
+<span class="nc" id="L362">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf resetWriterIndex() {
+<span class="nc" id="L367">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf discardReadBytes() {
+<span class="nc" id="L372">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf discardSomeReadBytes() {
+<span class="nc" id="L377">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf ensureWritable(int minWritableBytes) {
+<span class="nc" id="L382">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int ensureWritable(int minWritableBytes, boolean force) {
+<span class="nc" id="L387">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean getBoolean(int index) {
+<span class="nc" id="L392">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public byte getByte(int index) {
+<span class="nc" id="L397">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public short getUnsignedByte(int index) {
+<span class="nc" id="L402">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public short getShort(int index) {
+<span class="nc" id="L407">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public short getShortLE(int index) {
+<span class="nc" id="L412">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getUnsignedShort(int index) {
+<span class="nc" id="L417">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getUnsignedShortLE(int index) {
+<span class="nc" id="L422">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getMedium(int index) {
+<span class="nc" id="L427">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getMediumLE(int index) {
+<span class="nc" id="L432">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getUnsignedMedium(int index) {
+<span class="nc" id="L437">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getUnsignedMediumLE(int index) {
+<span class="nc" id="L442">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getInt(int index) {
+<span class="nc" id="L447">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getIntLE(int index) {
+<span class="nc" id="L452">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long getUnsignedInt(int index) {
+<span class="nc" id="L457">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long getUnsignedIntLE(int index) {
+<span class="nc" id="L462">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long getLong(int index) {
+<span class="nc" id="L467">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long getLongLE(int index) {
+<span class="nc" id="L472">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public char getChar(int index) {
+<span class="nc" id="L477">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public float getFloat(int index) {
+<span class="nc" id="L482">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public double getDouble(int index) {
+<span class="nc" id="L487">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf getBytes(int index, ByteBuf dst) {
+<span class="nc" id="L492">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf getBytes(int index, ByteBuf dst, int length) {
+<span class="nc" id="L497">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf getBytes(int index, ByteBuf dst, int dstIndex, int length) {
+<span class="nc" id="L502">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf getBytes(int index, byte[] dst) {
+<span class="nc" id="L507">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf getBytes(int index, byte[] dst, int dstIndex, int length) {
+<span class="nc" id="L512">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf getBytes(int index, ByteBuffer dst) {
+<span class="nc" id="L517">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf getBytes(int index, OutputStream out, int length) throws IOException {
+<span class="nc" id="L522">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getBytes(int index, GatheringByteChannel out, int length) throws IOException {
+<span class="nc" id="L527">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int getBytes(int index, FileChannel out, long position, int length) throws IOException {
+<span class="nc" id="L532">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public CharSequence getCharSequence(int index, int length, Charset charset) {
+<span class="nc" id="L537">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setBoolean(int index, boolean value) {
+<span class="nc" id="L542">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setByte(int index, int value) {
+<span class="nc" id="L547">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setShort(int index, int value) {
+<span class="nc" id="L552">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setShortLE(int index, int value) {
+<span class="nc" id="L557">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setMedium(int index, int value) {
+<span class="nc" id="L562">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setMediumLE(int index, int value) {
+<span class="nc" id="L567">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setInt(int index, int value) {
+<span class="nc" id="L572">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setIntLE(int index, int value) {
+<span class="nc" id="L577">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setLong(int index, long value) {
+<span class="nc" id="L582">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setLongLE(int index, long value) {
+<span class="nc" id="L587">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setChar(int index, int value) {
+<span class="nc" id="L592">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setFloat(int index, float value) {
+<span class="nc" id="L597">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setDouble(int index, double value) {
+<span class="nc" id="L602">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setBytes(int index, ByteBuf src) {
+<span class="nc" id="L607">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setBytes(int index, ByteBuf src, int length) {
+<span class="nc" id="L612">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setBytes(int index, byte[] src) {
+<span class="nc" id="L617">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setBytes(int index, ByteBuffer src) {
+<span class="nc" id="L622">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int setBytes(int index, InputStream in, int length) throws IOException {
+<span class="nc" id="L627">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int setBytes(int index, ScatteringByteChannel in, int length) throws IOException {
+<span class="nc" id="L632">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int setBytes(int index, FileChannel in, long position, int length) throws IOException {
+<span class="nc" id="L637">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf setZero(int index, int length) {
+<span class="nc" id="L642">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int setCharSequence(int index, CharSequence sequence, Charset charset) {
+<span class="nc" id="L647">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean readBoolean() {
+<span class="nc" id="L652">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public byte readByte() {
+<span class="nc" id="L657">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public short readUnsignedByte() {
+<span class="nc" id="L662">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public short readShort() {
+<span class="nc" id="L667">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public short readShortLE() {
+<span class="nc" id="L672">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readUnsignedShort() {
+<span class="nc" id="L677">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readUnsignedShortLE() {
+<span class="nc" id="L682">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readMedium() {
+<span class="nc" id="L687">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readMediumLE() {
+<span class="nc" id="L692">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readUnsignedMedium() {
+<span class="nc" id="L697">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readUnsignedMediumLE() {
+<span class="nc" id="L702">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readInt() {
+<span class="nc" id="L707">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readIntLE() {
+<span class="nc" id="L712">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long readUnsignedInt() {
+<span class="nc" id="L717">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long readUnsignedIntLE() {
+<span class="nc" id="L722">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long readLong() {
+<span class="nc" id="L727">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public long readLongLE() {
+<span class="nc" id="L732">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public char readChar() {
+<span class="nc" id="L737">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public float readFloat() {
+<span class="nc" id="L742">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public double readDouble() {
+<span class="nc" id="L747">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(int length) {
+<span class="nc" id="L752">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readSlice(int length) {
+<span class="nc" id="L757">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readRetainedSlice(int length) {
+<span class="nc" id="L762">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(ByteBuf dst) {
+<span class="nc" id="L767">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(ByteBuf dst, int length) {
+<span class="nc" id="L772">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(ByteBuf dst, int dstIndex, int length) {
+<span class="nc" id="L777">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(byte[] dst) {
+<span class="nc" id="L782">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(byte[] dst, int dstIndex, int length) {
+<span class="nc" id="L787">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(ByteBuffer dst) {
+<span class="nc" id="L792">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf readBytes(OutputStream out, int length) throws IOException {
+<span class="nc" id="L797">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readBytes(GatheringByteChannel out, int length) throws IOException {
+<span class="nc" id="L802">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public CharSequence readCharSequence(int length, Charset charset) {
+<span class="nc" id="L807">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int readBytes(FileChannel out, long position, int length) throws IOException {
+<span class="nc" id="L812">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf skipBytes(int length) {
+<span class="nc" id="L817">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeBoolean(boolean value) {
+<span class="nc" id="L822">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeByte(int value) {
+<span class="nc" id="L827">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeShort(int value) {
+<span class="nc" id="L832">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeShortLE(int value) {
+<span class="nc" id="L837">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeMedium(int value) {
+<span class="nc" id="L842">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeMediumLE(int value) {
+<span class="nc" id="L847">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeInt(int value) {
+<span class="nc" id="L852">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeIntLE(int value) {
+<span class="nc" id="L857">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeLong(long value) {
+<span class="nc" id="L862">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeLongLE(long value) {
+<span class="nc" id="L867">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeChar(int value) {
+<span class="nc" id="L872">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeFloat(float value) {
+<span class="nc" id="L877">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeDouble(double value) {
+<span class="nc" id="L882">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeBytes(ByteBuf src) {
+<span class="nc" id="L887">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeBytes(ByteBuf src, int length) {
+<span class="nc" id="L892">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeBytes(ByteBuf src, int srcIndex, int length) {
+<span class="nc" id="L897">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeBytes(byte[] src) {
+<span class="nc" id="L902">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeBytes(byte[] src, int srcIndex, int length) {
+<span class="nc" id="L907">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeBytes(ByteBuffer src) {
+<span class="nc" id="L912">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int writeBytes(InputStream in, int length) throws IOException {
+<span class="nc" id="L917">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int writeBytes(ScatteringByteChannel in, int length) throws IOException {
+<span class="nc" id="L922">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int writeBytes(FileChannel in, long position, int length) throws IOException {
+<span class="nc" id="L927">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf writeZero(int length) {
+<span class="nc" id="L932">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int writeCharSequence(CharSequence sequence, Charset charset) {
+<span class="nc" id="L937">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int indexOf(int fromIndex, int toIndex, byte value) {
+<span class="nc" id="L942">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int bytesBefore(byte value) {
+<span class="nc" id="L947">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int bytesBefore(int length, byte value) {
+<span class="nc" id="L952">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int bytesBefore(int index, int length, byte value) {
+<span class="nc" id="L957">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int forEachByte(ByteProcessor processor) {
+<span class="nc" id="L962">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int forEachByte(int index, int length, ByteProcessor processor) {
+<span class="nc" id="L967">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int forEachByteDesc(ByteProcessor processor) {
+<span class="nc" id="L972">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int forEachByteDesc(int index, int length, ByteProcessor processor) {
+<span class="nc" id="L977">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf copy() {
+<span class="nc" id="L982">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf copy(int index, int length) {
+<span class="nc" id="L987">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf slice() {
+<span class="nc" id="L992">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf retainedSlice() {
+<span class="nc" id="L997">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf slice(int index, int length) {
+<span class="nc" id="L1002">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf retainedSlice(int index, int length) {
+<span class="nc" id="L1007">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf duplicate() {
+<span class="nc" id="L1012">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf retainedDuplicate() {
+<span class="nc" id="L1017">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuffer nioBuffer() {
+<span class="nc" id="L1022">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuffer nioBuffer(int index, int length) {
+<span class="nc" id="L1027">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuffer internalNioBuffer(int index, int length) {
+<span class="nc" id="L1032">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuffer[] nioBuffers() {
+<span class="nc" id="L1037">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuffer[] nioBuffers(int index, int length) {
+<span class="nc" id="L1042">            throw new UnsupportedOperationException();</span>
+        }
+
+
+        @Override
+        public byte[] array() {
+<span class="nc" id="L1048">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int arrayOffset() {
+<span class="nc" id="L1053">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public long memoryAddress() {
+<span class="nc" id="L1057">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public String toString(Charset charset) {
+<span class="nc" id="L1062">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public String toString(int index, int length, Charset charset) {
+<span class="nc" id="L1067">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int compareTo(ByteBuf buffer) {
+<span class="nc" id="L1072">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf retain(int increment) {
+<span class="nc" id="L1077">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public int refCnt() {
+<span class="nc" id="L1082">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf retain() {
+<span class="nc" id="L1087">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf touch() {
+<span class="nc" id="L1092">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public ByteBuf touch(Object hint) {
+<span class="nc" id="L1097">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean release() {
+<span class="nc" id="L1102">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public boolean release(int decrement) {
+<span class="nc" id="L1107">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L1112">            return getClass().getSimpleName() + '@' + Integer.toHexString(System.identityHashCode(this));</span>
+        }
+
+        @Override
+        public int hashCode() {
+<span class="nc" id="L1117">            return System.identityHashCode(this);</span>
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+<span class="nc bnc" id="L1122" title="All 2 branches missed.">            return obj == this;</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

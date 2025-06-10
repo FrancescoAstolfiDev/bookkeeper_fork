@@ -1,0 +1,525 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Cookie.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">Cookie.java</span></div><h1>Cookie.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import com.google.common.base.Joiner;
+import com.google.common.collect.Sets;
+import com.google.protobuf.TextFormat;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.EOFException;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.StringReader;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.util.Objects;
+import java.util.Set;
+import org.apache.bookkeeper.bookie.BookieException.InvalidCookieException;
+import org.apache.bookkeeper.bookie.BookieException.UnknownBookieIdException;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.DataFormats.CookieFormat;
+import org.apache.bookkeeper.util.BookKeeperConstants;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * When a bookie starts for the first time it generates  a cookie, and stores
+ * the cookie in registration manager as well as in the each of the local filesystem
+ * directories it uses. This cookie is used to ensure that for the life of the
+ * bookie, its configuration stays the same. If any of the bookie directories
+ * becomes unavailable, the bookie becomes unavailable. If the bookie changes
+ * port, it must also reset all of its data.
+ * This is done to ensure data integrity. Without the cookie a bookie could
+ * start with one of its ledger directories missing, so data would be missing,
+ * but the bookie would be up, so the client would think that everything is ok
+ * with the cluster. It's better to fail early and obviously.
+ */
+public class Cookie {
+<span class="nc" id="L70">    private static final Logger LOG = LoggerFactory.getLogger(Cookie.class);</span>
+
+    static final int CURRENT_COOKIE_LAYOUT_VERSION = 5;
+    private final int layoutVersion;
+    private final String bookieId;
+    private final String journalDirs;
+    private final String ledgerDirs;
+    private final String indexDirs;
+    private final String instanceId;
+    private static final String SEPARATOR = &quot;\t&quot;;
+
+    private Cookie(int layoutVersion, String bookieId, String journalDirs, String ledgerDirs, String instanceId,
+<span class="nc" id="L82">                   String indexDirs) {</span>
+<span class="nc" id="L83">        this.layoutVersion = layoutVersion;</span>
+<span class="nc" id="L84">        this.bookieId = bookieId;</span>
+<span class="nc" id="L85">        this.journalDirs = journalDirs;</span>
+<span class="nc" id="L86">        this.ledgerDirs = ledgerDirs;</span>
+<span class="nc" id="L87">        this.instanceId = instanceId;</span>
+<span class="nc" id="L88">        this.indexDirs = indexDirs;</span>
+<span class="nc" id="L89">    }</span>
+
+    public static String encodeDirPaths(String[] dirs) {
+<span class="nc" id="L92">        StringBuilder b = new StringBuilder();</span>
+<span class="nc" id="L93">        b.append(dirs.length);</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        for (String d : dirs) {</span>
+<span class="nc" id="L95">            b.append(SEPARATOR).append(d);</span>
+        }
+<span class="nc" id="L97">        return b.toString();</span>
+    }
+
+    private static String[] decodeDirPathFromCookie(String s) {
+        // the first part of the string contains a count of how many
+        // directories are present; to skip it, we look for subString
+        // from the first '/'
+<span class="nc" id="L104">        return s.substring(s.indexOf(SEPARATOR) + SEPARATOR.length()).split(SEPARATOR);</span>
+    }
+
+    String[] getLedgerDirPathsFromCookie() {
+<span class="nc" id="L108">        return decodeDirPathFromCookie(ledgerDirs);</span>
+    }
+
+    String[] getIndexDirPathsFromCookie() {
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (null == indexDirs) {</span>
+<span class="nc" id="L113">            return null;</span>
+        }
+<span class="nc" id="L115">        return decodeDirPathFromCookie(indexDirs);</span>
+    }
+
+    /**
+     * Receives 2 String arrays, that each contain a list of directory paths,
+     * and checks if first is a super set of the second.
+     *
+     * @param superS
+     * @param subS
+     * @return true if superS is a superSet of subS; false otherwise
+     */
+    private boolean isSuperSet(String[] superS, String[] subS) {
+<span class="nc" id="L127">        Set&lt;String&gt; superSet = Sets.newHashSet(superS);</span>
+<span class="nc" id="L128">        Set&lt;String&gt; subSet = Sets.newHashSet(subS);</span>
+<span class="nc" id="L129">        return superSet.containsAll(subSet);</span>
+    }
+
+    private boolean verifyLedgerDirs(Cookie c, boolean checkIfSuperSet) {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (!checkIfSuperSet) {</span>
+<span class="nc" id="L134">            return ledgerDirs.equals(c.ledgerDirs);</span>
+        } else {
+<span class="nc" id="L136">            return isSuperSet(decodeDirPathFromCookie(ledgerDirs), decodeDirPathFromCookie(c.ledgerDirs));</span>
+        }
+    }
+
+    private boolean verifyIndexDirs(Cookie c, boolean checkIfSuperSet) {
+        // compatible logic:  existed node's cookie has no indexDirs, the indexDirs's default value is ledgerDirs.
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        String indexDirsInConfig = StringUtils.isNotBlank(indexDirs) ? indexDirs : ledgerDirs;</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        String indexDirsInCookie = StringUtils.isNotBlank(c.indexDirs) ? c.indexDirs : c.ledgerDirs;</span>
+
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (!checkIfSuperSet) {</span>
+<span class="nc" id="L146">            return indexDirsInConfig.equals(indexDirsInCookie);</span>
+        } else {
+<span class="nc" id="L148">            return isSuperSet(decodeDirPathFromCookie(indexDirsInConfig), decodeDirPathFromCookie(indexDirsInCookie));</span>
+        }
+    }
+
+    private void verifyInternal(Cookie c, boolean checkIfSuperSet) throws InvalidCookieException {
+        String errMsg;
+<span class="nc bnc" id="L154" title="All 4 branches missed.">        if (c.layoutVersion &lt; 3 &amp;&amp; c.layoutVersion != layoutVersion) {</span>
+<span class="nc" id="L155">            errMsg = &quot;Cookie is of too old version &quot; + c.layoutVersion;</span>
+<span class="nc" id="L156">            LOG.error(errMsg);</span>
+<span class="nc" id="L157">            throw new InvalidCookieException(errMsg);</span>
+<span class="nc bnc" id="L158" title="All 4 branches missed.">        } else if (!(c.layoutVersion &gt;= 3 &amp;&amp; c.bookieId.equals(bookieId)</span>
+<span class="nc bnc" id="L159" title="All 4 branches missed.">            &amp;&amp; c.journalDirs.equals(journalDirs) &amp;&amp; verifyLedgerDirs(c, checkIfSuperSet)</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            &amp;&amp; verifyIndexDirs(c, checkIfSuperSet))) {</span>
+<span class="nc" id="L161">            errMsg = &quot;Cookie [&quot; + this + &quot;] is not matching with [&quot; + c + &quot;]&quot;;</span>
+<span class="nc" id="L162">            throw new InvalidCookieException(errMsg);</span>
+<span class="nc bnc" id="L163" title="All 6 branches missed.">        } else if ((instanceId == null &amp;&amp; c.instanceId != null)</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                || (instanceId != null &amp;&amp; !instanceId.equals(c.instanceId))) {</span>
+            // instanceId should be same in both cookies
+<span class="nc" id="L166">            errMsg = &quot;instanceId &quot; + instanceId</span>
+                    + &quot; is not matching with &quot; + c.instanceId;
+<span class="nc" id="L168">            throw new InvalidCookieException(errMsg);</span>
+        }
+<span class="nc" id="L170">    }</span>
+
+    public void verify(Cookie c) throws InvalidCookieException {
+<span class="nc" id="L173">        verifyInternal(c, false);</span>
+<span class="nc" id="L174">    }</span>
+
+    public void verifyIsSuperSet(Cookie c) throws InvalidCookieException {
+<span class="nc" id="L177">        verifyInternal(c, true);</span>
+<span class="nc" id="L178">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (layoutVersion &lt;= 3) {</span>
+<span class="nc" id="L183">            return toStringVersion3();</span>
+        }
+<span class="nc" id="L185">        CookieFormat.Builder builder = CookieFormat.newBuilder();</span>
+<span class="nc" id="L186">        builder.setBookieHost(bookieId);</span>
+<span class="nc" id="L187">        builder.setJournalDir(journalDirs);</span>
+<span class="nc" id="L188">        builder.setLedgerDirs(ledgerDirs);</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        if (null != instanceId) {</span>
+<span class="nc" id="L190">            builder.setInstanceId(instanceId);</span>
+        }
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (null != indexDirs) {</span>
+<span class="nc" id="L193">            builder.setIndexDirs(indexDirs);</span>
+        }
+
+<span class="nc" id="L196">        StringBuilder b = new StringBuilder();</span>
+<span class="nc" id="L197">        b.append(CURRENT_COOKIE_LAYOUT_VERSION).append(&quot;\n&quot;);</span>
+<span class="nc" id="L198">        b.append(builder.build());</span>
+<span class="nc" id="L199">        return b.toString();</span>
+    }
+
+    private String toStringVersion3() {
+<span class="nc" id="L203">        StringBuilder b = new StringBuilder();</span>
+<span class="nc" id="L204">        b.append(CURRENT_COOKIE_LAYOUT_VERSION).append(&quot;\n&quot;)</span>
+<span class="nc" id="L205">            .append(bookieId).append(&quot;\n&quot;)</span>
+<span class="nc" id="L206">            .append(journalDirs).append(&quot;\n&quot;)</span>
+<span class="nc" id="L207">            .append(ledgerDirs).append(&quot;\n&quot;);</span>
+<span class="nc" id="L208">        return b.toString();</span>
+    }
+
+    private static Builder parse(BufferedReader reader) throws IOException {
+<span class="nc" id="L212">        Builder cBuilder = Cookie.newBuilder();</span>
+<span class="nc" id="L213">        int layoutVersion = 0;</span>
+<span class="nc" id="L214">        String line = reader.readLine();</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        if (null == line) {</span>
+<span class="nc" id="L216">            throw new EOFException(&quot;Exception in parsing cookie&quot;);</span>
+        }
+        try {
+<span class="nc" id="L219">            layoutVersion = Integer.parseInt(line.trim());</span>
+<span class="nc" id="L220">            cBuilder.setLayoutVersion(layoutVersion);</span>
+<span class="nc" id="L221">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L222">            throw new IOException(&quot;Invalid string '&quot; + line.trim()</span>
+                    + &quot;', cannot parse cookie.&quot;);
+<span class="nc" id="L224">        }</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (layoutVersion == 3) {</span>
+<span class="nc" id="L226">            cBuilder.setBookieId(reader.readLine());</span>
+<span class="nc" id="L227">            cBuilder.setJournalDirs(reader.readLine());</span>
+<span class="nc" id="L228">            cBuilder.setLedgerDirs(reader.readLine());</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        } else if (layoutVersion &gt;= 4) {</span>
+<span class="nc" id="L230">            CookieFormat.Builder cfBuilder = CookieFormat.newBuilder();</span>
+<span class="nc" id="L231">            TextFormat.merge(reader, cfBuilder);</span>
+<span class="nc" id="L232">            CookieFormat data = cfBuilder.build();</span>
+<span class="nc" id="L233">            cBuilder.setBookieId(data.getBookieHost());</span>
+<span class="nc" id="L234">            cBuilder.setJournalDirs(data.getJournalDir());</span>
+<span class="nc" id="L235">            cBuilder.setLedgerDirs(data.getLedgerDirs());</span>
+            // Since InstanceId is optional
+<span class="nc bnc" id="L237" title="All 4 branches missed.">            if (null != data.getInstanceId() &amp;&amp; !data.getInstanceId().isEmpty()) {</span>
+<span class="nc" id="L238">                cBuilder.setInstanceId(data.getInstanceId());</span>
+            }
+<span class="nc bnc" id="L240" title="All 4 branches missed.">            if (null != data.getIndexDirs() &amp;&amp; !data.getIndexDirs().isEmpty()) {</span>
+<span class="nc" id="L241">                cBuilder.setIndexDirs(data.getIndexDirs());</span>
+            }
+        }
+<span class="nc" id="L244">        return cBuilder;</span>
+    }
+
+    public static Cookie parseFromBytes(byte[] bytes) throws IOException {
+<span class="nc" id="L248">        try (BufferedReader reader = new BufferedReader(new StringReader(new String(bytes, UTF_8)))) {</span>
+<span class="nc" id="L249">            return parse(reader).build();</span>
+        }
+    }
+
+    public void writeToDirectory(File directory) throws IOException {
+<span class="nc" id="L254">        File versionFile = new File(directory,</span>
+            BookKeeperConstants.VERSION_FILENAME);
+<span class="nc" id="L256">        writeToFile(versionFile);</span>
+<span class="nc" id="L257">    }</span>
+
+    public void writeToFile (File versionFile) throws IOException {
+<span class="nc" id="L260">        try (FileOutputStream fos = new FileOutputStream(versionFile);</span>
+<span class="nc" id="L261">             BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, UTF_8))) {</span>
+<span class="nc" id="L262">            bw.write(toString());</span>
+        }
+<span class="nc" id="L264">    }</span>
+
+    /**
+     * Writes cookie details to registration manager.
+     *
+     * @param rm registration manager
+     * @param conf configuration
+     * @param version version
+     * @throws BookieException when fail to write the cookie.
+     */
+    public void writeToRegistrationManager(RegistrationManager rm, ServerConfiguration conf, Version version)
+            throws BookieException {
+<span class="nc" id="L276">        BookieId address = null;</span>
+        try {
+<span class="nc" id="L278">            address = BookieImpl.getBookieId(conf);</span>
+<span class="nc" id="L279">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L280">            throw new UnknownBookieIdException(e);</span>
+<span class="nc" id="L281">        }</span>
+<span class="nc" id="L282">        byte[] data = toString().getBytes(UTF_8);</span>
+<span class="nc" id="L283">        rm.writeCookie(address, new Versioned&lt;&gt;(data, version));</span>
+<span class="nc" id="L284">    }</span>
+
+    /**
+     * Deletes cookie from registration manager.
+     *
+     * @param rm registration manager
+     * @param conf configuration
+     * @param version cookie version
+     * @throws BookieException when fail to delete cookie.
+     */
+    public void deleteFromRegistrationManager(RegistrationManager rm,
+                                              ServerConfiguration conf,
+                                              Version version) throws BookieException {
+<span class="nc" id="L297">        BookieId address = null;</span>
+        try {
+<span class="nc" id="L299">            address = BookieImpl.getBookieId(conf);</span>
+<span class="nc" id="L300">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L301">            throw new UnknownBookieIdException(e);</span>
+<span class="nc" id="L302">        }</span>
+<span class="nc" id="L303">        deleteFromRegistrationManager(rm, address, version);</span>
+<span class="nc" id="L304">    }</span>
+
+    /**
+     * Delete cookie from registration manager.
+     *
+     * @param rm registration manager
+     * @param address bookie address
+     * @param version cookie version
+     * @throws BookieException when fail to delete cookie.
+     */
+    public void deleteFromRegistrationManager(RegistrationManager rm,
+                                              BookieId address,
+                                              Version version) throws BookieException {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (!(version instanceof LongVersion)) {</span>
+<span class="nc" id="L318">            throw new IllegalArgumentException(&quot;Invalid version type, expected ZkVersion type&quot;);</span>
+        }
+
+<span class="nc" id="L321">        rm.removeCookie(address, version);</span>
+<span class="nc" id="L322">    }</span>
+
+    /**
+     * Generate cookie from the given configuration.
+     *
+     * @param conf configuration
+     * @return cookie builder object
+     * @throws UnknownHostException
+     */
+    public static Builder generateCookie(ServerConfiguration conf)
+            throws UnknownHostException {
+<span class="nc" id="L333">        Builder builder = Cookie.newBuilder();</span>
+<span class="nc" id="L334">        builder.setLayoutVersion(CURRENT_COOKIE_LAYOUT_VERSION);</span>
+<span class="nc" id="L335">        builder.setBookieId(BookieImpl.getBookieId(conf).toString());</span>
+<span class="nc" id="L336">        builder.setJournalDirs(Joiner.on(',').join(conf.getJournalDirNames()));</span>
+<span class="nc" id="L337">        builder.setLedgerDirs(encodeDirPaths(conf.getLedgerDirNames()));</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">        if (null != conf.getIndexDirNames()) {</span>
+<span class="nc" id="L339">            builder.setIndexDirs(encodeDirPaths(conf.getIndexDirNames()));</span>
+        }
+<span class="nc" id="L341">        return builder;</span>
+    }
+
+    /**
+     * Read cookie from registration manager.
+     *
+     * @param rm registration manager
+     * @param conf configuration
+     * @return versioned cookie object
+     * @throws BookieException when fail to read cookie
+     */
+    public static Versioned&lt;Cookie&gt; readFromRegistrationManager(RegistrationManager rm, ServerConfiguration conf)
+            throws BookieException {
+        try {
+<span class="nc" id="L355">            return readFromRegistrationManager(rm, BookieImpl.getBookieId(conf));</span>
+<span class="nc" id="L356">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L357">            throw new UnknownBookieIdException(e);</span>
+        }
+    }
+
+    /**
+     * Read cookie from registration manager for a given bookie &lt;i&gt;address&lt;/i&gt;.
+     *
+     * @param rm registration manager
+     * @param address bookie address
+     * @return versioned cookie object
+     * @throws BookieException when fail to read cookie
+     */
+    public static Versioned&lt;Cookie&gt; readFromRegistrationManager(RegistrationManager rm,
+                                                         BookieId address) throws BookieException {
+<span class="nc" id="L371">        Versioned&lt;byte[]&gt; cookieData = rm.readCookie(address);</span>
+        try {
+<span class="nc" id="L373">            try (BufferedReader reader = new BufferedReader(</span>
+<span class="nc" id="L374">                    new StringReader(new String(cookieData.getValue(), UTF_8)))) {</span>
+<span class="nc" id="L375">                Builder builder = parse(reader);</span>
+<span class="nc" id="L376">                Cookie cookie = builder.build();</span>
+<span class="nc" id="L377">                return new Versioned&lt;Cookie&gt;(cookie, cookieData.getVersion());</span>
+            }
+<span class="nc" id="L379">        } catch (IOException ioe) {</span>
+<span class="nc" id="L380">            throw new InvalidCookieException(ioe);</span>
+        }
+    }
+
+    /**
+     * Returns cookie from the given directory.
+     *
+     * @param directory directory
+     * @return cookie object
+     * @throws IOException
+     */
+    public static Cookie readFromDirectory(File directory) throws IOException, FileNotFoundException {
+<span class="nc" id="L392">        File versionFile = new File(directory, BookKeeperConstants.VERSION_FILENAME);</span>
+<span class="nc" id="L393">        try (BufferedReader reader = new BufferedReader(</span>
+                new InputStreamReader(new FileInputStream(versionFile), UTF_8))) {
+<span class="nc" id="L395">            return parse(reader).build();</span>
+        }
+    }
+
+    /**
+     * Check whether the 'bookieHost' was created using a hostname or an IP
+     * address. Represent as 'hostname/IPaddress' if the InetSocketAddress was
+     * created using hostname. Represent as '/IPaddress' if the
+     * InetSocketAddress was created using an IPaddress
+     *
+     * @return true if the 'bookieHost' was created using an IP address, false
+     *         if the 'bookieHost' was created using a hostname
+     */
+    public boolean isBookieHostCreatedFromIp() throws IOException {
+<span class="nc" id="L409">        String[] parts = bookieId.split(&quot;:&quot;);</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if (parts.length != 2) {</span>
+            // custom BookieId ?
+<span class="nc" id="L412">            return false;</span>
+        }
+        int port;
+        try {
+<span class="nc" id="L416">            port = Integer.parseInt(parts[1]);</span>
+<span class="nc" id="L417">        } catch (NumberFormatException e) {</span>
+            // custom BookieId ?
+<span class="nc" id="L419">            return false;</span>
+<span class="nc" id="L420">        }</span>
+
+<span class="nc" id="L422">        InetSocketAddress addr = new InetSocketAddress(parts[0], port);</span>
+<span class="nc" id="L423">        return addr.toString().startsWith(&quot;/&quot;);</span>
+    }
+
+    /**
+     * Cookie builder.
+     */
+    public static class Builder {
+<span class="nc" id="L430">        private int layoutVersion = CURRENT_COOKIE_LAYOUT_VERSION;</span>
+<span class="nc" id="L431">        private String bookieId = null;</span>
+<span class="nc" id="L432">        private String journalDirs = null;</span>
+<span class="nc" id="L433">        private String ledgerDirs = null;</span>
+<span class="nc" id="L434">        private String instanceId = null;</span>
+<span class="nc" id="L435">        private String indexDirs = null;</span>
+
+<span class="nc" id="L437">        private Builder() {</span>
+<span class="nc" id="L438">        }</span>
+
+        private Builder(int layoutVersion, String bookieId, String journalDirs, String ledgerDirs,
+<span class="nc" id="L441">                        String instanceId, String indexDirs) {</span>
+<span class="nc" id="L442">            this.layoutVersion = layoutVersion;</span>
+<span class="nc" id="L443">            this.bookieId = bookieId;</span>
+<span class="nc" id="L444">            this.journalDirs = journalDirs;</span>
+<span class="nc" id="L445">            this.ledgerDirs = ledgerDirs;</span>
+<span class="nc" id="L446">            this.instanceId = instanceId;</span>
+<span class="nc" id="L447">            this.indexDirs = indexDirs;</span>
+<span class="nc" id="L448">        }</span>
+
+        public Builder setLayoutVersion(int layoutVersion) {
+<span class="nc" id="L451">            this.layoutVersion = layoutVersion;</span>
+<span class="nc" id="L452">            return this;</span>
+        }
+
+        public Builder setBookieId(String bookieId) {
+<span class="nc" id="L456">            this.bookieId = bookieId;</span>
+<span class="nc" id="L457">            return this;</span>
+        }
+
+        public Builder setJournalDirs(String journalDirs) {
+<span class="nc" id="L461">            this.journalDirs = journalDirs;</span>
+<span class="nc" id="L462">            return this;</span>
+        }
+
+        public Builder setLedgerDirs(String ledgerDirs) {
+<span class="nc" id="L466">            this.ledgerDirs = ledgerDirs;</span>
+<span class="nc" id="L467">            return this;</span>
+        }
+
+        public Builder setInstanceId(String instanceId) {
+<span class="nc" id="L471">            this.instanceId = instanceId;</span>
+<span class="nc" id="L472">            return this;</span>
+        }
+
+        public Builder setIndexDirs(String indexDirs) {
+<span class="nc" id="L476">            this.indexDirs = indexDirs;</span>
+<span class="nc" id="L477">            return this;</span>
+        }
+
+        public Cookie build() {
+<span class="nc" id="L481">            return new Cookie(layoutVersion, bookieId, journalDirs, ledgerDirs, instanceId, indexDirs);</span>
+        }
+    }
+
+    /**
+     * Returns Cookie builder.
+     *
+     * @return cookie builder
+     */
+    public static Builder newBuilder() {
+<span class="nc" id="L491">        return new Builder();</span>
+    }
+
+    /**
+     * Returns Cookie builder with the copy of given oldCookie.
+     *
+     * @param oldCookie build new cookie from this cookie
+     * @return cookie builder
+     */
+    public static Builder newBuilder(Cookie oldCookie) {
+<span class="nc" id="L501">        return new Builder(oldCookie.layoutVersion, oldCookie.bookieId, oldCookie.journalDirs, oldCookie.ledgerDirs,</span>
+                oldCookie.instanceId, oldCookie.indexDirs);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+<span class="nc bnc" id="L507" title="All 2 branches missed.">        if (other instanceof Cookie) {</span>
+<span class="nc" id="L508">            Cookie otherCookie = (Cookie) other;</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">            return layoutVersion == otherCookie.layoutVersion</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">                &amp;&amp; Objects.equals(bookieId, otherCookie.bookieId)</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">                &amp;&amp; Objects.equals(journalDirs, otherCookie.journalDirs)</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">                &amp;&amp; Objects.equals(ledgerDirs, otherCookie.ledgerDirs)</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">                &amp;&amp; Objects.equals(instanceId, otherCookie.instanceId)</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">                &amp;&amp; Objects.equals(indexDirs, otherCookie.indexDirs);</span>
+        } else {
+<span class="nc" id="L516">            return false;</span>
+        }
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L522">        return Objects.hash(bookieId, journalDirs, ledgerDirs, instanceId, indexDirs);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

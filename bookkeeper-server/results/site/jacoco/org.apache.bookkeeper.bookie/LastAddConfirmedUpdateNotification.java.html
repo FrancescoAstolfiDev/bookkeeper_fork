@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LastAddConfirmedUpdateNotification.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">LastAddConfirmedUpdateNotification.java</span></div><h1>LastAddConfirmedUpdateNotification.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+import io.netty.util.Recycler;
+import io.netty.util.Recycler.Handle;
+import java.util.function.Function;
+import lombok.Getter;
+import org.apache.bookkeeper.common.collections.RecyclableArrayList;
+import org.apache.bookkeeper.common.util.Recyclable;
+import org.apache.bookkeeper.common.util.Watcher;
+
+/**
+ * A signal object is used for notifying the observers when the {@code LastAddConfirmed} is advanced.
+ *
+ * &lt;p&gt;The signal object contains the latest {@code LastAddConfirmed} and when the {@code LastAddConfirmed} is advanced.
+ */
+@Getter
+public class LastAddConfirmedUpdateNotification implements Recyclable {
+
+<span class="nc" id="L39">    public static final Function&lt;Long, LastAddConfirmedUpdateNotification&gt; FUNC = lac -&gt; of(lac);</span>
+
+<span class="nc" id="L41">    public static final RecyclableArrayList.Recycler&lt;Watcher&lt;LastAddConfirmedUpdateNotification&gt;&gt; WATCHER_RECYCLER =</span>
+        new RecyclableArrayList.Recycler&lt;&gt;();
+
+    public static LastAddConfirmedUpdateNotification of(long lastAddConfirmed) {
+<span class="nc" id="L45">        LastAddConfirmedUpdateNotification lac = RECYCLER.get();</span>
+<span class="nc" id="L46">        lac.lastAddConfirmed = lastAddConfirmed;</span>
+<span class="nc" id="L47">        lac.timestamp = System.currentTimeMillis();</span>
+<span class="nc" id="L48">        return lac;</span>
+    }
+
+<span class="nc" id="L51">    private static final Recycler&lt;LastAddConfirmedUpdateNotification&gt; RECYCLER =</span>
+<span class="nc" id="L52">        new Recycler&lt;LastAddConfirmedUpdateNotification&gt;() {</span>
+            @Override
+            protected LastAddConfirmedUpdateNotification newObject(Handle&lt;LastAddConfirmedUpdateNotification&gt; handle) {
+<span class="nc" id="L55">                return new LastAddConfirmedUpdateNotification(handle);</span>
+            }
+        };
+
+<span class="nc" id="L59">    private final Handle&lt;LastAddConfirmedUpdateNotification&gt; handle;</span>
+<span class="nc" id="L60">    private long lastAddConfirmed;</span>
+<span class="nc" id="L61">    private long timestamp;</span>
+
+<span class="nc" id="L63">    public LastAddConfirmedUpdateNotification(Handle&lt;LastAddConfirmedUpdateNotification&gt; handle) {</span>
+<span class="nc" id="L64">        this.handle = handle;</span>
+<span class="nc" id="L65">    }</span>
+
+    @Override
+    public void recycle() {
+<span class="nc" id="L69">        this.lastAddConfirmed = -1L;</span>
+<span class="nc" id="L70">        this.timestamp = -1L;</span>
+<span class="nc" id="L71">        handle.recycle(this);</span>
+<span class="nc" id="L72">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultEnsemblePlacementPolicy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">DefaultEnsemblePlacementPolicy.java</span></div><h1>DefaultEnsemblePlacementPolicy.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.client;
+
+import io.netty.util.HashedWheelTimer;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.apache.bookkeeper.client.BKException.BKNotEnoughBookiesException;
+import org.apache.bookkeeper.client.BookieInfoReader.BookieInfo;
+import org.apache.bookkeeper.client.WeightedRandomSelection.WeightedObject;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.feature.FeatureProvider;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.net.DNSToSwitchMapping;
+import org.apache.bookkeeper.proto.BookieAddressResolver;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.commons.collections4.CollectionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Default Ensemble Placement Policy, which picks bookies randomly.
+ *
+ * @see EnsemblePlacementPolicy
+ */
+public class DefaultEnsemblePlacementPolicy implements EnsemblePlacementPolicy {
+<span class="nc" id="L50">    static final Logger LOG = LoggerFactory.getLogger(DefaultEnsemblePlacementPolicy.class);</span>
+<span class="nc" id="L51">    static final Set&lt;BookieId&gt; EMPTY_SET = new HashSet&lt;BookieId&gt;();</span>
+
+    private boolean isWeighted;
+    private int maxWeightMultiple;
+<span class="nc" id="L55">    private Set&lt;BookieId&gt; knownBookies = new HashSet&lt;BookieId&gt;();</span>
+    private Map&lt;BookieId, WeightedObject&gt; bookieInfoMap;
+    private WeightedRandomSelection&lt;BookieId&gt; weightedSelection;
+    private final ReentrantReadWriteLock rwLock;
+
+<span class="nc" id="L60">    DefaultEnsemblePlacementPolicy() {</span>
+<span class="nc" id="L61">        bookieInfoMap = new HashMap&lt;BookieId, WeightedObject&gt;();</span>
+<span class="nc" id="L62">        rwLock = new ReentrantReadWriteLock();</span>
+<span class="nc" id="L63">    }</span>
+
+    @Override
+    public PlacementResult&lt;List&lt;BookieId&gt;&gt; newEnsemble(int ensembleSize, int quorumSize, int ackQuorumSize,
+            Map&lt;String, byte[]&gt; customMetadata, Set&lt;BookieId&gt; excludeBookies)
+            throws BKNotEnoughBookiesException {
+<span class="nc" id="L69">        ArrayList&lt;BookieId&gt; newBookies = new ArrayList&lt;BookieId&gt;(ensembleSize);</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        if (ensembleSize &lt;= 0) {</span>
+<span class="nc" id="L71">            return PlacementResult.of(newBookies, PlacementPolicyAdherence.FAIL);</span>
+        }
+        List&lt;BookieId&gt; allBookies;
+<span class="nc" id="L74">        rwLock.readLock().lock();</span>
+        try {
+<span class="nc" id="L76">            allBookies = new ArrayList&lt;BookieId&gt;(knownBookies);</span>
+        } finally {
+<span class="nc" id="L78">            rwLock.readLock().unlock();</span>
+        }
+
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (isWeighted) {</span>
+            // hold the readlock while selecting bookies. We don't want the list of bookies
+            // changing while we are creating the ensemble
+<span class="nc" id="L84">            rwLock.readLock().lock();</span>
+            try {
+<span class="nc bnc" id="L86" title="All 2 branches missed.">                if (CollectionUtils.subtract(allBookies, excludeBookies).size() &lt; ensembleSize) {</span>
+<span class="nc" id="L87">                    throw new BKNotEnoughBookiesException();</span>
+                }
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                while (ensembleSize &gt; 0) {</span>
+<span class="nc" id="L90">                    BookieId b = weightedSelection.getNextRandom();</span>
+<span class="nc bnc" id="L91" title="All 4 branches missed.">                    if (newBookies.contains(b) || excludeBookies.contains(b)) {</span>
+<span class="nc" id="L92">                        continue;</span>
+                    }
+<span class="nc" id="L94">                    newBookies.add(b);</span>
+<span class="nc" id="L95">                    --ensembleSize;</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                    if (ensembleSize == 0) {</span>
+<span class="nc" id="L97">                        return PlacementResult.of(newBookies,</span>
+<span class="nc" id="L98">                                isEnsembleAdheringToPlacementPolicy(newBookies, quorumSize, ackQuorumSize));</span>
+                    }
+<span class="nc" id="L100">                }</span>
+            } finally {
+<span class="nc" id="L102">                rwLock.readLock().unlock();</span>
+<span class="nc" id="L103">            }</span>
+        } else {
+<span class="nc" id="L105">            Collections.shuffle(allBookies);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            for (BookieId bookie : allBookies) {</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                if (excludeBookies.contains(bookie)) {</span>
+<span class="nc" id="L108">                    continue;</span>
+                }
+<span class="nc" id="L110">                newBookies.add(bookie);</span>
+<span class="nc" id="L111">                --ensembleSize;</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                if (ensembleSize == 0) {</span>
+<span class="nc" id="L113">                    return PlacementResult.of(newBookies,</span>
+<span class="nc" id="L114">                            isEnsembleAdheringToPlacementPolicy(newBookies, quorumSize, ackQuorumSize));</span>
+                }
+<span class="nc" id="L116">            }</span>
+        }
+<span class="nc" id="L118">        throw new BKNotEnoughBookiesException();</span>
+    }
+
+    @Override
+    public PlacementResult&lt;BookieId&gt; replaceBookie(int ensembleSize, int writeQuorumSize, int ackQuorumSize,
+            Map&lt;String, byte[]&gt; customMetadata, List&lt;BookieId&gt; currentEnsemble,
+            BookieId bookieToReplace, Set&lt;BookieId&gt; excludeBookies)
+            throws BKNotEnoughBookiesException {
+<span class="nc" id="L126">        excludeBookies.addAll(currentEnsemble);</span>
+<span class="nc" id="L127">        List&lt;BookieId&gt; addresses = newEnsemble(1, 1, 1, customMetadata, excludeBookies).getResult();</span>
+
+<span class="nc" id="L129">        BookieId candidateAddr = addresses.get(0);</span>
+<span class="nc" id="L130">        List&lt;BookieId&gt; newEnsemble = new ArrayList&lt;BookieId&gt;(currentEnsemble);</span>
+<span class="nc" id="L131">        newEnsemble.set(currentEnsemble.indexOf(bookieToReplace), candidateAddr);</span>
+<span class="nc" id="L132">        return PlacementResult.of(candidateAddr,</span>
+<span class="nc" id="L133">                isEnsembleAdheringToPlacementPolicy(newEnsemble, writeQuorumSize, ackQuorumSize));</span>
+    }
+
+    @Override
+    public Set&lt;BookieId&gt; onClusterChanged(Set&lt;BookieId&gt; writableBookies,
+            Set&lt;BookieId&gt; readOnlyBookies) {
+<span class="nc" id="L139">        rwLock.writeLock().lock();</span>
+        try {
+            HashSet&lt;BookieId&gt; deadBookies;
+<span class="nc" id="L142">            deadBookies = new HashSet&lt;BookieId&gt;(knownBookies);</span>
+<span class="nc" id="L143">            deadBookies.removeAll(writableBookies);</span>
+            // readonly bookies should not be treated as dead bookies
+<span class="nc" id="L145">            deadBookies.removeAll(readOnlyBookies);</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            if (this.isWeighted) {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                for (BookieId b : deadBookies) {</span>
+<span class="nc" id="L148">                    this.bookieInfoMap.remove(b);</span>
+<span class="nc" id="L149">                }</span>
+                @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L151">                Collection&lt;BookieId&gt; newBookies = CollectionUtils.subtract(writableBookies, knownBookies);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                for (BookieId b : newBookies) {</span>
+<span class="nc" id="L153">                    this.bookieInfoMap.put(b, new BookieInfo());</span>
+<span class="nc" id="L154">                }</span>
+<span class="nc bnc" id="L155" title="All 4 branches missed.">                if (deadBookies.size() &gt; 0 || newBookies.size() &gt; 0) {</span>
+<span class="nc" id="L156">                    this.weightedSelection.updateMap(this.bookieInfoMap);</span>
+                }
+            }
+<span class="nc" id="L159">            knownBookies = writableBookies;</span>
+<span class="nc" id="L160">            return deadBookies;</span>
+        } finally {
+<span class="nc" id="L162">            rwLock.writeLock().unlock();</span>
+        }
+    }
+
+    @Override
+    public void registerSlowBookie(BookieId bookieSocketAddress, long entryId) {
+<span class="nc" id="L168">        return;</span>
+    }
+
+    @Override
+    public DistributionSchedule.WriteSet reorderReadSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc" id="L176">        return writeSet;</span>
+    }
+
+    @Override
+    public DistributionSchedule.WriteSet reorderReadLACSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc" id="L184">        writeSet.addMissingIndices(ensemble.size());</span>
+<span class="nc" id="L185">        return writeSet;</span>
+    }
+
+    @Override
+    public EnsemblePlacementPolicy initialize(ClientConfiguration conf,
+                                       Optional&lt;DNSToSwitchMapping&gt; optionalDnsResolver,
+                                       HashedWheelTimer hashedWheelTimer,
+                                       FeatureProvider featureProvider,
+                                       StatsLogger statsLogger,
+                                       BookieAddressResolver bookieAddressResolver) {
+<span class="nc" id="L195">        this.isWeighted = conf.getDiskWeightBasedPlacementEnabled();</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if (this.isWeighted) {</span>
+<span class="nc" id="L197">            this.maxWeightMultiple = conf.getBookieMaxWeightMultipleForWeightBasedPlacement();</span>
+<span class="nc" id="L198">            this.weightedSelection = new WeightedRandomSelectionImpl&lt;BookieId&gt;(this.maxWeightMultiple);</span>
+        }
+<span class="nc" id="L200">        return this;</span>
+    }
+
+    @Override
+    public void updateBookieInfo(Map&lt;BookieId, BookieInfo&gt; bookieInfoMap) {
+<span class="nc" id="L205">        rwLock.writeLock().lock();</span>
+        try {
+<span class="nc bnc" id="L207" title="All 2 branches missed.">            for (Map.Entry&lt;BookieId, BookieInfo&gt; e : bookieInfoMap.entrySet()) {</span>
+<span class="nc" id="L208">                this.bookieInfoMap.put(e.getKey(), e.getValue());</span>
+<span class="nc" id="L209">            }</span>
+<span class="nc" id="L210">            this.weightedSelection.updateMap(this.bookieInfoMap);</span>
+        } finally {
+<span class="nc" id="L212">            rwLock.writeLock().unlock();</span>
+        }
+<span class="nc" id="L214">    }</span>
+
+    @Override
+    public void uninitalize() {
+        // do nothing
+<span class="nc" id="L219">    }</span>
+
+    @Override
+    public PlacementPolicyAdherence isEnsembleAdheringToPlacementPolicy(List&lt;BookieId&gt; ensembleList,
+            int writeQuorumSize, int ackQuorumSize) {
+<span class="nc" id="L224">        return PlacementPolicyAdherence.MEETS_STRICT;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

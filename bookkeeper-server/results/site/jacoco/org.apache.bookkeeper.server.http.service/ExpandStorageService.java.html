@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExpandStorageService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">ExpandStorageService.java</span></div><h1>ExpandStorageService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.common.collect.Lists;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.File;
+import java.net.URI;
+import java.util.Arrays;
+import java.util.List;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.LegacyCookieValidation;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.apache.bookkeeper.meta.MetadataBookieDriver;
+import org.apache.bookkeeper.meta.MetadataDrivers;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * HttpEndpointService that handle Bookkeeper expand storage related http request.
+ * The PUT method will expand this bookie's storage.
+ * User should update the directories info in the conf file with new empty ledger/index
+ * directories, before running the command.
+ */
+public class ExpandStorageService implements HttpEndpointService {
+
+<span class="nc" id="L52">    static final Logger LOG = LoggerFactory.getLogger(ExpandStorageService.class);</span>
+
+    protected ServerConfiguration conf;
+
+<span class="nc" id="L56">    public ExpandStorageService(ServerConfiguration conf) {</span>
+<span class="nc" id="L57">        checkNotNull(conf);</span>
+<span class="nc" id="L58">        this.conf = conf;</span>
+<span class="nc" id="L59">    }</span>
+
+    /*
+     * Add new empty ledger/index directories.
+     * Update the directories info in the conf file before running the command.
+     */
+    @Override
+    @SuppressFBWarnings(&quot;RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE&quot;)
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L68">        HttpServiceResponse response = new HttpServiceResponse();</span>
+
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        if (HttpServer.Method.PUT == request.getMethod()) {</span>
+<span class="nc" id="L71">            File[] ledgerDirectories = BookieImpl.getCurrentDirectories(conf.getLedgerDirs());</span>
+<span class="nc" id="L72">            File[] journalDirectories = BookieImpl.getCurrentDirectories(conf.getJournalDirs());</span>
+            File[] indexDirectories;
+<span class="nc bnc" id="L74" title="All 2 branches missed.">            if (null == conf.getIndexDirs()) {</span>
+<span class="nc" id="L75">                indexDirectories = ledgerDirectories;</span>
+            } else {
+<span class="nc" id="L77">                indexDirectories = BookieImpl.getCurrentDirectories(conf.getIndexDirs());</span>
+            }
+
+<span class="nc" id="L80">            List&lt;File&gt; allLedgerDirs = Lists.newArrayList();</span>
+<span class="nc" id="L81">            allLedgerDirs.addAll(Arrays.asList(ledgerDirectories));</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">            if (indexDirectories != ledgerDirectories) {</span>
+<span class="nc" id="L83">                allLedgerDirs.addAll(Arrays.asList(indexDirectories));</span>
+            }
+
+<span class="nc" id="L86">            try (MetadataBookieDriver driver = MetadataDrivers.getBookieDriver(</span>
+<span class="nc" id="L87">                         URI.create(conf.getMetadataServiceUri()))) {</span>
+<span class="nc" id="L88">                driver.initialize(conf, NullStatsLogger.INSTANCE);</span>
+
+<span class="nc" id="L90">                try (RegistrationManager registrationManager = driver.createRegistrationManager()) {</span>
+<span class="nc" id="L91">                    LegacyCookieValidation validation = new LegacyCookieValidation(conf, registrationManager);</span>
+<span class="nc" id="L92">                    List&lt;File&gt; dirs = Lists.newArrayList(journalDirectories);</span>
+<span class="nc" id="L93">                    dirs.addAll(allLedgerDirs);</span>
+<span class="nc" id="L94">                    validation.checkCookies(dirs);</span>
+                }
+<span class="nc" id="L96">            } catch (BookieException e) {</span>
+<span class="nc" id="L97">                LOG.error(&quot;Exception occurred while updating cookie for storage expansion&quot;, e);</span>
+<span class="nc" id="L98">                response.setCode(HttpServer.StatusCode.INTERNAL_ERROR);</span>
+<span class="nc" id="L99">                response.setBody(&quot;Exception while updating cookie for storage expansion&quot;);</span>
+<span class="nc" id="L100">                return response;</span>
+<span class="nc" id="L101">            }</span>
+
+<span class="nc" id="L103">            String jsonResponse = &quot;Success expand storage&quot;;</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L105">                LOG.debug(&quot;output body:&quot; + jsonResponse);</span>
+            }
+<span class="nc" id="L107">            response.setBody(jsonResponse);</span>
+<span class="nc" id="L108">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L109">            return response;</span>
+        } else {
+<span class="nc" id="L111">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L112">            response.setBody(&quot;Not found method. Should be PUT method&quot;);</span>
+<span class="nc" id="L113">            return response;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DirectReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.directentrylogger</a> &gt; <span class="el_source">DirectReader.java</span></div><h1>DirectReader.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.directentrylogger;
+
+import static com.google.common.base.Preconditions.checkState;
+import static org.apache.bookkeeper.common.util.ExceptionMessageHelper.exMsg;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.util.ReferenceCountUtil;
+import java.io.EOFException;
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOException;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+
+class DirectReader implements LogReader {
+    private final ByteBufAllocator allocator;
+    private final NativeIO nativeIO;
+    private final Buffer nativeBuffer;
+    private final String filename;
+    private final int logId;
+    private final int fd;
+    private final int maxSaneEntrySize;
+    private final OpStatsLogger readBlockStats;
+<span class="nc" id="L45">    private long currentBlock = -1;</span>
+<span class="nc" id="L46">    private long currentBlockEnd = -1;</span>
+    private long maxOffset;
+    private boolean closed;
+
+    DirectReader(int logId, String filename, ByteBufAllocator allocator,
+                 NativeIO nativeIO, int bufferSize,
+<span class="nc" id="L52">                 int maxSaneEntrySize, OpStatsLogger readBlockStats) throws IOException {</span>
+<span class="nc" id="L53">        this.nativeIO = nativeIO;</span>
+<span class="nc" id="L54">        this.allocator = allocator;</span>
+<span class="nc" id="L55">        this.logId = logId;</span>
+<span class="nc" id="L56">        this.filename = filename;</span>
+<span class="nc" id="L57">        this.maxSaneEntrySize = maxSaneEntrySize;</span>
+<span class="nc" id="L58">        this.readBlockStats = readBlockStats;</span>
+<span class="nc" id="L59">        closed = false;</span>
+
+        try {
+<span class="nc" id="L62">            fd = nativeIO.open(filename,</span>
+                               NativeIO.O_RDONLY | NativeIO.O_DIRECT,
+                               00755);
+<span class="nc bnc" id="L65" title="All 2 branches missed.">            checkState(fd &gt;= 0, &quot;Open should throw exception on negative return (%d)&quot;, fd);</span>
+<span class="nc" id="L66">        } catch (NativeIOException ne) {</span>
+<span class="nc" id="L67">            throw new IOException(exMsg(ne.getMessage())</span>
+<span class="nc" id="L68">                                  .kv(&quot;file&quot;, filename)</span>
+<span class="nc" id="L69">                                  .kv(&quot;errno&quot;, ne.getErrno()).toString());</span>
+<span class="nc" id="L70">        }</span>
+<span class="nc" id="L71">        refreshMaxOffset();</span>
+<span class="nc" id="L72">        nativeBuffer = new Buffer(nativeIO, allocator, bufferSize);</span>
+<span class="nc" id="L73">    }</span>
+
+    @Override
+    public int logId() {
+<span class="nc" id="L77">        return logId;</span>
+    }
+
+    private void clearCache() {
+<span class="nc" id="L81">        synchronized (nativeBuffer) {</span>
+<span class="nc" id="L82">            currentBlock = -1;</span>
+<span class="nc" id="L83">            currentBlockEnd = -1;</span>
+<span class="nc" id="L84">        }</span>
+<span class="nc" id="L85">    }</span>
+
+    @Override
+    public ByteBuf readBufferAt(long offset, int size) throws IOException, EOFException {
+<span class="nc" id="L89">        ByteBuf buf = allocator.buffer(size);</span>
+        try {
+<span class="nc" id="L91">            readIntoBufferAt(buf, offset, size);</span>
+<span class="nc" id="L92">        } catch (IOException e) {</span>
+<span class="nc" id="L93">            ReferenceCountUtil.release(buf);</span>
+<span class="nc" id="L94">            throw e;</span>
+<span class="nc" id="L95">        }</span>
+
+<span class="nc" id="L97">        return buf;</span>
+    }
+
+    @Override
+    public void readIntoBufferAt(ByteBuf buffer, long offset, int size) throws IOException, EOFException {
+<span class="nc" id="L102">        assertValidOffset(offset);</span>
+<span class="nc" id="L103">        synchronized (nativeBuffer) {</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            while (size &gt; 0) {</span>
+<span class="nc" id="L105">                int bytesRead = readBytesIntoBuf(buffer, offset, size);</span>
+<span class="nc" id="L106">                size -= bytesRead;</span>
+<span class="nc" id="L107">                offset += bytesRead;</span>
+<span class="nc" id="L108">            }</span>
+<span class="nc" id="L109">        }</span>
+<span class="nc" id="L110">    }</span>
+
+    @Override
+    public int readIntAt(long offset) throws IOException, EOFException {
+<span class="nc" id="L114">        assertValidOffset(offset);</span>
+<span class="nc" id="L115">        synchronized (nativeBuffer) {</span>
+<span class="nc bnc" id="L116" title="All 4 branches missed.">            if (offset &gt;= currentBlock &amp;&amp; offset + Integer.BYTES &lt;= currentBlockEnd) { // fast path</span>
+<span class="nc" id="L117">                return nativeBuffer.readInt(offsetInBlock(offset));</span>
+            } else { // slow path
+<span class="nc" id="L119">                ByteBuf intBuf = readBufferAt(offset, Integer.BYTES);</span>
+                try {
+<span class="nc" id="L121">                    return intBuf.getInt(0);</span>
+                } finally {
+<span class="nc" id="L123">                    ReferenceCountUtil.release(intBuf);</span>
+                }
+            }
+        }
+    }
+
+    @Override
+    public long readLongAt(long offset) throws IOException, EOFException {
+<span class="nc" id="L131">        assertValidOffset(offset);</span>
+<span class="nc" id="L132">        synchronized (nativeBuffer) {</span>
+<span class="nc bnc" id="L133" title="All 4 branches missed.">            if (offset &gt;= currentBlock &amp;&amp; offset + Long.BYTES &lt;= currentBlockEnd) { // fast path</span>
+<span class="nc" id="L134">                return nativeBuffer.readLong(offsetInBlock(offset));</span>
+            } else { // slow path
+<span class="nc" id="L136">                ByteBuf longBuf = readBufferAt(offset, Long.BYTES);</span>
+                try {
+<span class="nc" id="L138">                    return longBuf.getLong(0);</span>
+                } finally {
+<span class="nc" id="L140">                    ReferenceCountUtil.release(longBuf);</span>
+                }
+            }
+        }
+    }
+
+    private int readBytesIntoBuf(ByteBuf buf, long offset, int size) throws IOException, EOFException {
+<span class="nc" id="L147">        synchronized (nativeBuffer) {</span>
+<span class="nc bnc" id="L148" title="All 4 branches missed.">            if (offset &lt; currentBlock || offset &gt;= currentBlockEnd) {</span>
+<span class="nc" id="L149">                readBlock(offset);</span>
+            }
+<span class="nc" id="L151">            int offsetInBuffer = offsetInBlock(offset);</span>
+<span class="nc" id="L152">            int sizeInBuffer = sizeInBlock(offset, size);</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            if (sizeInBuffer &lt;= 0) {</span>
+<span class="nc" id="L154">                throw new EOFException(exMsg(&quot;Not enough bytes available&quot;)</span>
+<span class="nc" id="L155">                                      .kv(&quot;file&quot;, filename)</span>
+<span class="nc" id="L156">                                      .kv(&quot;fileSize&quot;, maxOffset)</span>
+<span class="nc" id="L157">                                      .kv(&quot;offset&quot;, offset)</span>
+<span class="nc" id="L158">                                      .kv(&quot;size&quot;, size).toString());</span>
+            }
+<span class="nc" id="L160">            return nativeBuffer.readByteBuf(buf, offsetInBuffer, size);</span>
+        }
+    }
+
+    @Override
+    public ByteBuf readEntryAt(int offset) throws IOException, EOFException {
+<span class="nc" id="L166">        assertValidEntryOffset(offset);</span>
+<span class="nc" id="L167">        int sizeOffset = offset - Integer.BYTES;</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (sizeOffset &lt; 0) {</span>
+<span class="nc" id="L169">            throw new IOException(exMsg(&quot;Invalid offset, buffer size missing&quot;)</span>
+<span class="nc" id="L170">                                  .kv(&quot;file&quot;, filename)</span>
+<span class="nc" id="L171">                                  .kv(&quot;offset&quot;, offset).toString());</span>
+        }
+
+<span class="nc" id="L174">        int entrySize = readIntAt(sizeOffset);</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (entrySize == 0) {</span>
+            // reading an entry with size 0 may mean reading from preallocated
+            // space. if we receive an offset in preallocated space, it may
+            // mean that a write has occurred and been flushed, but our view
+            // of that block is out of date. So clear the cache and let it be
+            // loaded again.
+<span class="nc" id="L181">            clearCache();</span>
+<span class="nc" id="L182">            entrySize = readIntAt(sizeOffset);</span>
+        }
+<span class="nc bnc" id="L184" title="All 4 branches missed.">        if (entrySize &gt; maxSaneEntrySize || entrySize &lt;= 0) {</span>
+<span class="nc" id="L185">            throw new IOException(exMsg(&quot;Invalid entry size&quot;)</span>
+<span class="nc" id="L186">                                  .kv(&quot;file&quot;, filename)</span>
+<span class="nc" id="L187">                                  .kv(&quot;offset&quot;, offset)</span>
+<span class="nc" id="L188">                                  .kv(&quot;maxSaneEntrySize&quot;, maxSaneEntrySize)</span>
+<span class="nc" id="L189">                                  .kv(&quot;readEntrySize&quot;, entrySize).toString());</span>
+        }
+<span class="nc" id="L191">        return readBufferAt(offset, entrySize);</span>
+    }
+
+    void readBlock(long offset) throws IOException {
+<span class="nc" id="L195">        final int blockSize = nativeBuffer.size();</span>
+<span class="nc" id="L196">        assertValidBlockSize(blockSize);</span>
+<span class="nc" id="L197">        final long blockStart = offset &amp; ~(blockSize - 1);</span>
+
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        if (blockStart + blockSize &gt; maxOffset) {</span>
+            // Check if there's new data in the file
+<span class="nc" id="L201">            refreshMaxOffset();</span>
+        }
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        final long bytesAvailable = maxOffset &gt; blockStart ? maxOffset - blockStart : 0;</span>
+<span class="nc" id="L204">        final long startNs = System.nanoTime();</span>
+
+<span class="nc" id="L206">        long bufferOffset = 0;</span>
+<span class="nc" id="L207">        long bytesToRead = Math.min(blockSize, bytesAvailable);</span>
+<span class="nc" id="L208">        long bytesOutstanding = bytesToRead;</span>
+<span class="nc" id="L209">        long bytesRead = -1;</span>
+        try {
+            while (true) {
+<span class="nc" id="L212">                long readSize = blockSize - bufferOffset;</span>
+<span class="nc" id="L213">                long pointerWithOffset = nativeBuffer.pointer(bufferOffset, readSize);</span>
+<span class="nc" id="L214">                bytesRead = nativeIO.pread(fd, pointerWithOffset,</span>
+                                           readSize,
+                                           blockStart + bufferOffset);
+                // offsets and counts must be aligned, so ensure that if we
+                // get a short read, we don't throw off the alignment. For example
+                // if we're trying to read 12K and we only managed 100 bytes,
+                // we don't progress the offset or outstanding at all. However, if we
+                // read 4196 bytes, we can progress the offset by 4KB and the outstanding
+                // bytes will then be 100.
+                // the only non-short read that isn't aligned is the bytes at the end of
+                // of the file, which is why we don't align before we check if we should
+                // exit the loop
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                if ((bytesOutstanding - bytesRead) &lt;= 0) {</span>
+<span class="nc" id="L227">                    break;</span>
+                }
+<span class="nc" id="L229">                bytesOutstanding -= bytesRead &amp; Buffer.ALIGNMENT;</span>
+<span class="nc" id="L230">                bufferOffset += bytesRead &amp; Buffer.ALIGNMENT;</span>
+<span class="nc" id="L231">            }</span>
+<span class="nc" id="L232">        } catch (NativeIOException ne) {</span>
+<span class="nc" id="L233">            readBlockStats.registerFailedEvent(System.nanoTime() - startNs, TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L234">            throw new IOException(exMsg(ne.getMessage())</span>
+<span class="nc" id="L235">                                  .kv(&quot;requestedBytes&quot;, blockSize)</span>
+<span class="nc" id="L236">                                  .kv(&quot;offset&quot;, blockStart)</span>
+<span class="nc" id="L237">                                  .kv(&quot;expectedBytes&quot;, Math.min(blockSize, bytesAvailable))</span>
+<span class="nc" id="L238">                                  .kv(&quot;bytesOutstanding&quot;, bytesOutstanding)</span>
+<span class="nc" id="L239">                                  .kv(&quot;bufferOffset&quot;, bufferOffset)</span>
+<span class="nc" id="L240">                                  .kv(&quot;file&quot;, filename)</span>
+<span class="nc" id="L241">                                  .kv(&quot;fd&quot;, fd)</span>
+<span class="nc" id="L242">                                  .kv(&quot;errno&quot;, ne.getErrno()).toString());</span>
+<span class="nc" id="L243">        }</span>
+<span class="nc" id="L244">        readBlockStats.registerSuccessfulEvent(System.nanoTime() - startNs, TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L245">        currentBlock = blockStart;</span>
+<span class="nc" id="L246">        currentBlockEnd = blockStart + Math.min(blockSize, bytesAvailable);</span>
+<span class="nc" id="L247">    }</span>
+
+    @Override
+    public void close() throws IOException {
+<span class="nc" id="L251">        synchronized (nativeBuffer) {</span>
+<span class="nc" id="L252">            nativeBuffer.free();</span>
+<span class="nc" id="L253">        }</span>
+
+        try {
+<span class="nc" id="L256">            int ret = nativeIO.close(fd);</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            checkState(ret == 0, &quot;Close should throw exception on non-zero return (%d)&quot;, ret);</span>
+<span class="nc" id="L258">            closed = true;</span>
+<span class="nc" id="L259">        } catch (NativeIOException ne) {</span>
+<span class="nc" id="L260">            throw new IOException(exMsg(ne.getMessage())</span>
+<span class="nc" id="L261">                    .kv(&quot;file&quot;, filename)</span>
+<span class="nc" id="L262">                    .kv(&quot;errno&quot;, ne.getErrno()).toString());</span>
+<span class="nc" id="L263">        }</span>
+<span class="nc" id="L264">    }</span>
+
+    @Override
+    public boolean isClosed() {
+<span class="nc" id="L268">        return closed;</span>
+    }
+
+    @Override
+    public long maxOffset() {
+<span class="nc" id="L273">        return maxOffset;</span>
+    }
+
+    private void refreshMaxOffset() throws IOException {
+        try {
+<span class="nc" id="L278">            long ret = nativeIO.lseek(fd, 0, NativeIO.SEEK_END);</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">            checkState(ret &gt;= 0,</span>
+                                     &quot;Lseek should throw exception on negative return (%d)&quot;, ret);
+<span class="nc" id="L281">            synchronized (this) {</span>
+<span class="nc" id="L282">                maxOffset = ret;</span>
+<span class="nc" id="L283">            }</span>
+<span class="nc" id="L284">        } catch (NativeIOException ne) {</span>
+<span class="nc" id="L285">            throw new IOException(exMsg(ne.getMessage())</span>
+<span class="nc" id="L286">                                  .kv(&quot;file&quot;, filename)</span>
+<span class="nc" id="L287">                                  .kv(&quot;fd&quot;, fd)</span>
+<span class="nc" id="L288">                                  .kv(&quot;errno&quot;, ne.getErrno()).toString());</span>
+<span class="nc" id="L289">        }</span>
+<span class="nc" id="L290">    }</span>
+
+    private int offsetInBlock(long offset) {
+<span class="nc" id="L293">        long blockOffset = offset - currentBlock;</span>
+<span class="nc bnc" id="L294" title="All 4 branches missed.">        if (blockOffset &lt; 0 || blockOffset &gt; Integer.MAX_VALUE) {</span>
+<span class="nc" id="L295">            throw new IllegalArgumentException(exMsg(&quot;Invalid offset passed&quot;)</span>
+<span class="nc" id="L296">                                               .kv(&quot;offset&quot;, offset).kv(&quot;blockOffset&quot;, blockOffset)</span>
+<span class="nc" id="L297">                                               .kv(&quot;currentBlock&quot;, currentBlock).toString());</span>
+        }
+<span class="nc" id="L299">        return (int) blockOffset;</span>
+    }
+
+    private int sizeInBlock(long offset, int size) {
+<span class="nc bnc" id="L303" title="All 4 branches missed.">        if (offset &gt; currentBlockEnd || offset &lt; currentBlock) {</span>
+<span class="nc" id="L304">            throw new IllegalArgumentException(exMsg(&quot;Invalid offset passed&quot;)</span>
+<span class="nc" id="L305">                                               .kv(&quot;offset&quot;, offset)</span>
+<span class="nc" id="L306">                                               .kv(&quot;currentBlock&quot;, currentBlock)</span>
+<span class="nc" id="L307">                                               .kv(&quot;currentBlockEnd&quot;, currentBlockEnd).toString());</span>
+        }
+
+<span class="nc" id="L310">        long available = currentBlockEnd - offset;</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        checkState(available &lt;= Integer.MAX_VALUE, &quot;Available(%d) must be less than max int&quot;, available);</span>
+<span class="nc" id="L312">        return Math.min(size, (int) available);</span>
+    }
+
+    private static void assertValidOffset(long offset) {
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (offset &lt; 0) {</span>
+<span class="nc" id="L317">            throw new IllegalArgumentException(</span>
+<span class="nc" id="L318">                    exMsg(&quot;Offset can't be negative&quot;).kv(&quot;offset&quot;, offset).toString());</span>
+        }
+<span class="nc" id="L320">    }</span>
+
+    private static void assertValidEntryOffset(long offset) {
+<span class="nc" id="L323">        assertValidOffset(offset);</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">        if (offset &gt; Integer.MAX_VALUE) {</span>
+<span class="nc" id="L325">            throw new IllegalArgumentException(</span>
+<span class="nc" id="L326">                    exMsg(&quot;Entry offset must be less than max int&quot;).kv(&quot;offset&quot;, offset).toString());</span>
+        }
+<span class="nc" id="L328">    }</span>
+
+    private static void assertValidBlockSize(int blockSize) {
+<span class="nc bnc" id="L331" title="All 4 branches missed.">        boolean valid = blockSize &gt; 0 &amp;&amp; Buffer.isAligned(blockSize);</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">        if (!valid) {</span>
+<span class="nc" id="L333">            throw new IllegalArgumentException(</span>
+<span class="nc" id="L334">                    exMsg(&quot;Invalid block size, must be power of 2&quot;)</span>
+<span class="nc" id="L335">                    .kv(&quot;blockSize&quot;, blockSize)</span>
+<span class="nc" id="L336">                    .kv(&quot;minBlockSize&quot;, Buffer.ALIGNMENT).toString());</span>
+        }
+<span class="nc" id="L338">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

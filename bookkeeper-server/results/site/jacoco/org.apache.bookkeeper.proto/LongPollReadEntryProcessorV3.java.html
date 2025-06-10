@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LongPollReadEntryProcessorV3.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">LongPollReadEntryProcessorV3.java</span></div><h1>LongPollReadEntryProcessorV3.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.proto;
+
+import com.google.common.base.Stopwatch;
+import io.netty.util.HashedWheelTimer;
+import io.netty.util.Timeout;
+import java.io.IOException;
+import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.LastAddConfirmedUpdateNotification;
+import org.apache.bookkeeper.common.util.Watcher;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.ReadResponse;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Request;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.StatusCode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Processor handling long poll read entry request.
+ */
+class LongPollReadEntryProcessorV3 extends ReadEntryProcessorV3 implements Watcher&lt;LastAddConfirmedUpdateNotification&gt; {
+
+<span class="nc" id="L44">    private static final Logger logger = LoggerFactory.getLogger(LongPollReadEntryProcessorV3.class);</span>
+
+    private final Long previousLAC;
+<span class="nc" id="L47">    private Optional&lt;Long&gt; lastAddConfirmedUpdateTime = Optional.empty();</span>
+
+    // long poll execution state
+    private final ExecutorService longPollThreadPool;
+    private final HashedWheelTimer requestTimer;
+<span class="nc" id="L52">    private Timeout expirationTimerTask = null;</span>
+<span class="nc" id="L53">    private Future&lt;?&gt; deferredTask = null;</span>
+<span class="nc" id="L54">    private boolean shouldReadEntry = false;</span>
+
+    LongPollReadEntryProcessorV3(Request request,
+                                 BookieRequestHandler requestHandler,
+                                 BookieRequestProcessor requestProcessor,
+                                 ExecutorService fenceThreadPool,
+                                 ExecutorService longPollThreadPool,
+                                 HashedWheelTimer requestTimer) {
+<span class="nc" id="L62">        super(request, requestHandler, requestProcessor, fenceThreadPool);</span>
+<span class="nc" id="L63">        this.previousLAC = readRequest.getPreviousLAC();</span>
+<span class="nc" id="L64">        this.longPollThreadPool = longPollThreadPool;</span>
+<span class="nc" id="L65">        this.requestTimer = requestTimer;</span>
+
+<span class="nc" id="L67">    }</span>
+
+    @Override
+    protected Long getPreviousLAC() {
+<span class="nc" id="L71">        return previousLAC;</span>
+    }
+
+    private synchronized boolean shouldReadEntry() {
+<span class="nc" id="L75">        return shouldReadEntry;</span>
+    }
+
+    @Override
+    protected ReadResponse readEntry(ReadResponse.Builder readResponseBuilder,
+                                     long entryId,
+                                     Stopwatch startTimeSw)
+            throws IOException, BookieException {
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (RequestUtils.shouldPiggybackEntry(readRequest)) {</span>
+<span class="nc bnc" id="L84" title="All 4 branches missed.">            if (!readRequest.hasPreviousLAC() || (BookieProtocol.LAST_ADD_CONFIRMED != entryId)) {</span>
+                // This is not a valid request - client bug?
+<span class="nc" id="L86">                logger.error(&quot;Incorrect read request, entry piggyback requested incorrectly for ledgerId {} entryId {}&quot;,</span>
+<span class="nc" id="L87">                        ledgerId, entryId);</span>
+<span class="nc" id="L88">                return buildResponse(readResponseBuilder, StatusCode.EBADREQ, startTimeSw);</span>
+            } else {
+<span class="nc" id="L90">                long knownLAC = requestProcessor.bookie.readLastAddConfirmed(ledgerId);</span>
+<span class="nc" id="L91">                readResponseBuilder.setMaxLAC(knownLAC);</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">                if (knownLAC &gt; previousLAC) {</span>
+<span class="nc" id="L93">                    entryId = previousLAC + 1;</span>
+<span class="nc" id="L94">                    readResponseBuilder.setMaxLAC(knownLAC);</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                    if (lastAddConfirmedUpdateTime.isPresent()) {</span>
+<span class="nc" id="L96">                        readResponseBuilder.setLacUpdateTimestamp(lastAddConfirmedUpdateTime.get());</span>
+                    }
+<span class="nc bnc" id="L98" title="All 2 branches missed.">                    if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L99">                        logger.debug(&quot;ReadLAC Piggy Back reading entry:{} from ledger: {}&quot;, entryId, ledgerId);</span>
+                    }
+                    try {
+<span class="nc" id="L102">                        return super.readEntry(readResponseBuilder, entryId, true, startTimeSw);</span>
+<span class="nc" id="L103">                    } catch (Bookie.NoEntryException e) {</span>
+<span class="nc" id="L104">                        requestProcessor.getRequestStats().getReadLastEntryNoEntryErrorCounter().inc();</span>
+<span class="nc" id="L105">                        logger.info(</span>
+                                &quot;No entry found while piggyback reading entry {} from ledger {} : previous lac = {}&quot;,
+<span class="nc" id="L107">                                entryId, ledgerId, previousLAC);</span>
+                        // piggy back is best effort and this request can fail genuinely because of striping
+                        // entries across the ensemble
+<span class="nc" id="L110">                        return buildResponse(readResponseBuilder, StatusCode.EOK, startTimeSw);</span>
+                    }
+                } else {
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                    if (knownLAC &lt; previousLAC) {</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                        if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L115">                            logger.debug(&quot;Found smaller lac when piggy back reading lac and entry from ledger {} :&quot;</span>
+                                    + &quot; previous lac = {}, known lac = {}&quot;,
+<span class="nc" id="L117">                                    ledgerId, previousLAC, knownLAC);</span>
+                        }
+                    }
+<span class="nc" id="L120">                    return buildResponse(readResponseBuilder, StatusCode.EOK, startTimeSw);</span>
+                }
+            }
+        } else {
+<span class="nc" id="L124">            return super.readEntry(readResponseBuilder, entryId, false, startTimeSw);</span>
+        }
+    }
+
+    private ReadResponse buildErrorResponse(StatusCode statusCode, Stopwatch sw) {
+<span class="nc" id="L129">        ReadResponse.Builder builder = ReadResponse.newBuilder()</span>
+<span class="nc" id="L130">                .setLedgerId(ledgerId)</span>
+<span class="nc" id="L131">                .setEntryId(entryId);</span>
+<span class="nc" id="L132">        return buildResponse(builder, statusCode, sw);</span>
+    }
+
+    private ReadResponse getLongPollReadResponse() {
+<span class="nc bnc" id="L136" title="All 4 branches missed.">        if (!shouldReadEntry() &amp;&amp; readRequest.hasTimeOut()) {</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">            if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L138">                logger.trace(&quot;Waiting For LAC Update {}&quot;, previousLAC);</span>
+            }
+
+<span class="nc" id="L141">            final Stopwatch startTimeSw = Stopwatch.createStarted();</span>
+
+            final boolean watched;
+            try {
+<span class="nc" id="L145">                watched = requestProcessor.getBookie().waitForLastAddConfirmedUpdate(ledgerId, previousLAC, this);</span>
+<span class="nc" id="L146">            } catch (Bookie.NoLedgerException e) {</span>
+<span class="nc" id="L147">                logger.info(&quot;No ledger found while longpoll reading ledger {}, previous lac = {}.&quot;,</span>
+<span class="nc" id="L148">                        ledgerId, previousLAC);</span>
+<span class="nc" id="L149">                return buildErrorResponse(StatusCode.ENOLEDGER, startTimeSw);</span>
+<span class="nc" id="L150">            } catch (IOException ioe) {</span>
+<span class="nc" id="L151">                logger.error(&quot;IOException while longpoll reading ledger {}, previous lac = {} : &quot;,</span>
+<span class="nc" id="L152">                        ledgerId, previousLAC, ioe);</span>
+<span class="nc" id="L153">                return buildErrorResponse(StatusCode.EIO, startTimeSw);</span>
+<span class="nc" id="L154">            }</span>
+
+<span class="nc" id="L156">            registerSuccessfulEvent(requestProcessor.getRequestStats().getLongPollPreWaitStats(), startTimeSw);</span>
+<span class="nc" id="L157">            lastPhaseStartTime.reset().start();</span>
+
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            if (watched) {</span>
+                // successfully registered watcher to lac updates
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L162">                    logger.trace(&quot;Waiting For LAC Update {}: Timeout {}&quot;, previousLAC, readRequest.getTimeOut());</span>
+                }
+<span class="nc" id="L164">                synchronized (this) {</span>
+<span class="nc" id="L165">                    expirationTimerTask = requestTimer.newTimeout(timeout -&gt; {</span>
+<span class="nc" id="L166">                            requestProcessor.getBookie().cancelWaitForLastAddConfirmedUpdate(ledgerId, this);</span>
+                            // When the timeout expires just get whatever is the current
+                            // readLastConfirmed
+<span class="nc" id="L169">                            LongPollReadEntryProcessorV3.this.scheduleDeferredRead(true);</span>
+<span class="nc" id="L170">                    }, readRequest.getTimeOut(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L171">                }</span>
+<span class="nc" id="L172">                return null;</span>
+            }
+        }
+        // request doesn't have timeout or fail to wait, proceed to read entry
+<span class="nc" id="L176">        return getReadResponse();</span>
+    }
+
+    @Override
+    protected void executeOp() {
+<span class="nc" id="L181">        ReadResponse readResponse = getLongPollReadResponse();</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (null != readResponse) {</span>
+<span class="nc" id="L183">            sendResponse(readResponse);</span>
+        }
+<span class="nc" id="L185">    }</span>
+
+    @Override
+    public void update(LastAddConfirmedUpdateNotification newLACNotification) {
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        if (newLACNotification.getLastAddConfirmed() &gt; previousLAC) {</span>
+<span class="nc bnc" id="L190" title="All 4 branches missed.">            if (newLACNotification.getLastAddConfirmed() != Long.MAX_VALUE &amp;&amp; !lastAddConfirmedUpdateTime.isPresent()) {</span>
+<span class="nc" id="L191">                lastAddConfirmedUpdateTime = Optional.of(newLACNotification.getTimestamp());</span>
+            }
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L194">                logger.trace(&quot;Last Add Confirmed Advanced to {} for request {}&quot;,</span>
+<span class="nc" id="L195">                        newLACNotification.getLastAddConfirmed(), request);</span>
+            }
+<span class="nc" id="L197">            scheduleDeferredRead(false);</span>
+        }
+<span class="nc" id="L199">        newLACNotification.recycle();</span>
+<span class="nc" id="L200">    }</span>
+
+    private synchronized void scheduleDeferredRead(boolean timeout) {
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (null == deferredTask) {</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L205">                logger.trace(&quot;Deferred Task, expired: {}, request: {}&quot;, timeout, request);</span>
+            }
+            try {
+<span class="nc" id="L208">                shouldReadEntry = true;</span>
+<span class="nc" id="L209">                deferredTask = longPollThreadPool.submit(this);</span>
+<span class="nc" id="L210">            } catch (RejectedExecutionException exc) {</span>
+                // If the threadPool has been shutdown, simply drop the task
+<span class="nc" id="L212">            }</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">            if (null != expirationTimerTask) {</span>
+<span class="nc" id="L214">                expirationTimerTask.cancel();</span>
+            }
+
+<span class="nc" id="L217">            registerEvent(timeout, requestProcessor.getRequestStats().getLongPollWaitStats(), lastPhaseStartTime);</span>
+<span class="nc" id="L218">            lastPhaseStartTime.reset().start();</span>
+        }
+<span class="nc" id="L220">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

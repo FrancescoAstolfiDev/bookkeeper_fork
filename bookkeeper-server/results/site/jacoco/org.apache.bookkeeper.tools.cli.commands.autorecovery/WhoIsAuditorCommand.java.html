@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WhoIsAuditorCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.autorecovery</a> &gt; <span class="el_source">WhoIsAuditorCommand.java</span></div><h1>WhoIsAuditorCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.autorecovery;
+
+
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import java.io.IOException;
+import lombok.Cleanup;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to print which node has the auditor lock.
+ */
+public class WhoIsAuditorCommand extends BookieCommand&lt;CliFlags&gt; {
+
+<span class="nc" id="L41">    static final Logger LOG = LoggerFactory.getLogger(WhoIsAuditorCommand.class);</span>
+
+    private static final String NAME = &quot;whoisauditor&quot;;
+    private static final String DESC = &quot;Print the node which holds the auditor lock.&quot;;
+
+    private BookKeeperAdmin bka;
+
+    public WhoIsAuditorCommand() {
+<span class="nc" id="L49">        this(null);</span>
+<span class="nc" id="L50">    }</span>
+
+    public WhoIsAuditorCommand(BookKeeperAdmin bka) {
+<span class="nc" id="L53">        super(CliSpec.newBuilder()</span>
+<span class="nc" id="L54">                     .withName(NAME)</span>
+<span class="nc" id="L55">                     .withDescription(DESC)</span>
+<span class="nc" id="L56">                     .withFlags(new CliFlags())</span>
+<span class="nc" id="L57">                     .build());</span>
+<span class="nc" id="L58">        this.bka = bka;</span>
+<span class="nc" id="L59">    }</span>
+
+    @Override
+    public boolean apply(ServerConfiguration conf, CliFlags cmdFlags) {
+        try {
+<span class="nc" id="L64">            return getAuditor(conf);</span>
+<span class="nc" id="L65">        } catch (Exception e) {</span>
+<span class="nc" id="L66">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    private boolean getAuditor(ServerConfiguration conf)
+            throws BKException, InterruptedException, IOException {
+<span class="nc" id="L72">        ClientConfiguration clientConfiguration = new ClientConfiguration(conf);</span>
+
+        BookieId bookieId;
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (this.bka != null) {</span>
+<span class="nc" id="L76">            bookieId = bka.getCurrentAuditor();</span>
+        } else {
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            @Cleanup</span>
+<span class="nc" id="L79">            BookKeeperAdmin bka = new BookKeeperAdmin(clientConfiguration);</span>
+<span class="nc" id="L80">            bookieId = bka.getCurrentAuditor();</span>
+        }
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (bookieId == null) {</span>
+<span class="nc" id="L83">            LOG.info(&quot;No auditor elected&quot;);</span>
+<span class="nc" id="L84">            return false;</span>
+        }
+<span class="nc" id="L86">        LOG.info(&quot;Auditor: &quot; + bookieId);</span>
+<span class="nc" id="L87">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,691 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConcurrentOpenHashMap.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.util.collections</a> &gt; <span class="el_source">ConcurrentOpenHashMap.java</span></div><h1>ConcurrentOpenHashMap.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.util.collections;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.common.collect.Lists;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.locks.StampedLock;
+import java.util.function.BiConsumer;
+import java.util.function.BiPredicate;
+import java.util.function.Function;
+/**
+ * Concurrent hash map.
+ *
+ * &lt;p&gt;Provides similar methods as a {@code ConcurrentMap&lt;K,V&gt;} but since it's an open hash map with linear probing,
+ * no node allocations are required to store the values
+ *
+ * &lt;br&gt;
+ * &lt;b&gt;WARN: method forEach do not guarantee thread safety, nor do the keys and values method.&lt;/b&gt;
+ * &lt;br&gt;
+ * The forEach method is specifically designed for single-threaded usage. When iterating over a map
+ * with concurrent writes, it becomes possible for new values to be either observed or not observed.
+ * There is no guarantee that if we write value1 and value2, and are able to see value2, then we will also see value1.
+ * In some cases, it is even possible to encounter two mappings with the same key,
+ * leading the keys method to return a List containing two identical keys.
+ *
+ * &lt;br&gt;
+ * It is crucial to understand that the results obtained from aggregate status methods such as keys and values
+ * are typically reliable only when the map is not undergoing concurrent updates from other threads.
+ * When concurrent updates are involved, the results of these methods reflect transient states
+ * that may be suitable for monitoring or estimation purposes, but not for program control.
+ * @param &lt;V&gt;
+ */
+@SuppressWarnings(&quot;unchecked&quot;)
+public class ConcurrentOpenHashMap&lt;K, V&gt; {
+
+<span class="nc" id="L58">    private static final Object EmptyKey = null;</span>
+<span class="nc" id="L59">    private static final Object DeletedKey = new Object();</span>
+
+    private static final int DefaultExpectedItems = 256;
+    private static final int DefaultConcurrencyLevel = 16;
+
+    private static final float DefaultMapFillFactor = 0.66f;
+    private static final float DefaultMapIdleFactor = 0.15f;
+
+    private static final float DefaultExpandFactor = 2;
+    private static final float DefaultShrinkFactor = 2;
+
+    private static final boolean DefaultAutoShrink = false;
+
+    private final Section&lt;K, V&gt;[] sections;
+
+    public static &lt;K, V&gt; Builder&lt;K, V&gt; newBuilder() {
+<span class="nc" id="L75">        return new Builder&lt;&gt;();</span>
+    }
+
+    /**
+     * Builder of ConcurrentOpenHashMap.
+     */
+<span class="nc" id="L81">    public static class Builder&lt;K, V&gt; {</span>
+<span class="nc" id="L82">        int expectedItems = DefaultExpectedItems;</span>
+<span class="nc" id="L83">        int concurrencyLevel = DefaultConcurrencyLevel;</span>
+<span class="nc" id="L84">        float mapFillFactor = DefaultMapFillFactor;</span>
+<span class="nc" id="L85">        float mapIdleFactor = DefaultMapIdleFactor;</span>
+<span class="nc" id="L86">        float expandFactor = DefaultExpandFactor;</span>
+<span class="nc" id="L87">        float shrinkFactor = DefaultShrinkFactor;</span>
+<span class="nc" id="L88">        boolean autoShrink = DefaultAutoShrink;</span>
+
+        public Builder&lt;K, V&gt; expectedItems(int expectedItems) {
+<span class="nc" id="L91">            this.expectedItems = expectedItems;</span>
+<span class="nc" id="L92">            return this;</span>
+        }
+
+        public Builder&lt;K, V&gt; concurrencyLevel(int concurrencyLevel) {
+<span class="nc" id="L96">            this.concurrencyLevel = concurrencyLevel;</span>
+<span class="nc" id="L97">            return this;</span>
+        }
+
+        public Builder&lt;K, V&gt; mapFillFactor(float mapFillFactor) {
+<span class="nc" id="L101">            this.mapFillFactor = mapFillFactor;</span>
+<span class="nc" id="L102">            return this;</span>
+        }
+
+        public Builder&lt;K, V&gt; mapIdleFactor(float mapIdleFactor) {
+<span class="nc" id="L106">            this.mapIdleFactor = mapIdleFactor;</span>
+<span class="nc" id="L107">            return this;</span>
+        }
+
+        public Builder&lt;K, V&gt; expandFactor(float expandFactor) {
+<span class="nc" id="L111">            this.expandFactor = expandFactor;</span>
+<span class="nc" id="L112">            return this;</span>
+        }
+
+        public Builder&lt;K, V&gt; shrinkFactor(float shrinkFactor) {
+<span class="nc" id="L116">            this.shrinkFactor = shrinkFactor;</span>
+<span class="nc" id="L117">            return this;</span>
+        }
+
+        public Builder&lt;K, V&gt; autoShrink(boolean autoShrink) {
+<span class="nc" id="L121">            this.autoShrink = autoShrink;</span>
+<span class="nc" id="L122">            return this;</span>
+        }
+
+        public ConcurrentOpenHashMap&lt;K, V&gt; build() {
+<span class="nc" id="L126">            return new ConcurrentOpenHashMap&lt;&gt;(expectedItems, concurrencyLevel,</span>
+                    mapFillFactor, mapIdleFactor, autoShrink, expandFactor, shrinkFactor);
+        }
+    }
+
+    @Deprecated
+    public ConcurrentOpenHashMap() {
+<span class="nc" id="L133">        this(DefaultExpectedItems);</span>
+<span class="nc" id="L134">    }</span>
+
+    @Deprecated
+    public ConcurrentOpenHashMap(int expectedItems) {
+<span class="nc" id="L138">        this(expectedItems, DefaultConcurrencyLevel);</span>
+<span class="nc" id="L139">    }</span>
+
+    @Deprecated
+    public ConcurrentOpenHashMap(int expectedItems, int concurrencyLevel) {
+<span class="nc" id="L143">        this(expectedItems, concurrencyLevel, DefaultMapFillFactor, DefaultMapIdleFactor,</span>
+                DefaultAutoShrink, DefaultExpandFactor, DefaultShrinkFactor);
+<span class="nc" id="L145">    }</span>
+
+    public ConcurrentOpenHashMap(int expectedItems, int concurrencyLevel,
+                                 float mapFillFactor, float mapIdleFactor,
+<span class="nc" id="L149">                                 boolean autoShrink, float expandFactor, float shrinkFactor) {</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        checkArgument(expectedItems &gt; 0);</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        checkArgument(concurrencyLevel &gt; 0);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        checkArgument(expectedItems &gt;= concurrencyLevel);</span>
+<span class="nc bnc" id="L153" title="All 4 branches missed.">        checkArgument(mapFillFactor &gt; 0 &amp;&amp; mapFillFactor &lt; 1);</span>
+<span class="nc bnc" id="L154" title="All 4 branches missed.">        checkArgument(mapIdleFactor &gt; 0 &amp;&amp; mapIdleFactor &lt; 1);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        checkArgument(mapFillFactor &gt; mapIdleFactor);</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        checkArgument(expandFactor &gt; 1);</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        checkArgument(shrinkFactor &gt; 1);</span>
+
+<span class="nc" id="L159">        int numSections = concurrencyLevel;</span>
+<span class="nc" id="L160">        int perSectionExpectedItems = expectedItems / numSections;</span>
+<span class="nc" id="L161">        int perSectionCapacity = (int) (perSectionExpectedItems / mapFillFactor);</span>
+<span class="nc" id="L162">        this.sections = (Section&lt;K, V&gt;[]) new Section[numSections];</span>
+
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        for (int i = 0; i &lt; numSections; i++) {</span>
+<span class="nc" id="L165">            sections[i] = new Section&lt;&gt;(perSectionCapacity, mapFillFactor, mapIdleFactor,</span>
+                    autoShrink, expandFactor, shrinkFactor);
+        }
+<span class="nc" id="L168">    }</span>
+
+    long getUsedBucketCount() {
+<span class="nc" id="L171">        long usedBucketCount = 0;</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        for (Section&lt;K, V&gt; s : sections) {</span>
+<span class="nc" id="L173">            usedBucketCount += s.usedBuckets;</span>
+        }
+<span class="nc" id="L175">        return usedBucketCount;</span>
+    }
+
+    public long size() {
+<span class="nc" id="L179">        long size = 0;</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        for (Section&lt;K, V&gt; s : sections) {</span>
+<span class="nc" id="L181">            size += s.size;</span>
+        }
+<span class="nc" id="L183">        return size;</span>
+    }
+
+    public long capacity() {
+<span class="nc" id="L187">        long capacity = 0;</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        for (Section&lt;K, V&gt; s : sections) {</span>
+<span class="nc" id="L189">            capacity += s.capacity;</span>
+        }
+<span class="nc" id="L191">        return capacity;</span>
+    }
+
+    public boolean isEmpty() {
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        for (Section&lt;K, V&gt; s : sections) {</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            if (s.size != 0) {</span>
+<span class="nc" id="L197">                return false;</span>
+            }
+        }
+
+<span class="nc" id="L201">        return true;</span>
+    }
+
+    public V get(K key) {
+<span class="nc" id="L205">        checkNotNull(key);</span>
+<span class="nc" id="L206">        long h = hash(key);</span>
+<span class="nc" id="L207">        return getSection(h).get(key, (int) h);</span>
+    }
+
+    public boolean containsKey(K key) {
+<span class="nc bnc" id="L211" title="All 2 branches missed.">        return get(key) != null;</span>
+    }
+
+    public V put(K key, V value) {
+<span class="nc" id="L215">        checkNotNull(key);</span>
+<span class="nc" id="L216">        checkNotNull(value);</span>
+<span class="nc" id="L217">        long h = hash(key);</span>
+<span class="nc" id="L218">        return getSection(h).put(key, value, (int) h, false, null);</span>
+    }
+
+    public V putIfAbsent(K key, V value) {
+<span class="nc" id="L222">        checkNotNull(key);</span>
+<span class="nc" id="L223">        checkNotNull(value);</span>
+<span class="nc" id="L224">        long h = hash(key);</span>
+<span class="nc" id="L225">        return getSection(h).put(key, value, (int) h, true, null);</span>
+    }
+
+    public V computeIfAbsent(K key, Function&lt;K, V&gt; provider) {
+<span class="nc" id="L229">        checkNotNull(key);</span>
+<span class="nc" id="L230">        checkNotNull(provider);</span>
+<span class="nc" id="L231">        long h = hash(key);</span>
+<span class="nc" id="L232">        return getSection(h).put(key, null, (int) h, true, provider);</span>
+    }
+
+    public V remove(K key) {
+<span class="nc" id="L236">        checkNotNull(key);</span>
+<span class="nc" id="L237">        long h = hash(key);</span>
+<span class="nc" id="L238">        return getSection(h).remove(key, null, (int) h);</span>
+    }
+
+    public boolean remove(K key, Object value) {
+<span class="nc" id="L242">        checkNotNull(key);</span>
+<span class="nc" id="L243">        checkNotNull(value);</span>
+<span class="nc" id="L244">        long h = hash(key);</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        return getSection(h).remove(key, value, (int) h) != null;</span>
+    }
+
+    private Section&lt;K, V&gt; getSection(long hash) {
+        // Use 32 msb out of long to get the section
+<span class="nc" id="L250">        final int sectionIdx = (int) (hash &gt;&gt;&gt; 32) &amp; (sections.length - 1);</span>
+<span class="nc" id="L251">        return sections[sectionIdx];</span>
+    }
+
+    public void clear() {
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        for (Section&lt;K, V&gt; s : sections) {</span>
+<span class="nc" id="L256">            s.clear();</span>
+        }
+<span class="nc" id="L258">    }</span>
+
+    /**
+     * Iterate over all the entries in the map and apply the processor function to each of them.
+     * &lt;p&gt;
+     * &lt;b&gt;Warning: Do Not Guarantee Thread-Safety.&lt;/b&gt;
+     * @param processor the function to apply to each entry
+     */
+    public void forEach(BiConsumer&lt;? super K, ? super V&gt; processor) {
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        for (Section&lt;K, V&gt; s : sections) {</span>
+<span class="nc" id="L268">            s.forEach(processor);</span>
+        }
+<span class="nc" id="L270">    }</span>
+
+    public int removeIf(BiPredicate&lt;K, V&gt; filter) {
+<span class="nc" id="L273">        checkNotNull(filter);</span>
+
+<span class="nc" id="L275">        int removedCount = 0;</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        for (Section&lt;K, V&gt; s : sections) {</span>
+<span class="nc" id="L277">            removedCount += s.removeIf(filter);</span>
+        }
+
+<span class="nc" id="L280">        return removedCount;</span>
+    }
+
+    /**
+     * @return a new list of all keys (makes a copy)
+     */
+    public List&lt;K&gt; keys() {
+<span class="nc" id="L287">        List&lt;K&gt; keys = Lists.newArrayList();</span>
+<span class="nc" id="L288">        forEach((key, value) -&gt; keys.add(key));</span>
+<span class="nc" id="L289">        return keys;</span>
+    }
+
+    public List&lt;V&gt; values() {
+<span class="nc" id="L293">        List&lt;V&gt; values = Lists.newArrayList();</span>
+<span class="nc" id="L294">        forEach((key, value) -&gt; values.add(value));</span>
+<span class="nc" id="L295">        return values;</span>
+    }
+
+    // A section is a portion of the hash map that is covered by a single
+    @SuppressWarnings(&quot;serial&quot;)
+    private static final class Section&lt;K, V&gt; extends StampedLock {
+        // Each item take up 2 continuous array space.
+        private static final int ITEM_SIZE = 2;
+
+        // Keys and values are stored interleaved in the table array
+        private volatile Object[] table;
+
+        private volatile int capacity;
+        private final int initCapacity;
+        private volatile int size;
+        private int usedBuckets;
+        private int resizeThresholdUp;
+        private int resizeThresholdBelow;
+        private final float mapFillFactor;
+        private final float mapIdleFactor;
+        private final float expandFactor;
+        private final float shrinkFactor;
+        private final boolean autoShrink;
+
+        Section(int capacity, float mapFillFactor, float mapIdleFactor, boolean autoShrink,
+<span class="nc" id="L320">                float expandFactor, float shrinkFactor) {</span>
+<span class="nc" id="L321">            this.capacity = alignToPowerOfTwo(capacity);</span>
+<span class="nc" id="L322">            this.initCapacity = this.capacity;</span>
+<span class="nc" id="L323">            this.table = new Object[ITEM_SIZE * this.capacity];</span>
+<span class="nc" id="L324">            this.size = 0;</span>
+<span class="nc" id="L325">            this.usedBuckets = 0;</span>
+<span class="nc" id="L326">            this.autoShrink = autoShrink;</span>
+<span class="nc" id="L327">            this.mapFillFactor = mapFillFactor;</span>
+<span class="nc" id="L328">            this.mapIdleFactor = mapIdleFactor;</span>
+<span class="nc" id="L329">            this.expandFactor = expandFactor;</span>
+<span class="nc" id="L330">            this.shrinkFactor = shrinkFactor;</span>
+<span class="nc" id="L331">            this.resizeThresholdUp = (int) (this.capacity * mapFillFactor);</span>
+<span class="nc" id="L332">            this.resizeThresholdBelow = (int) (this.capacity * mapIdleFactor);</span>
+<span class="nc" id="L333">        }</span>
+
+        V get(K key, int keyHash) {
+<span class="nc" id="L336">            long stamp = tryOptimisticRead();</span>
+<span class="nc" id="L337">            boolean acquiredLock = false;</span>
+
+            // add local variable here, so OutOfBound won't happen
+<span class="nc" id="L340">            Object[] table = this.table;</span>
+            // calculate table.length / 2 as capacity to avoid rehash changing capacity
+<span class="nc" id="L342">            int bucket = signSafeMod(keyHash, table.length / ITEM_SIZE);</span>
+
+            try {
+                while (true) {
+                    // First try optimistic locking
+<span class="nc" id="L347">                    K storedKey = (K) table[bucket];</span>
+<span class="nc" id="L348">                    V storedValue = (V) table[bucket + 1];</span>
+
+<span class="nc bnc" id="L350" title="All 4 branches missed.">                    if (!acquiredLock &amp;&amp; validate(stamp)) {</span>
+                        // The values we have read are consistent
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                        if (key.equals(storedKey)) {</span>
+<span class="nc" id="L353">                            return storedValue;</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">                        } else if (storedKey == EmptyKey) {</span>
+                            // Not found
+<span class="nc" id="L356">                            return null;</span>
+                        }
+                    } else {
+                        // Fallback to acquiring read lock
+<span class="nc bnc" id="L360" title="All 2 branches missed.">                        if (!acquiredLock) {</span>
+<span class="nc" id="L361">                            stamp = readLock();</span>
+<span class="nc" id="L362">                            acquiredLock = true;</span>
+
+                            // update local variable
+<span class="nc" id="L365">                            table = this.table;</span>
+<span class="nc" id="L366">                            bucket = signSafeMod(keyHash, table.length / ITEM_SIZE);</span>
+<span class="nc" id="L367">                            storedKey = (K) table[bucket];</span>
+<span class="nc" id="L368">                            storedValue = (V) table[bucket + 1];</span>
+                        }
+
+<span class="nc bnc" id="L371" title="All 2 branches missed.">                        if (key.equals(storedKey)) {</span>
+<span class="nc" id="L372">                            return storedValue;</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                        } else if (storedKey == EmptyKey) {</span>
+                            // Not found
+<span class="nc" id="L375">                            return null;</span>
+                        }
+                    }
+
+<span class="nc" id="L379">                    bucket = (bucket + ITEM_SIZE) &amp; (table.length - 1);</span>
+<span class="nc" id="L380">                }</span>
+            } finally {
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                if (acquiredLock) {</span>
+<span class="nc" id="L383">                    unlockRead(stamp);</span>
+                }
+            }
+        }
+
+        V put(K key, V value, int keyHash, boolean onlyIfAbsent, Function&lt;K, V&gt; valueProvider) {
+<span class="nc" id="L389">            long stamp = writeLock();</span>
+<span class="nc" id="L390">            int bucket = signSafeMod(keyHash, capacity);</span>
+
+            // Remember where we find the first available spot
+<span class="nc" id="L393">            int firstDeletedKey = -1;</span>
+
+            try {
+                while (true) {
+<span class="nc" id="L397">                    K storedKey = (K) table[bucket];</span>
+<span class="nc" id="L398">                    V storedValue = (V) table[bucket + 1];</span>
+
+<span class="nc bnc" id="L400" title="All 2 branches missed.">                    if (key.equals(storedKey)) {</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">                        if (!onlyIfAbsent) {</span>
+                            // Over written an old value for same key
+<span class="nc" id="L403">                            table[bucket + 1] = value;</span>
+<span class="nc" id="L404">                            return storedValue;</span>
+                        } else {
+<span class="nc" id="L406">                            return storedValue;</span>
+                        }
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                    } else if (storedKey == EmptyKey) {</span>
+                        // Found an empty bucket. This means the key is not in the map. If we've already seen a deleted
+                        // key, we should write at that position
+<span class="nc bnc" id="L411" title="All 2 branches missed.">                        if (firstDeletedKey != -1) {</span>
+<span class="nc" id="L412">                            bucket = firstDeletedKey;</span>
+                        } else {
+<span class="nc" id="L414">                            ++usedBuckets;</span>
+                        }
+
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                        if (value == null) {</span>
+<span class="nc" id="L418">                            value = valueProvider.apply(key);</span>
+                        }
+
+<span class="nc" id="L421">                        table[bucket] = key;</span>
+<span class="nc" id="L422">                        table[bucket + 1] = value;</span>
+<span class="nc" id="L423">                        ++size;</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">                        return valueProvider != null ? value : null;</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">                    } else if (storedKey == DeletedKey) {</span>
+                        // The bucket contained a different deleted key
+<span class="nc bnc" id="L427" title="All 2 branches missed.">                        if (firstDeletedKey == -1) {</span>
+<span class="nc" id="L428">                            firstDeletedKey = bucket;</span>
+                        }
+                    }
+
+<span class="nc" id="L432">                    bucket = (bucket + ITEM_SIZE) &amp; (table.length - 1);</span>
+<span class="nc" id="L433">                }</span>
+            } finally {
+<span class="nc bnc" id="L435" title="All 2 branches missed.">                if (usedBuckets &gt; resizeThresholdUp) {</span>
+                    try {
+                        // Expand the hashmap
+<span class="nc" id="L438">                        int newCapacity = alignToPowerOfTwo((int) (capacity * expandFactor));</span>
+<span class="nc" id="L439">                        rehash(newCapacity);</span>
+                    } finally {
+<span class="nc" id="L441">                        unlockWrite(stamp);</span>
+<span class="nc" id="L442">                    }</span>
+                } else {
+<span class="nc" id="L444">                    unlockWrite(stamp);</span>
+                }
+            }
+        }
+
+        private V remove(K key, Object value, int keyHash) {
+<span class="nc" id="L450">            long stamp = writeLock();</span>
+<span class="nc" id="L451">            int bucket = signSafeMod(keyHash, capacity);</span>
+
+            try {
+                while (true) {
+<span class="nc" id="L455">                    K storedKey = (K) table[bucket];</span>
+<span class="nc" id="L456">                    V storedValue = (V) table[bucket + 1];</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">                    if (key.equals(storedKey)) {</span>
+<span class="nc bnc" id="L458" title="All 4 branches missed.">                        if (value == null || value.equals(storedValue)) {</span>
+<span class="nc" id="L459">                            --size;</span>
+<span class="nc" id="L460">                            cleanBucket(bucket);</span>
+<span class="nc" id="L461">                            return storedValue;</span>
+                        } else {
+<span class="nc" id="L463">                            return null;</span>
+                        }
+<span class="nc bnc" id="L465" title="All 2 branches missed.">                    } else if (storedKey == EmptyKey) {</span>
+                        // Key wasn't found
+<span class="nc" id="L467">                        return null;</span>
+                    }
+
+<span class="nc" id="L470">                    bucket = (bucket + ITEM_SIZE) &amp; (table.length - 1);</span>
+<span class="nc" id="L471">                }</span>
+
+            } finally {
+<span class="nc bnc" id="L474" title="All 4 branches missed.">                if (autoShrink &amp;&amp; size &lt; resizeThresholdBelow) {</span>
+                    try {
+                        // Shrinking must at least ensure initCapacity,
+                        // so as to avoid frequent shrinking and expansion near initCapacity,
+                        // frequent shrinking and expansion,
+                        // additionally opened arrays will consume more memory and affect GC
+<span class="nc" id="L480">                        int newCapacity = Math.max(alignToPowerOfTwo((int) (capacity / shrinkFactor)), initCapacity);</span>
+<span class="nc" id="L481">                        int newResizeThresholdUp = (int) (newCapacity * mapFillFactor);</span>
+<span class="nc bnc" id="L482" title="All 4 branches missed.">                        if (newCapacity &lt; capacity &amp;&amp; newResizeThresholdUp &gt; size) {</span>
+                            // shrink the hashmap
+<span class="nc" id="L484">                            rehash(newCapacity);</span>
+                        }
+                    } finally {
+<span class="nc" id="L487">                        unlockWrite(stamp);</span>
+<span class="nc" id="L488">                    }</span>
+                } else {
+<span class="nc" id="L490">                    unlockWrite(stamp);</span>
+                }
+            }
+        }
+
+        void clear() {
+<span class="nc" id="L496">            long stamp = writeLock();</span>
+
+            try {
+<span class="nc bnc" id="L499" title="All 4 branches missed.">                if (autoShrink &amp;&amp; capacity &gt; initCapacity) {</span>
+<span class="nc" id="L500">                    shrinkToInitCapacity();</span>
+                } else {
+<span class="nc" id="L502">                    Arrays.fill(table, EmptyKey);</span>
+<span class="nc" id="L503">                    this.size = 0;</span>
+<span class="nc" id="L504">                    this.usedBuckets = 0;</span>
+                }
+            } finally {
+<span class="nc" id="L507">                unlockWrite(stamp);</span>
+            }
+<span class="nc" id="L509">        }</span>
+
+        public void forEach(BiConsumer&lt;? super K, ? super V&gt; processor) {
+<span class="nc" id="L512">            long stamp = tryOptimisticRead();</span>
+
+<span class="nc" id="L514">            Object[] table = this.table;</span>
+<span class="nc" id="L515">            boolean acquiredReadLock = false;</span>
+
+            try {
+
+                // Validate no rehashing
+<span class="nc bnc" id="L520" title="All 2 branches missed.">                if (!validate(stamp)) {</span>
+                    // Fallback to read lock
+<span class="nc" id="L522">                    stamp = readLock();</span>
+<span class="nc" id="L523">                    acquiredReadLock = true;</span>
+<span class="nc" id="L524">                    table = this.table;</span>
+                }
+
+                // Go through all the buckets for this section
+<span class="nc bnc" id="L528" title="All 2 branches missed.">                for (int bucket = 0; bucket &lt; table.length; bucket += ITEM_SIZE) {</span>
+<span class="nc" id="L529">                    K storedKey = (K) table[bucket];</span>
+<span class="nc" id="L530">                    V storedValue = (V) table[bucket + 1];</span>
+
+<span class="nc bnc" id="L532" title="All 4 branches missed.">                    if (!acquiredReadLock &amp;&amp; !validate(stamp)) {</span>
+                        // Fallback to acquiring read lock
+<span class="nc" id="L534">                        stamp = readLock();</span>
+<span class="nc" id="L535">                        acquiredReadLock = true;</span>
+
+<span class="nc" id="L537">                        storedKey = (K) table[bucket];</span>
+<span class="nc" id="L538">                        storedValue = (V) table[bucket + 1];</span>
+                    }
+
+<span class="nc bnc" id="L541" title="All 4 branches missed.">                    if (storedKey != DeletedKey &amp;&amp; storedKey != EmptyKey) {</span>
+<span class="nc" id="L542">                        processor.accept(storedKey, storedValue);</span>
+                    }
+                }
+            } finally {
+<span class="nc bnc" id="L546" title="All 2 branches missed.">                if (acquiredReadLock) {</span>
+<span class="nc" id="L547">                    unlockRead(stamp);</span>
+                }
+            }
+<span class="nc" id="L550">        }</span>
+
+        int removeIf(BiPredicate&lt;K, V&gt; filter) {
+<span class="nc" id="L553">            long stamp = writeLock();</span>
+
+<span class="nc" id="L555">            int removedCount = 0;</span>
+            try {
+                // Go through all the buckets for this section
+<span class="nc bnc" id="L558" title="All 4 branches missed.">                for (int bucket = 0; size &gt; 0 &amp;&amp; bucket &lt; table.length; bucket += ITEM_SIZE) {</span>
+<span class="nc" id="L559">                    K storedKey = (K) table[bucket];</span>
+<span class="nc" id="L560">                    V storedValue = (V) table[bucket + 1];</span>
+
+<span class="nc bnc" id="L562" title="All 4 branches missed.">                    if (storedKey != DeletedKey &amp;&amp; storedKey != EmptyKey) {</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">                        if (filter.test(storedKey, storedValue)) {</span>
+                            // Removing item
+<span class="nc" id="L565">                            --size;</span>
+<span class="nc" id="L566">                            ++removedCount;</span>
+<span class="nc" id="L567">                            cleanBucket(bucket);</span>
+                        }
+                    }
+                }
+
+<span class="nc" id="L572">                return removedCount;</span>
+            } finally {
+<span class="nc bnc" id="L574" title="All 4 branches missed.">                if (autoShrink &amp;&amp; size &lt; resizeThresholdBelow) {</span>
+                    try {
+                        // Shrinking must at least ensure initCapacity,
+                        // so as to avoid frequent shrinking and expansion near initCapacity,
+                        // frequent shrinking and expansion,
+                        // additionally opened arrays will consume more memory and affect GC
+<span class="nc" id="L580">                        int newCapacity = Math.max(alignToPowerOfTwo((int) (capacity / shrinkFactor)), initCapacity);</span>
+<span class="nc" id="L581">                        int newResizeThresholdUp = (int) (newCapacity * mapFillFactor);</span>
+<span class="nc bnc" id="L582" title="All 4 branches missed.">                        if (newCapacity &lt; capacity &amp;&amp; newResizeThresholdUp &gt; size) {</span>
+                            // shrink the hashmap
+<span class="nc" id="L584">                            rehash(newCapacity);</span>
+                        }
+                    } finally {
+<span class="nc" id="L587">                        unlockWrite(stamp);</span>
+<span class="nc" id="L588">                    }</span>
+                } else {
+<span class="nc" id="L590">                    unlockWrite(stamp);</span>
+                }
+            }
+        }
+
+        private void cleanBucket(int bucket) {
+<span class="nc" id="L596">            int nextInArray = (bucket + ITEM_SIZE) &amp; (table.length - 1);</span>
+<span class="nc bnc" id="L597" title="All 2 branches missed.">            if (table[nextInArray] == EmptyKey) {</span>
+<span class="nc" id="L598">                table[bucket] = EmptyKey;</span>
+<span class="nc" id="L599">                table[bucket + 1] = null;</span>
+<span class="nc" id="L600">                --usedBuckets;</span>
+
+                // Cleanup all the buckets that were in `DeletedKey` state,
+                // so that we can reduce unnecessary expansions
+<span class="nc" id="L604">                bucket = (bucket - ITEM_SIZE) &amp; (table.length - 1);</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">                while (table[bucket] == DeletedKey) {</span>
+<span class="nc" id="L606">                    table[bucket] = EmptyKey;</span>
+<span class="nc" id="L607">                    table[bucket + 1] = null;</span>
+<span class="nc" id="L608">                    --usedBuckets;</span>
+
+<span class="nc" id="L610">                    bucket = (bucket - ITEM_SIZE) &amp; (table.length - 1);</span>
+                }
+            } else {
+<span class="nc" id="L613">                table[bucket] = DeletedKey;</span>
+<span class="nc" id="L614">                table[bucket + 1] = null;</span>
+            }
+<span class="nc" id="L616">        }</span>
+
+        private void rehash(int newCapacity) {
+            // Expand the hashmap
+<span class="nc" id="L620">            Object[] newTable = new Object[ITEM_SIZE * newCapacity];</span>
+
+            // Re-hash table
+<span class="nc bnc" id="L623" title="All 2 branches missed.">            for (int i = 0; i &lt; table.length; i += ITEM_SIZE) {</span>
+<span class="nc" id="L624">                K storedKey = (K) table[i];</span>
+<span class="nc" id="L625">                V storedValue = (V) table[i + 1];</span>
+<span class="nc bnc" id="L626" title="All 4 branches missed.">                if (storedKey != EmptyKey &amp;&amp; storedKey != DeletedKey) {</span>
+<span class="nc" id="L627">                    insertKeyValueNoLock(newTable, newCapacity, storedKey, storedValue);</span>
+                }
+            }
+
+<span class="nc" id="L631">            table = newTable;</span>
+<span class="nc" id="L632">            usedBuckets = size;</span>
+            // Capacity needs to be updated after the values, so that we won't see
+            // a capacity value bigger than the actual array size
+<span class="nc" id="L635">            capacity = newCapacity;</span>
+<span class="nc" id="L636">            resizeThresholdUp = (int) (capacity * mapFillFactor);</span>
+<span class="nc" id="L637">            resizeThresholdBelow = (int) (capacity * mapIdleFactor);</span>
+<span class="nc" id="L638">        }</span>
+
+        private void shrinkToInitCapacity() {
+<span class="nc" id="L641">            Object[] newTable = new Object[ITEM_SIZE * initCapacity];</span>
+
+<span class="nc" id="L643">            table = newTable;</span>
+<span class="nc" id="L644">            size = 0;</span>
+<span class="nc" id="L645">            usedBuckets = 0;</span>
+            // Capacity needs to be updated after the values, so that we won't see
+            // a capacity value bigger than the actual array size
+<span class="nc" id="L648">            capacity = initCapacity;</span>
+<span class="nc" id="L649">            resizeThresholdUp = (int) (capacity * mapFillFactor);</span>
+<span class="nc" id="L650">            resizeThresholdBelow = (int) (capacity * mapIdleFactor);</span>
+<span class="nc" id="L651">        }</span>
+
+        private static &lt;K, V&gt; void insertKeyValueNoLock(Object[] table, int capacity, K key, V value) {
+<span class="nc" id="L654">            int bucket = signSafeMod(hash(key), capacity);</span>
+
+            while (true) {
+<span class="nc" id="L657">                K storedKey = (K) table[bucket];</span>
+
+<span class="nc bnc" id="L659" title="All 2 branches missed.">                if (storedKey == EmptyKey) {</span>
+                    // The bucket is empty, so we can use it
+<span class="nc" id="L661">                    table[bucket] = key;</span>
+<span class="nc" id="L662">                    table[bucket + 1] = value;</span>
+<span class="nc" id="L663">                    return;</span>
+                }
+
+<span class="nc" id="L666">                bucket = (bucket + ITEM_SIZE) &amp; (table.length - 1);</span>
+<span class="nc" id="L667">            }</span>
+        }
+    }
+
+    private static final long HashMixer = 0xc6a4a7935bd1e995L;
+    private static final int R = 47;
+
+    static final &lt;K&gt; long hash(K key) {
+<span class="nc" id="L675">        long hash = key.hashCode() * HashMixer;</span>
+<span class="nc" id="L676">        hash ^= hash &gt;&gt;&gt; R;</span>
+<span class="nc" id="L677">        hash *= HashMixer;</span>
+<span class="nc" id="L678">        return hash;</span>
+    }
+
+    static final int signSafeMod(long n, int max) {
+        // as the ITEM_SIZE of Section is 2, so the index is the multiple of 2
+        // that is to left shift 1 bit
+<span class="nc" id="L684">        return (int) (n &amp; (max - 1)) &lt;&lt; 1;</span>
+    }
+
+    private static int alignToPowerOfTwo(int n) {
+<span class="nc" id="L688">        return (int) Math.pow(2, 32 - Integer.numberOfLeadingZeros(n - 1));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

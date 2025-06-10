@@ -1,0 +1,697 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractZkLedgerManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">AbstractZkLedgerManager.java</span></div><h1>AbstractZkLedgerManager.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import com.google.common.annotations.VisibleForTesting;
+import io.netty.util.concurrent.DefaultThreadFactory;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.List;
+import java.util.NavigableSet;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.LedgerMetadataBuilder;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.LedgerMetadataListener;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.MultiCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.util.BookKeeperConstants;
+import org.apache.bookkeeper.util.ZkUtils;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.zookeeper.AsyncCallback;
+import org.apache.zookeeper.AsyncCallback.DataCallback;
+import org.apache.zookeeper.AsyncCallback.StatCallback;
+import org.apache.zookeeper.AsyncCallback.StringCallback;
+import org.apache.zookeeper.AsyncCallback.VoidCallback;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.KeeperException.Code;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.ACL;
+import org.apache.zookeeper.data.Stat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Abstract ledger manager based on zookeeper, which provides common methods such as query zk nodes.
+ */
+public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher {
+
+<span class="nc" id="L73">    private static final Logger LOG = LoggerFactory.getLogger(AbstractZkLedgerManager.class);</span>
+
+    @VisibleForTesting
+    static final int ZK_CONNECT_BACKOFF_MS = 200;
+
+    private final LedgerMetadataSerDe serDe;
+    protected final AbstractConfiguration conf;
+    protected final ZooKeeper zk;
+    protected final String ledgerRootPath;
+
+    // ledger metadata listeners
+<span class="nc" id="L84">    protected final ConcurrentMap&lt;Long, Set&lt;LedgerMetadataListener&gt;&gt; listeners =</span>
+            new ConcurrentHashMap&lt;Long, Set&lt;LedgerMetadataListener&gt;&gt;();
+    // we use this to prevent long stack chains from building up in callbacks
+    protected ScheduledExecutorService scheduler;
+
+    /**
+     * ReadLedgerMetadataTask class.
+     */
+    protected class ReadLedgerMetadataTask implements Runnable {
+
+        final long ledgerId;
+
+<span class="nc" id="L96">        ReadLedgerMetadataTask(long ledgerId) {</span>
+<span class="nc" id="L97">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L98">        }</span>
+
+        @Override
+        public void run() {
+<span class="nc bnc" id="L102" title="All 2 branches missed.">            if (null != listeners.get(ledgerId)) {</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L104">                    LOG.debug(&quot;Re-read ledger metadata for {}.&quot;, ledgerId);</span>
+                }
+<span class="nc" id="L106">                readLedgerMetadata(ledgerId, AbstractZkLedgerManager.this)</span>
+<span class="nc" id="L107">                    .whenComplete((metadata, exception) -&gt; handleMetadata(metadata, exception));</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">            } else if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L109">                LOG.debug(&quot;Ledger metadata listener for ledger {} is already removed.&quot;, ledgerId);</span>
+            }
+<span class="nc" id="L111">        }</span>
+
+        private void handleMetadata(Versioned&lt;LedgerMetadata&gt; result, Throwable exception) {
+<span class="nc bnc" id="L114" title="All 2 branches missed.">            if (exception == null) {</span>
+<span class="nc" id="L115">                final Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                if (null != listenerSet) {</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L118">                        LOG.debug(&quot;Ledger metadata is changed for {} : {}.&quot;, ledgerId, result);</span>
+                    }
+<span class="nc" id="L120">                    scheduler.submit(() -&gt; {</span>
+<span class="nc" id="L121">                            synchronized (listenerSet) {</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">                                for (LedgerMetadataListener listener : listenerSet) {</span>
+<span class="nc" id="L123">                                    listener.onChanged(ledgerId, result);</span>
+<span class="nc" id="L124">                                }</span>
+<span class="nc" id="L125">                            }</span>
+<span class="nc" id="L126">                        });</span>
+                }
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            } else if (BKException.getExceptionCode(exception)</span>
+                    == BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {
+                // the ledger is removed, do nothing
+<span class="nc" id="L131">                Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.remove(ledgerId);</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                if (null != listenerSet) {</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L134">                        LOG.debug(&quot;Removed ledger metadata listener set on ledger {} as its ledger is deleted : {}&quot;,</span>
+<span class="nc" id="L135">                                ledgerId, listenerSet.size());</span>
+                    }
+                    // notify `null` as indicator that a ledger is deleted
+                    // make this behavior consistent with `NodeDeleted` watched event.
+<span class="nc" id="L139">                    synchronized (listenerSet) {</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                        for (LedgerMetadataListener listener : listenerSet) {</span>
+<span class="nc" id="L141">                            listener.onChanged(ledgerId, null);</span>
+<span class="nc" id="L142">                        }</span>
+<span class="nc" id="L143">                    }</span>
+                }
+<span class="nc" id="L145">            } else {</span>
+<span class="nc" id="L146">                LOG.warn(&quot;Failed on read ledger metadata of ledger {}: {}&quot;,</span>
+<span class="nc" id="L147">                         ledgerId, BKException.getExceptionCode(exception));</span>
+<span class="nc" id="L148">                scheduler.schedule(this, ZK_CONNECT_BACKOFF_MS, TimeUnit.MILLISECONDS);</span>
+            }
+<span class="nc" id="L150">        }</span>
+    }
+
+    /**
+     * CancelWatchLedgerMetadataTask class.
+     */
+    protected class CancelWatchLedgerMetadataTask implements Runnable {
+
+        final long ledgerId;
+
+<span class="nc" id="L160">        CancelWatchLedgerMetadataTask(long ledgerId) {</span>
+<span class="nc" id="L161">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L162">        }</span>
+
+        @Override
+        public void run() {
+<span class="nc" id="L166">            Set&lt;LedgerMetadataListener&gt; listeners = AbstractZkLedgerManager.this.listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">            if (!CollectionUtils.isEmpty(listeners)) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L169">                    LOG.debug(&quot;Still watch ledgerId: {}, ignore this unwatch task.&quot;, ledgerId);</span>
+                }
+<span class="nc" id="L171">                return;</span>
+            }
+<span class="nc" id="L173">            cancelMetadataWatch(ledgerId, AbstractZkLedgerManager.this);</span>
+<span class="nc" id="L174">        }</span>
+    }
+
+    /**
+     * ZooKeeper-based Ledger Manager Constructor.
+     *
+     * @param conf
+     *          Configuration object
+     * @param zk
+     *          ZooKeeper Client Handle
+     */
+<span class="nc" id="L185">    protected AbstractZkLedgerManager(AbstractConfiguration conf, ZooKeeper zk) {</span>
+<span class="nc" id="L186">        this.serDe = new LedgerMetadataSerDe();</span>
+<span class="nc" id="L187">        this.conf = conf;</span>
+<span class="nc" id="L188">        this.zk = zk;</span>
+<span class="nc" id="L189">        this.ledgerRootPath = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf);</span>
+<span class="nc" id="L190">        this.scheduler = Executors</span>
+<span class="nc" id="L191">                .newSingleThreadScheduledExecutor(new DefaultThreadFactory(&quot;ZkLedgerManagerScheduler&quot;));</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L193">            LOG.debug(&quot;Using AbstractZkLedgerManager with root path : {}&quot;, ledgerRootPath);</span>
+        }
+<span class="nc" id="L195">    }</span>
+
+    /**
+     * Get the znode path that is used to store ledger metadata.
+     *
+     * @param ledgerId
+     *          Ledger ID
+     * @return ledger node path
+     */
+    public abstract String getLedgerPath(long ledgerId);
+
+    /**
+     * Get ledger id from its znode ledger path.
+     *
+     * @param ledgerPath
+     *          Ledger path to store metadata
+     * @return ledger id
+     * @throws IOException when the ledger path is invalid
+     */
+    protected abstract long getLedgerId(String ledgerPath) throws IOException;
+
+    @Override
+    public void process(WatchedEvent event) {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L219">            LOG.debug(&quot;Received watched event {} from zookeeper based ledger manager.&quot;, event);</span>
+        }
+<span class="nc bnc" id="L221" title="All 2 branches missed.">        if (Event.EventType.None == event.getType()) {</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (Event.KeeperState.Expired == event.getState()) {</span>
+<span class="nc" id="L223">                LOG.info(&quot;ZooKeeper client expired on ledger manager.&quot;);</span>
+<span class="nc" id="L224">                Set&lt;Long&gt; keySet = new HashSet&lt;Long&gt;(listeners.keySet());</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                for (Long lid : keySet) {</span>
+<span class="nc" id="L226">                    scheduler.submit(new ReadLedgerMetadataTask(lid));</span>
+<span class="nc" id="L227">                    LOG.info(&quot;Re-read ledger metadata for {} after zookeeper session expired.&quot;, lid);</span>
+<span class="nc" id="L228">                }</span>
+            }
+<span class="nc" id="L230">            return;</span>
+        }
+<span class="nc" id="L232">        String path = event.getPath();</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (null == path) {</span>
+<span class="nc" id="L234">            return;</span>
+        }
+        final long ledgerId;
+        try {
+<span class="nc" id="L238">            ledgerId = getLedgerId(event.getPath());</span>
+<span class="nc" id="L239">        } catch (IOException ioe) {</span>
+<span class="nc" id="L240">            LOG.info(&quot;Received invalid ledger path {} : &quot;, event.getPath(), ioe);</span>
+<span class="nc" id="L241">            return;</span>
+<span class="nc" id="L242">        }</span>
+<span class="nc bnc" id="L243" title="All 3 branches missed.">        switch (event.getType()) {</span>
+        case NodeDeleted:
+<span class="nc" id="L245">            Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">            if (null != listenerSet) {</span>
+<span class="nc" id="L247">                synchronized (listenerSet){</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L249">                        LOG.debug(&quot;Removed ledger metadata listeners on ledger {} : {}&quot;,</span>
+<span class="nc" id="L250">                                ledgerId, listenerSet);</span>
+                    }
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                    for (LedgerMetadataListener l : listenerSet) {</span>
+<span class="nc" id="L253">                        l.onChanged(ledgerId, null);</span>
+<span class="nc" id="L254">                    }</span>
+<span class="nc" id="L255">                    listeners.remove(ledgerId, listenerSet);</span>
+<span class="nc" id="L256">                }</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            } else if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L258">                LOG.debug(&quot;No ledger metadata listeners to remove from ledger {} after it's deleted.&quot;,</span>
+<span class="nc" id="L259">                        ledgerId);</span>
+            }
+            break;
+        case NodeDataChanged:
+<span class="nc" id="L263">            new ReadLedgerMetadataTask(ledgerId).run();</span>
+<span class="nc" id="L264">            break;</span>
+        default:
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L267">                LOG.debug(&quot;Received event {} on {}.&quot;, event.getType(), event.getPath());</span>
+            }
+            break;
+        }
+<span class="nc" id="L271">    }</span>
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; createLedgerMetadata(long ledgerId,
+                                                                             LedgerMetadata inputMetadata) {
+<span class="nc" id="L276">        CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+        /*
+         * Create a random number and use it as creator token.
+         */
+<span class="nc" id="L280">        final long cToken = ThreadLocalRandom.current().nextLong(Long.MAX_VALUE);</span>
+        final LedgerMetadata metadata;
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        if (inputMetadata.getMetadataFormatVersion() &gt; LedgerMetadataSerDe.METADATA_FORMAT_VERSION_2) {</span>
+<span class="nc" id="L283">            metadata = LedgerMetadataBuilder.from(inputMetadata).withId(ledgerId).withCToken(cToken).build();</span>
+        } else {
+<span class="nc" id="L285">            metadata = inputMetadata;</span>
+        }
+<span class="nc" id="L287">        String ledgerPath = getLedgerPath(ledgerId);</span>
+<span class="nc" id="L288">        StringCallback scb = new StringCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx, String name) {
+<span class="nc bnc" id="L291" title="All 2 branches missed.">                if (rc == Code.OK.intValue()) {</span>
+<span class="nc" id="L292">                    promise.complete(new Versioned&lt;&gt;(metadata, new LongVersion(0)));</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">                } else if (rc == Code.NODEEXISTS.intValue()) {</span>
+<span class="nc" id="L294">                    LOG.info(&quot;Ledger metadata for {} appears to already exist, checking cToken&quot;,</span>
+<span class="nc" id="L295">                            ledgerId);</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">                    if (metadata.getMetadataFormatVersion() &gt; 2) {</span>
+<span class="nc" id="L297">                        CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; readFuture = readLedgerMetadata(ledgerId);</span>
+<span class="nc" id="L298">                        readFuture.handle((readMetadata, exception) -&gt; {</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                            if (exception == null) {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">                                if (readMetadata.getValue().getCToken() == cToken) {</span>
+<span class="nc" id="L301">                                    FutureUtils.complete(promise, new Versioned&lt;&gt;(metadata, new LongVersion(0)));</span>
+                                } else {
+<span class="nc" id="L303">                                    LOG.warn(&quot;Failed to create ledger metadata for {} which already exists&quot;, ledgerId);</span>
+<span class="nc" id="L304">                                    promise.completeExceptionally(new BKException.BKLedgerExistException());</span>
+                                }
+<span class="nc bnc" id="L306" title="All 2 branches missed.">                            } else if (exception instanceof KeeperException.NoNodeException) {</span>
+                                // This is a pretty strange case.  We tried to create the node, found that it
+                                // already exists, but failed to find it when we reread it.  It's possible that
+                                // we successfully created it, got an erroneous NODEEXISTS due to a resend,
+                                // and then it got removed.  It's also possible that we actually lost the race
+                                // and then it got removed.  I'd argue that returning an error here is the right
+                                // path since recreating it is likely to cause problems.
+<span class="nc" id="L313">                                LOG.warn(&quot;Ledger {} appears to have already existed and then been removed, failing&quot;</span>
+<span class="nc" id="L314">                                        + &quot; with LedgerExistException&quot;, ledgerId);</span>
+<span class="nc" id="L315">                                promise.completeExceptionally(new BKException.BKLedgerExistException());</span>
+                            } else {
+<span class="nc" id="L317">                                LOG.error(&quot;Could not validate node for ledger {} after LedgerExistsException&quot;, ledgerId,</span>
+                                        exception);
+<span class="nc" id="L319">                                promise.completeExceptionally(new BKException.ZKException(exception));</span>
+                            }
+<span class="nc" id="L321">                            return null;</span>
+                        });
+<span class="nc" id="L323">                    } else {</span>
+<span class="nc" id="L324">                        LOG.warn(&quot;Failed to create ledger metadata for {} which already exists&quot;, ledgerId);</span>
+<span class="nc" id="L325">                        promise.completeExceptionally(new BKException.BKLedgerExistException());</span>
+                    }
+                } else {
+<span class="nc" id="L328">                    LOG.error(&quot;Could not create node for ledger {}&quot;, ledgerId,</span>
+<span class="nc" id="L329">                            KeeperException.create(Code.get(rc), path));</span>
+<span class="nc" id="L330">                    promise.completeExceptionally(</span>
+<span class="nc" id="L331">                            new BKException.ZKException(KeeperException.create(Code.get(rc), path)));</span>
+                }
+<span class="nc" id="L333">            }</span>
+        };
+        final byte[] data;
+        try {
+<span class="nc" id="L337">            data = serDe.serialize(metadata);</span>
+<span class="nc" id="L338">        } catch (IOException ioe) {</span>
+<span class="nc" id="L339">            promise.completeExceptionally(new BKException.BKMetadataSerializationException(ioe));</span>
+<span class="nc" id="L340">            return promise;</span>
+<span class="nc" id="L341">        }</span>
+
+<span class="nc" id="L343">        List&lt;ACL&gt; zkAcls = ZkUtils.getACLs(conf);</span>
+<span class="nc" id="L344">        ZkUtils.asyncCreateFullPathOptimistic(zk, ledgerPath, data, zkAcls,</span>
+                                              CreateMode.PERSISTENT, scb, null);
+<span class="nc" id="L346">        return promise;</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Void&gt; removeLedgerMetadata(final long ledgerId, final Version version) {
+<span class="nc" id="L351">        CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L352">        int znodeVersion = -1;</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">        if (Version.NEW == version) {</span>
+<span class="nc" id="L354">            LOG.error(&quot;Request to delete ledger {} metadata with version set to the initial one&quot;, ledgerId);</span>
+<span class="nc" id="L355">            promise.completeExceptionally(new BKException.BKMetadataVersionException());</span>
+<span class="nc" id="L356">            return promise;</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        } else if (Version.ANY != version) {</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            if (!(version instanceof LongVersion)) {</span>
+<span class="nc" id="L359">                LOG.info(&quot;Not an instance of ZKVersion: {}&quot;, ledgerId);</span>
+<span class="nc" id="L360">                promise.completeExceptionally(new BKException.BKMetadataVersionException());</span>
+<span class="nc" id="L361">                return promise;</span>
+            } else {
+<span class="nc" id="L363">                znodeVersion = (int) ((LongVersion) version).getLongVersion();</span>
+            }
+        }
+
+<span class="nc" id="L367">        VoidCallback callbackForDelete = new VoidCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L370" title="All 2 branches missed.">                if (rc == Code.NONODE.intValue()) {</span>
+<span class="nc" id="L371">                    LOG.warn(&quot;Ledger node does not exist in ZooKeeper: ledgerId={}.  Returning success.&quot;, ledgerId);</span>
+<span class="nc" id="L372">                    FutureUtils.complete(promise, null);</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                } else if (rc == Code.OK.intValue()) {</span>
+                    // removed listener on ledgerId
+<span class="nc" id="L375">                    Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.remove(ledgerId);</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                    if (null != listenerSet) {</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L378">                            LOG.debug(</span>
+                                    &quot;Remove registered ledger metadata listeners on ledger {} after ledger is deleted.&quot;,
+<span class="nc" id="L380">                                    ledgerId);</span>
+                        }
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                    } else if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L383">                        LOG.debug(&quot;No ledger metadata listeners to remove from ledger {} when it's being deleted.&quot;,</span>
+<span class="nc" id="L384">                                ledgerId);</span>
+                    }
+<span class="nc" id="L386">                    FutureUtils.complete(promise, null);</span>
+<span class="nc" id="L387">                } else {</span>
+<span class="nc" id="L388">                    promise.completeExceptionally(</span>
+<span class="nc" id="L389">                            new BKException.ZKException(KeeperException.create(Code.get(rc), path)));</span>
+                }
+<span class="nc" id="L391">            }</span>
+        };
+<span class="nc" id="L393">        String ledgerZnodePath = getLedgerPath(ledgerId);</span>
+<span class="nc bnc" id="L394" title="All 4 branches missed.">        if (this instanceof HierarchicalLedgerManager || this instanceof LongHierarchicalLedgerManager) {</span>
+            /*
+             * do recursive deletes only for HierarchicalLedgerManager and
+             * LongHierarchicalLedgerManager
+             */
+<span class="nc" id="L399">            ZkUtils.asyncDeleteFullPathOptimistic(zk, ledgerZnodePath, znodeVersion, callbackForDelete,</span>
+                    ledgerZnodePath);
+        } else {
+<span class="nc" id="L402">            zk.delete(ledgerZnodePath, znodeVersion, callbackForDelete, null);</span>
+        }
+<span class="nc" id="L404">        return promise;</span>
+    }
+
+    @Override
+    public void registerLedgerMetadataListener(long ledgerId, LedgerMetadataListener listener) {
+<span class="nc bnc" id="L409" title="All 2 branches missed.">        if (null != listener) {</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L411">                LOG.debug(&quot;Registered ledger metadata listener {} on ledger {}.&quot;, listener, ledgerId);</span>
+            }
+<span class="nc" id="L413">            Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            if (listenerSet == null) {</span>
+<span class="nc" id="L415">                Set&lt;LedgerMetadataListener&gt; newListenerSet = new HashSet&lt;LedgerMetadataListener&gt;();</span>
+<span class="nc" id="L416">                Set&lt;LedgerMetadataListener&gt; oldListenerSet = listeners.putIfAbsent(ledgerId, newListenerSet);</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                if (null != oldListenerSet) {</span>
+<span class="nc" id="L418">                    listenerSet = oldListenerSet;</span>
+                } else {
+<span class="nc" id="L420">                    listenerSet = newListenerSet;</span>
+                }
+            }
+<span class="nc" id="L423">            synchronized (listenerSet) {</span>
+<span class="nc" id="L424">                listenerSet.add(listener);</span>
+<span class="nc" id="L425">            }</span>
+<span class="nc" id="L426">            new ReadLedgerMetadataTask(ledgerId).run();</span>
+        }
+<span class="nc" id="L428">    }</span>
+
+    @Override
+    public void unregisterLedgerMetadataListener(long ledgerId, LedgerMetadataListener listener) {
+<span class="nc" id="L432">        Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        if (listenerSet != null) {</span>
+<span class="nc" id="L434">            synchronized (listenerSet) {</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">                if (listenerSet.remove(listener)) {</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L437">                        LOG.debug(&quot;Unregistered ledger metadata listener {} on ledger {}.&quot;, listener, ledgerId);</span>
+                    }
+                }
+<span class="nc bnc" id="L440" title="All 2 branches missed.">                if (listenerSet.isEmpty()) {</span>
+<span class="nc" id="L441">                    listeners.remove(ledgerId, listenerSet);</span>
+<span class="nc" id="L442">                    new CancelWatchLedgerMetadataTask(ledgerId).run();</span>
+                }
+<span class="nc" id="L444">            }</span>
+        }
+<span class="nc" id="L446">    }</span>
+
+    private void cancelMetadataWatch(long ledgerId, Watcher watcher) {
+<span class="nc" id="L449">        zk.removeWatches(getLedgerPath(ledgerId), watcher, WatcherType.Data, true, new VoidCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object o) {
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                if (rc != Code.OK.intValue()) {</span>
+<span class="nc" id="L453">                    LOG.error(&quot;Cancel watch ledger {} metadata failed.&quot;, ledgerId,</span>
+<span class="nc" id="L454">                            KeeperException.create(Code.get(rc), path));</span>
+<span class="nc" id="L455">                    return;</span>
+                }
+<span class="nc bnc" id="L457" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L458">                    LOG.debug(&quot;Cancel watch ledger {} metadata succeed.&quot;, ledgerId);</span>
+                }
+<span class="nc" id="L460">            }</span>
+        }, null);
+<span class="nc" id="L462">    }</span>
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; readLedgerMetadata(long ledgerId) {
+<span class="nc" id="L466">        return readLedgerMetadata(ledgerId, null);</span>
+    }
+
+    protected CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; readLedgerMetadata(final long ledgerId, Watcher watcher) {
+<span class="nc" id="L470">        CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L471">        zk.getData(getLedgerPath(ledgerId), watcher, new DataCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx, byte[] data, Stat stat) {
+<span class="nc bnc" id="L474" title="All 2 branches missed.">                if (rc == Code.NONODE.intValue()) {</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L476">                        LOG.debug(&quot;No such ledger: &quot; + ledgerId,</span>
+<span class="nc" id="L477">                                  KeeperException.create(Code.get(rc), path));</span>
+                    }
+<span class="nc" id="L479">                    promise.completeExceptionally(new BKException.BKNoSuchLedgerExistsOnMetadataServerException());</span>
+<span class="nc" id="L480">                    return;</span>
+                }
+<span class="nc bnc" id="L482" title="All 2 branches missed.">                if (rc != Code.OK.intValue()) {</span>
+<span class="nc" id="L483">                    LOG.error(&quot;Could not read metadata for ledger: &quot; + ledgerId,</span>
+<span class="nc" id="L484">                              KeeperException.create(Code.get(rc), path));</span>
+<span class="nc" id="L485">                    promise.completeExceptionally(</span>
+<span class="nc" id="L486">                            new BKException.ZKException(KeeperException.create(Code.get(rc), path)));</span>
+<span class="nc" id="L487">                    return;</span>
+                }
+<span class="nc bnc" id="L489" title="All 2 branches missed.">                if (stat == null) {</span>
+<span class="nc" id="L490">                    LOG.error(&quot;Could not parse ledger metadata for ledger: {}. Stat object is null&quot;, ledgerId);</span>
+<span class="nc" id="L491">                    promise.completeExceptionally(new BKException.ZKException(</span>
+                            new Exception(&quot;Could not parse ledger metadata for ledger: &quot;
+<span class="nc" id="L493">                                    + ledgerId + &quot; . Stat object is null&quot;).fillInStackTrace()));</span>
+<span class="nc" id="L494">                    return;</span>
+                }
+
+                try {
+<span class="nc" id="L498">                    LongVersion version = new LongVersion(stat.getVersion());</span>
+<span class="nc" id="L499">                    LedgerMetadata metadata = serDe.parseConfig(data, ledgerId, Optional.of(stat.getCtime()));</span>
+<span class="nc" id="L500">                    promise.complete(new Versioned&lt;&gt;(metadata, version));</span>
+<span class="nc" id="L501">                } catch (Throwable t) {</span>
+<span class="nc" id="L502">                    LOG.error(&quot;Could not parse ledger metadata for ledger: {}&quot;, ledgerId, t);</span>
+<span class="nc" id="L503">                    promise.completeExceptionally(new BKException.ZKException(</span>
+                            new Exception(&quot;Could not parse ledger metadata for ledger: &quot;
+<span class="nc" id="L505">                                    + ledgerId, t).fillInStackTrace()));</span>
+<span class="nc" id="L506">                }</span>
+<span class="nc" id="L507">            }</span>
+        }, null);
+<span class="nc" id="L509">        return promise;</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; writeLedgerMetadata(long ledgerId, LedgerMetadata metadata,
+                                                                            Version currentVersion) {
+<span class="nc" id="L515">        CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">        if (!(currentVersion instanceof LongVersion)) {</span>
+<span class="nc" id="L517">            promise.completeExceptionally(new BKException.BKMetadataVersionException());</span>
+<span class="nc" id="L518">            return promise;</span>
+        }
+<span class="nc" id="L520">        final LongVersion zv = (LongVersion) currentVersion;</span>
+
+        final byte[] data;
+        try {
+<span class="nc" id="L524">            data = serDe.serialize(metadata);</span>
+<span class="nc" id="L525">        } catch (IOException ioe) {</span>
+<span class="nc" id="L526">            promise.completeExceptionally(new BKException.BKMetadataSerializationException(ioe));</span>
+<span class="nc" id="L527">            return promise;</span>
+<span class="nc" id="L528">        }</span>
+<span class="nc" id="L529">        zk.setData(getLedgerPath(ledgerId),</span>
+<span class="nc" id="L530">                   data, (int) zv.getLongVersion(),</span>
+<span class="nc" id="L531">                   new StatCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx, Stat stat) {
+<span class="nc bnc" id="L534" title="All 2 branches missed.">                if (Code.BADVERSION.intValue() == rc) {</span>
+<span class="nc" id="L535">                    promise.completeExceptionally(new BKException.BKMetadataVersionException());</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                } else if (Code.OK.intValue() == rc) {</span>
+                    // update metadata version
+<span class="nc" id="L538">                    promise.complete(new Versioned&lt;&gt;(metadata, new LongVersion(stat.getVersion())));</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">                } else if (Code.NONODE.intValue() == rc) {</span>
+<span class="nc" id="L540">                    LOG.warn(&quot;Ledger node does not exist in ZooKeeper: ledgerId={}&quot;, ledgerId);</span>
+<span class="nc" id="L541">                    promise.completeExceptionally(new BKException.BKNoSuchLedgerExistsOnMetadataServerException());</span>
+                } else {
+<span class="nc" id="L543">                    LOG.warn(&quot;Conditional update ledger metadata failed: {}&quot;, Code.get(rc));</span>
+<span class="nc" id="L544">                    promise.completeExceptionally(</span>
+<span class="nc" id="L545">                            new BKException.ZKException(KeeperException.create(Code.get(rc), path)));</span>
+                }
+<span class="nc" id="L547">            }</span>
+        }, null);
+<span class="nc" id="L549">        return promise;</span>
+    }
+
+    /**
+     * Process ledgers in a single zk node.
+     *
+     * &lt;p&gt;
+     * for each ledger found in this zk node, processor#process(ledgerId) will be triggered
+     * to process a specific ledger. after all ledgers has been processed, the finalCb will
+     * be called with provided context object. The RC passed to finalCb is decided by :
+     * &lt;ul&gt;
+     * &lt;li&gt; All ledgers are processed successfully, successRc will be passed.
+     * &lt;li&gt; Either ledger is processed failed, failureRc will be passed.
+     * &lt;/ul&gt;
+     * &lt;/p&gt;
+     *
+     * @param path
+     *          Zk node path to store ledgers
+     * @param processor
+     *          Processor provided to process ledger
+     * @param finalCb
+     *          Callback object when all ledgers are processed
+     * @param ctx
+     *          Context object passed to finalCb
+     * @param successRc
+     *          RC passed to finalCb when all ledgers are processed successfully
+     * @param failureRc
+     *          RC passed to finalCb when either ledger is processed failed
+     */
+    protected void asyncProcessLedgersInSingleNode(
+            final String path, final Processor&lt;Long&gt; processor,
+            final VoidCallback finalCb, final Object ctx,
+            final int successRc, final int failureRc) {
+<span class="nc" id="L582">        ZkUtils.getChildrenInSingleNode(zk, path, new GenericCallback&lt;List&lt;String&gt;&gt;() {</span>
+            @Override
+            public void operationComplete(int rc, List&lt;String&gt; ledgerNodes) {
+<span class="nc bnc" id="L585" title="All 2 branches missed.">                if (Code.NONODE.intValue() == rc) {</span>
+<span class="nc" id="L586">                    finalCb.processResult(successRc, null, ctx);</span>
+<span class="nc" id="L587">                    return;</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">                } else if (Code.OK.intValue() != rc) {</span>
+<span class="nc" id="L589">                    finalCb.processResult(failureRc, null, ctx);</span>
+<span class="nc" id="L590">                    return;</span>
+                }
+
+<span class="nc" id="L593">                Set&lt;Long&gt; zkActiveLedgers = ledgerListToSet(ledgerNodes, path);</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L595">                    LOG.debug(&quot;Processing ledgers: {}&quot;, zkActiveLedgers);</span>
+                }
+
+                // no ledgers found, return directly
+<span class="nc bnc" id="L599" title="All 2 branches missed.">                if (zkActiveLedgers.size() == 0) {</span>
+<span class="nc" id="L600">                    finalCb.processResult(successRc, null, ctx);</span>
+<span class="nc" id="L601">                    return;</span>
+                }
+
+<span class="nc" id="L604">                MultiCallback mcb = new MultiCallback(zkActiveLedgers.size(), finalCb, ctx,</span>
+                                                      successRc, failureRc);
+                // start loop over all ledgers
+<span class="nc" id="L607">                scheduler.submit(() -&gt; {</span>
+<span class="nc bnc" id="L608" title="All 2 branches missed.">                    for (Long ledger : zkActiveLedgers) {</span>
+<span class="nc" id="L609">                        processor.process(ledger, mcb);</span>
+<span class="nc" id="L610">                    }</span>
+<span class="nc" id="L611">                });</span>
+<span class="nc" id="L612">            }</span>
+        });
+<span class="nc" id="L614">    }</span>
+
+    /**
+     * Whether the znode a special znode.
+     *
+     * @param znode
+     *          Znode Name
+     * @return true  if the znode is a special znode otherwise false
+     */
+    public static boolean isSpecialZnode(String znode) {
+<span class="nc bnc" id="L624" title="All 2 branches missed.">        return BookKeeperConstants.AVAILABLE_NODE.equals(znode)</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">            || BookKeeperConstants.COOKIE_NODE.equals(znode)</span>
+<span class="nc bnc" id="L626" title="All 2 branches missed.">            || BookKeeperConstants.LAYOUT_ZNODE.equals(znode)</span>
+<span class="nc bnc" id="L627" title="All 2 branches missed.">            || BookKeeperConstants.INSTANCEID.equals(znode)</span>
+<span class="nc bnc" id="L628" title="All 2 branches missed.">            || BookKeeperConstants.UNDER_REPLICATION_NODE.equals(znode)</span>
+<span class="nc bnc" id="L629" title="All 2 branches missed.">            || isLeadgerIdGeneratorZnode(znode);</span>
+    }
+
+    public static boolean isLeadgerIdGeneratorZnode(String znode) {
+<span class="nc bnc" id="L633" title="All 2 branches missed.">        return LegacyHierarchicalLedgerManager.IDGEN_ZNODE.equals(znode)</span>
+<span class="nc bnc" id="L634" title="All 2 branches missed.">            || LongHierarchicalLedgerManager.IDGEN_ZNODE.equals(znode)</span>
+<span class="nc bnc" id="L635" title="All 2 branches missed.">            || znode.startsWith(ZkLedgerIdGenerator.LEDGER_ID_GEN_PREFIX);</span>
+    }
+
+    /**
+     * regex expression for name of top level parent znode for ledgers (in
+     * HierarchicalLedgerManager) or znode of a ledger (in FlatLedgerManager).
+     *
+     * @return
+     */
+    protected abstract String getLedgerParentNodeRegex();
+
+    /**
+     * whether the child of ledgersRootPath is a top level parent znode for
+     * ledgers (in HierarchicalLedgerManager) or znode of a ledger (in
+     * FlatLedgerManager).
+     *
+     * @param znode
+     *            Znode Name
+     * @return
+     */
+    public boolean isLedgerParentNode(String znode) {
+<span class="nc" id="L656">        return znode.matches(getLedgerParentNodeRegex());</span>
+    }
+
+    /**
+     * Convert the ZK retrieved ledger nodes to a HashSet for easier comparisons.
+     *
+     * @param ledgerNodes
+     *          zk ledger nodes
+     * @param path
+     *          the prefix path of the ledger nodes
+     * @return ledger id hash set
+     */
+    protected NavigableSet&lt;Long&gt; ledgerListToSet(List&lt;String&gt; ledgerNodes, String path) {
+<span class="nc" id="L669">        NavigableSet&lt;Long&gt; zkActiveLedgers = new TreeSet&lt;Long&gt;();</span>
+<span class="nc bnc" id="L670" title="All 2 branches missed.">        for (String ledgerNode : ledgerNodes) {</span>
+<span class="nc bnc" id="L671" title="All 2 branches missed.">            if (isSpecialZnode(ledgerNode)) {</span>
+<span class="nc" id="L672">                continue;</span>
+            }
+            try {
+                // convert the node path to ledger id according to different ledger manager implementation
+<span class="nc" id="L676">                zkActiveLedgers.add(getLedgerId(path + &quot;/&quot; + ledgerNode));</span>
+<span class="nc" id="L677">            } catch (IOException e) {</span>
+<span class="nc" id="L678">                LOG.warn(&quot;Error extracting ledgerId from ZK ledger node: &quot; + ledgerNode);</span>
+                // This is a pretty bad error as it indicates a ledger node in ZK
+                // has an incorrect format. For now just continue and consider
+                // this as a non-existent ledger.
+<span class="nc" id="L682">                continue;</span>
+<span class="nc" id="L683">            }</span>
+<span class="nc" id="L684">        }</span>
+<span class="nc" id="L685">        return zkActiveLedgers;</span>
+    }
+
+    @Override
+    public void close() {
+        try {
+<span class="nc" id="L691">            scheduler.shutdown();</span>
+<span class="nc" id="L692">        } catch (Exception e) {</span>
+<span class="nc" id="L693">            LOG.warn(&quot;Error when closing zookeeper based ledger manager: &quot;, e);</span>
+<span class="nc" id="L694">        }</span>
+<span class="nc" id="L695">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

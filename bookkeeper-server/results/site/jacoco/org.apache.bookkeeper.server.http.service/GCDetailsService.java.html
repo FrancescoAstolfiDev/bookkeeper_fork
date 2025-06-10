@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GCDetailsService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">GCDetailsService.java</span></div><h1>GCDetailsService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import java.util.List;
+import org.apache.bookkeeper.bookie.GarbageCollectionStatus;
+import org.apache.bookkeeper.common.util.JsonUtil;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.apache.bookkeeper.proto.BookieServer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * HttpEndpointService that handle get garbage collection details service.
+ *
+ * &lt;p&gt;Get Garbage Collection status, the output would be like:
+ *        [ {
+ *           &quot;forceCompacting&quot; : false,
+ *           &quot;majorCompacting&quot; : false,
+ *           &quot;minorCompacting&quot; : false,
+ *           &quot;lastMajorCompactionTime&quot; : 1544578144944,
+ *           &quot;lastMinorCompactionTime&quot; : 1544578144944,
+ *           &quot;majorCompactionCounter&quot; : 1,
+ *           &quot;minorCompactionCounter&quot; : 0
+ *         } ]
+ */
+public class GCDetailsService implements HttpEndpointService {
+
+<span class="nc" id="L51">    static final Logger LOG = LoggerFactory.getLogger(GCDetailsService.class);</span>
+
+    protected ServerConfiguration conf;
+    protected BookieServer bookieServer;
+
+<span class="nc" id="L56">    public GCDetailsService(ServerConfiguration conf, BookieServer bookieServer) {</span>
+<span class="nc" id="L57">        checkNotNull(conf);</span>
+<span class="nc" id="L58">        checkNotNull(bookieServer);</span>
+<span class="nc" id="L59">        this.conf = conf;</span>
+<span class="nc" id="L60">        this.bookieServer = bookieServer;</span>
+<span class="nc" id="L61">    }</span>
+
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L65">        HttpServiceResponse response = new HttpServiceResponse();</span>
+
+<span class="nc bnc" id="L67" title="All 2 branches missed.">        if (HttpServer.Method.GET == request.getMethod()) {</span>
+<span class="nc" id="L68">            List&lt;GarbageCollectionStatus&gt; details = bookieServer.getBookie()</span>
+<span class="nc" id="L69">                .getLedgerStorage().getGarbageCollectionStatus();</span>
+
+<span class="nc" id="L71">            String jsonResponse = JsonUtil.toJson(details);</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L73">                LOG.debug(&quot;output body:&quot; + jsonResponse);</span>
+            }
+<span class="nc" id="L75">            response.setBody(jsonResponse);</span>
+<span class="nc" id="L76">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L77">            return response;</span>
+        } else {
+<span class="nc" id="L79">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L80">            response.setBody(&quot;Only support GET method to retrieve GC details.&quot;</span>
+                + &quot; If you want to trigger gc, send a POST to gc endpoint.&quot;);
+<span class="nc" id="L82">            return response;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,505 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BKException.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">BKException.java</span></div><h1>BKException.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import java.util.function.Function;
+/**
+ * Class the enumerates all the possible error conditions.
+ *
+ * &lt;P&gt;This class is going to be deprecate soon, please use the new class {@link BKException}
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public abstract class BKException extends org.apache.bookkeeper.client.api.BKException {
+
+<span class="nc" id="L32">    public static final Function&lt;Throwable, BKException&gt; HANDLER = cause -&gt; {</span>
+<span class="nc bnc" id="L33" title="All 2 branches missed.">        if (cause == null) {</span>
+<span class="nc" id="L34">            return null;</span>
+        }
+<span class="nc bnc" id="L36" title="All 2 branches missed.">        if (cause instanceof BKException) {</span>
+<span class="nc" id="L37">            return (BKException) cause;</span>
+        } else {
+<span class="nc" id="L39">            BKException ex = new BKUnexpectedConditionException();</span>
+<span class="nc" id="L40">            ex.initCause(cause);</span>
+<span class="nc" id="L41">            return ex;</span>
+        }
+    };
+
+    BKException(int code) {
+<span class="nc" id="L46">        super(code);</span>
+<span class="nc" id="L47">    }</span>
+
+    BKException(int code, Throwable cause) {
+<span class="nc" id="L50">        super(code, cause);</span>
+<span class="nc" id="L51">    }</span>
+
+    /**
+     * Create an exception from an error code.
+     * @param code return error code
+     * @return corresponding exception
+     */
+    public static BKException create(int code) {
+<span class="nc bnc" id="L59" title="All 35 branches missed.">        switch (code) {</span>
+        case Code.ReadException:
+<span class="nc" id="L61">            return new BKReadException();</span>
+        case Code.QuorumException:
+<span class="nc" id="L63">            return new BKQuorumException();</span>
+        case Code.NoBookieAvailableException:
+<span class="nc" id="L65">            return new BKBookieException();</span>
+        case Code.DigestNotInitializedException:
+<span class="nc" id="L67">            return new BKDigestNotInitializedException();</span>
+        case Code.DigestMatchException:
+<span class="nc" id="L69">            return new BKDigestMatchException();</span>
+        case Code.NotEnoughBookiesException:
+<span class="nc" id="L71">            return new BKNotEnoughBookiesException();</span>
+        case Code.NoSuchLedgerExistsException:
+<span class="nc" id="L73">            return new BKNoSuchLedgerExistsException();</span>
+        case Code.NoSuchLedgerExistsOnMetadataServerException:
+<span class="nc" id="L75">            return new BKNoSuchLedgerExistsOnMetadataServerException();</span>
+        case Code.BookieHandleNotAvailableException:
+<span class="nc" id="L77">            return new BKBookieHandleNotAvailableException();</span>
+        case Code.ZKException:
+<span class="nc" id="L79">            return new ZKException();</span>
+        case Code.MetaStoreException:
+<span class="nc" id="L81">            return new MetaStoreException();</span>
+        case Code.LedgerRecoveryException:
+<span class="nc" id="L83">            return new BKLedgerRecoveryException();</span>
+        case Code.LedgerClosedException:
+<span class="nc" id="L85">            return new BKLedgerClosedException();</span>
+        case Code.WriteException:
+<span class="nc" id="L87">            return new BKWriteException();</span>
+        case Code.NoSuchEntryException:
+<span class="nc" id="L89">            return new BKNoSuchEntryException();</span>
+        case Code.IncorrectParameterException:
+<span class="nc" id="L91">            return new BKIncorrectParameterException();</span>
+        case Code.InterruptedException:
+<span class="nc" id="L93">            return new BKInterruptedException();</span>
+        case Code.ProtocolVersionException:
+<span class="nc" id="L95">            return new BKProtocolVersionException();</span>
+        case Code.MetadataVersionException:
+<span class="nc" id="L97">            return new BKMetadataVersionException();</span>
+        case Code.LedgerFencedException:
+<span class="nc" id="L99">            return new BKLedgerFencedException();</span>
+        case Code.UnauthorizedAccessException:
+<span class="nc" id="L101">            return new BKUnauthorizedAccessException();</span>
+        case Code.UnclosedFragmentException:
+<span class="nc" id="L103">            return new BKUnclosedFragmentException();</span>
+        case Code.WriteOnReadOnlyBookieException:
+<span class="nc" id="L105">            return new BKWriteOnReadOnlyBookieException();</span>
+        case Code.TooManyRequestsException:
+<span class="nc" id="L107">            return new BKTooManyRequestsException();</span>
+        case Code.ReplicationException:
+<span class="nc" id="L109">            return new BKReplicationException();</span>
+        case Code.ClientClosedException:
+<span class="nc" id="L111">            return new BKClientClosedException();</span>
+        case Code.LedgerExistException:
+<span class="nc" id="L113">            return new BKLedgerExistException();</span>
+        case Code.IllegalOpException:
+<span class="nc" id="L115">            return new BKIllegalOpException();</span>
+        case Code.AddEntryQuorumTimeoutException:
+<span class="nc" id="L117">            return new BKAddEntryQuorumTimeoutException();</span>
+        case Code.DuplicateEntryIdException:
+<span class="nc" id="L119">            return new BKDuplicateEntryIdException();</span>
+        case Code.TimeoutException:
+<span class="nc" id="L121">            return new BKTimeoutException();</span>
+        case Code.LedgerIdOverflowException:
+<span class="nc" id="L123">            return new BKLedgerIdOverflowException();</span>
+        case Code.SecurityException:
+<span class="nc" id="L125">            return new BKSecurityException();</span>
+        case Code.MetadataSerializationException:
+<span class="nc" id="L127">            return new BKMetadataSerializationException();</span>
+        default:
+<span class="nc" id="L129">            return new BKUnexpectedConditionException();</span>
+        }
+    }
+
+    /**
+     * Legacy interface which holds constants for BookKeeper error codes.
+     * The list has been moved to {@link BKException}
+     */
+    public interface Code extends org.apache.bookkeeper.client.api.BKException.Code {
+    }
+
+    /**
+     * Bookkeeper security exception.
+     */
+    public static class BKSecurityException extends BKException {
+        public BKSecurityException() {
+<span class="nc" id="L145">            super(BKException.Code.SecurityException);</span>
+<span class="nc" id="L146">        }</span>
+    }
+
+    /**
+     * Bookkeeper read exception.
+     */
+    public static class BKReadException extends BKException {
+        public BKReadException() {
+<span class="nc" id="L154">            super(BKException.Code.ReadException);</span>
+<span class="nc" id="L155">        }</span>
+    }
+
+    /**
+     * Bookkeeper no such entry exception.
+     */
+    public static class BKNoSuchEntryException extends BKException {
+        public BKNoSuchEntryException() {
+<span class="nc" id="L163">            super(BKException.Code.NoSuchEntryException);</span>
+<span class="nc" id="L164">        }</span>
+    }
+
+    /**
+     * Bookkeeper quorum exception.
+     */
+    public static class BKQuorumException extends BKException {
+        public BKQuorumException() {
+<span class="nc" id="L172">            super(BKException.Code.QuorumException);</span>
+<span class="nc" id="L173">        }</span>
+    }
+
+    /**
+     * Bookkeeper bookie exception.
+     */
+    public static class BKBookieException extends BKException {
+        public BKBookieException() {
+<span class="nc" id="L181">            super(BKException.Code.NoBookieAvailableException);</span>
+<span class="nc" id="L182">        }</span>
+    }
+
+    /**
+     * Bookkeeper digest not initialized exception.
+     */
+    public static class BKDigestNotInitializedException extends BKException {
+        public BKDigestNotInitializedException() {
+<span class="nc" id="L190">            super(BKException.Code.DigestNotInitializedException);</span>
+<span class="nc" id="L191">        }</span>
+    }
+
+    /**
+     * Bookkeeper digest match exception.
+     */
+    public static class BKDigestMatchException extends BKException {
+        public BKDigestMatchException() {
+<span class="nc" id="L199">            super(BKException.Code.DigestMatchException);</span>
+<span class="nc" id="L200">        }</span>
+    }
+
+    /**
+     * Bookkeeper illegal operation exception.
+     */
+    public static class BKIllegalOpException extends BKException {
+        public BKIllegalOpException() {
+<span class="nc" id="L208">            super(BKException.Code.IllegalOpException);</span>
+<span class="nc" id="L209">        }</span>
+    }
+
+    /**
+     * Bookkeeper add entry quorum timeout exception.
+     */
+    public static class BKAddEntryQuorumTimeoutException extends BKException {
+        public BKAddEntryQuorumTimeoutException() {
+<span class="nc" id="L217">            super(BKException.Code.AddEntryQuorumTimeoutException);</span>
+<span class="nc" id="L218">        }</span>
+    }
+
+    /**
+     * Bookkeeper duplicate entry id exception.
+     */
+    public static class BKDuplicateEntryIdException extends BKException {
+        public BKDuplicateEntryIdException() {
+<span class="nc" id="L226">            super(BKException.Code.DuplicateEntryIdException);</span>
+<span class="nc" id="L227">        }</span>
+    }
+
+    /**
+     * Bookkeeper unexpected condition exception.
+     */
+    public static class BKUnexpectedConditionException extends BKException {
+        public BKUnexpectedConditionException() {
+<span class="nc" id="L235">            super(BKException.Code.UnexpectedConditionException);</span>
+<span class="nc" id="L236">        }</span>
+    }
+
+    /**
+     * Bookkeeper not enough bookies exception.
+     */
+    public static class BKNotEnoughBookiesException extends BKException {
+        public BKNotEnoughBookiesException() {
+<span class="nc" id="L244">            super(BKException.Code.NotEnoughBookiesException);</span>
+<span class="nc" id="L245">        }</span>
+        public BKNotEnoughBookiesException(Throwable cause) {
+<span class="nc" id="L247">            super(BKException.Code.NotEnoughBookiesException, cause);</span>
+<span class="nc" id="L248">        }</span>
+    }
+
+    /**
+     * Bookkeeper write exception.
+     */
+    public static class BKWriteException extends BKException {
+        public BKWriteException() {
+<span class="nc" id="L256">            super(BKException.Code.WriteException);</span>
+<span class="nc" id="L257">        }</span>
+    }
+
+    /**
+     * Bookkeeper protocol version exception.
+     */
+    public static class BKProtocolVersionException extends BKException {
+        public BKProtocolVersionException() {
+<span class="nc" id="L265">            super(BKException.Code.ProtocolVersionException);</span>
+<span class="nc" id="L266">        }</span>
+    }
+
+    /**
+     * Bookkeeper metadata version exception.
+     */
+    public static class BKMetadataVersionException extends BKException {
+        public BKMetadataVersionException() {
+<span class="nc" id="L274">            super(BKException.Code.MetadataVersionException);</span>
+<span class="nc" id="L275">        }</span>
+    }
+
+    /**
+     * Bookkeeper no such ledger exists exception.
+     */
+    public static class BKNoSuchLedgerExistsException extends BKException {
+        public BKNoSuchLedgerExistsException() {
+<span class="nc" id="L283">            super(BKException.Code.NoSuchLedgerExistsException);</span>
+<span class="nc" id="L284">        }</span>
+    }
+    /**
+     * Bookkeeper no such ledger exists on metadata server exception.
+     */
+    public static class BKNoSuchLedgerExistsOnMetadataServerException extends BKException {
+        public BKNoSuchLedgerExistsOnMetadataServerException() {
+<span class="nc" id="L291">            super(BKException.Code.NoSuchLedgerExistsOnMetadataServerException);</span>
+<span class="nc" id="L292">        }</span>
+    }
+
+    /**
+     * Bookkeeper bookie handle not available exception.
+     */
+    public static class BKBookieHandleNotAvailableException extends BKException {
+        public BKBookieHandleNotAvailableException() {
+<span class="nc" id="L300">            super(BKException.Code.BookieHandleNotAvailableException);</span>
+<span class="nc" id="L301">        }</span>
+    }
+
+    /**
+     * Zookeeper exception.
+     */
+    public static class ZKException extends BKException {
+        public ZKException() {
+<span class="nc" id="L309">            super(BKException.Code.ZKException);</span>
+<span class="nc" id="L310">        }</span>
+
+        public ZKException(Throwable cause) {
+<span class="nc" id="L313">            super(BKException.Code.ZKException, cause);</span>
+<span class="nc" id="L314">        }</span>
+    }
+
+    /**
+     * Metastore exception.
+     */
+    public static class MetaStoreException extends BKException {
+        public MetaStoreException() {
+<span class="nc" id="L322">            super(BKException.Code.MetaStoreException);</span>
+<span class="nc" id="L323">        }</span>
+
+        public MetaStoreException(Throwable cause) {
+<span class="nc" id="L326">            super(BKException.Code.MetaStoreException, cause);</span>
+<span class="nc" id="L327">        }</span>
+    }
+
+    /**
+     * Bookkeeper ledger exist exception.
+     */
+    public static class BKLedgerExistException extends BKException {
+        public BKLedgerExistException() {
+<span class="nc" id="L335">            super(BKException.Code.LedgerExistException);</span>
+<span class="nc" id="L336">        }</span>
+    }
+
+    /**
+     * Bookkeeper ledger recovery exception.
+     */
+    public static class BKLedgerRecoveryException extends BKException {
+        public BKLedgerRecoveryException() {
+<span class="nc" id="L344">            super(BKException.Code.LedgerRecoveryException);</span>
+<span class="nc" id="L345">        }</span>
+    }
+
+    /**
+     * Bookkeeper ledger closed exception.
+     */
+    public static class BKLedgerClosedException extends BKException {
+        public BKLedgerClosedException() {
+<span class="nc" id="L353">            super(BKException.Code.LedgerClosedException);</span>
+<span class="nc" id="L354">        }</span>
+    }
+
+    /**
+     * Bookkeeper incorrect parameter exception.
+     */
+    public static class BKIncorrectParameterException extends BKException {
+        public BKIncorrectParameterException() {
+<span class="nc" id="L362">            super(BKException.Code.IncorrectParameterException);</span>
+<span class="nc" id="L363">        }</span>
+    }
+
+    /**
+     * Bookkeeper interrupted exception.
+     */
+    public static class BKInterruptedException extends BKException {
+        public BKInterruptedException() {
+<span class="nc" id="L371">            super(BKException.Code.InterruptedException);</span>
+<span class="nc" id="L372">        }</span>
+    }
+
+    /**
+     * Bookkeeper ledger fenced exception.
+     */
+    public static class BKLedgerFencedException extends BKException {
+        public BKLedgerFencedException() {
+<span class="nc" id="L380">            super(BKException.Code.LedgerFencedException);</span>
+<span class="nc" id="L381">        }</span>
+    }
+
+    /**
+     * Bookkeeper unauthorized access exception.
+     */
+    public static class BKUnauthorizedAccessException extends BKException {
+        public BKUnauthorizedAccessException() {
+<span class="nc" id="L389">            super(BKException.Code.UnauthorizedAccessException);</span>
+<span class="nc" id="L390">        }</span>
+    }
+
+    /**
+     * Bookkeeper unclosed fragment exception.
+     */
+    public static class BKUnclosedFragmentException extends BKException {
+        public BKUnclosedFragmentException() {
+<span class="nc" id="L398">            super(BKException.Code.UnclosedFragmentException);</span>
+<span class="nc" id="L399">        }</span>
+    }
+
+    /**
+     * Bookkeeper write on readonly bookie exception.
+     */
+    public static class BKWriteOnReadOnlyBookieException extends BKException {
+        public BKWriteOnReadOnlyBookieException() {
+<span class="nc" id="L407">            super(BKException.Code.WriteOnReadOnlyBookieException);</span>
+<span class="nc" id="L408">        }</span>
+    }
+
+    /**
+     * Bookkeeper too many requests exception.
+     */
+    public static class BKTooManyRequestsException extends BKException {
+        public BKTooManyRequestsException() {
+<span class="nc" id="L416">            super(BKException.Code.TooManyRequestsException);</span>
+<span class="nc" id="L417">        }</span>
+    }
+
+    /**
+     * Bookkeeper replication exception.
+     */
+    public static class BKReplicationException extends BKException {
+        public BKReplicationException() {
+<span class="nc" id="L425">            super(BKException.Code.ReplicationException);</span>
+<span class="nc" id="L426">        }</span>
+    }
+
+    /**
+     * Bookkeeper client closed exception.
+     */
+    public static class BKClientClosedException extends BKException {
+        public BKClientClosedException() {
+<span class="nc" id="L434">            super(BKException.Code.ClientClosedException);</span>
+<span class="nc" id="L435">        }</span>
+    }
+
+    /**
+     * Bookkeeper timeout exception.
+     */
+    public static class BKTimeoutException extends BKException {
+        public BKTimeoutException() {
+<span class="nc" id="L443">            super(BKException.Code.TimeoutException);</span>
+<span class="nc" id="L444">        }</span>
+    }
+
+    /**
+     * Bookkeeper ledger id overflow exception.
+     */
+    public static class BKLedgerIdOverflowException extends BKException {
+        public BKLedgerIdOverflowException() {
+<span class="nc" id="L452">            super(BKException.Code.LedgerIdOverflowException);</span>
+<span class="nc" id="L453">        }</span>
+    }
+
+    /**
+     * Bookkeeper metadata serialization exception.
+     */
+    public static class BKMetadataSerializationException extends BKException {
+        public BKMetadataSerializationException() {
+<span class="nc" id="L461">            super(BKException.Code.MetadataSerializationException);</span>
+<span class="nc" id="L462">        }</span>
+
+        public BKMetadataSerializationException(Throwable cause) {
+<span class="nc" id="L465">            super(BKException.Code.MetadataSerializationException, cause);</span>
+<span class="nc" id="L466">        }</span>
+    }
+
+    /**
+     * Bookkeeper ledger in limbo and data may or may not exist.
+     */
+    public static class BKDataUnknownException extends BKException {
+        public BKDataUnknownException() {
+<span class="nc" id="L474">            super(BKException.Code.DataUnknownException);</span>
+<span class="nc" id="L475">        }</span>
+    }
+
+    /**
+     * Extract an exception code from an BKException, or use a default if it's another type.
+     * The throwable is null, assume that no exception took place and return
+     * {@link Code#OK}.
+     */
+    public static int getExceptionCode(Throwable t, int defaultCode) {
+<span class="nc bnc" id="L484" title="All 2 branches missed.">        if (t == null) {</span>
+<span class="nc" id="L485">            return Code.OK;</span>
+<span class="nc bnc" id="L486" title="All 2 branches missed.">        } else if (t instanceof BKException) {</span>
+<span class="nc" id="L487">            return ((BKException) t).getCode();</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        } else if (t.getCause() != null) {</span>
+<span class="nc" id="L489">            return getExceptionCode(t.getCause(), defaultCode);</span>
+        } else {
+<span class="nc" id="L491">            return defaultCode;</span>
+        }
+    }
+
+    /**
+     * Extract an exception code from an BKException, or default to unexpected exception if throwable
+     * is not a BKException.
+     *
+     * @see #getExceptionCode(Throwable,int)
+     */
+    public static int getExceptionCode(Throwable t) {
+<span class="nc" id="L502">        return getExceptionCode(t, Code.UnexpectedConditionException);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

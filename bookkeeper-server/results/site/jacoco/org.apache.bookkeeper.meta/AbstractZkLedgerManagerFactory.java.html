@@ -1,0 +1,352 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractZkLedgerManagerFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">AbstractZkLedgerManagerFactory.java</span></div><h1>AbstractZkLedgerManagerFactory.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import static org.apache.bookkeeper.meta.AbstractZkLedgerManager.isLeadgerIdGeneratorZnode;
+import static org.apache.bookkeeper.meta.AbstractZkLedgerManager.isSpecialZnode;
+
+import java.io.IOException;
+import java.net.URI;
+import java.util.List;
+import java.util.Objects;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.common.util.ReflectionUtils;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.meta.LayoutManager.LedgerLayoutExistsException;
+import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
+import org.apache.commons.configuration2.ex.ConfigurationException;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.ZKUtil;
+import org.apache.zookeeper.ZooKeeper;
+
+/**
+ * Abstract ledger manager factory based on zookeeper, which provides common
+ * methods such as format and validateAndNukeExistingCluster.
+ */
+<span class="nc" id="L41">@Slf4j</span>
+<span class="nc" id="L42">public abstract class AbstractZkLedgerManagerFactory implements LedgerManagerFactory {</span>
+
+    protected ZooKeeper zk;
+
+    @SuppressWarnings(&quot;deprecation&quot;)
+    @Override
+    public void format(AbstractConfiguration&lt;?&gt; conf, LayoutManager layoutManager)
+            throws InterruptedException, KeeperException, IOException {
+<span class="nc" id="L50">        try (AbstractZkLedgerManager ledgerManager = (AbstractZkLedgerManager) newLedgerManager()) {</span>
+<span class="nc" id="L51">            String ledgersRootPath = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf);</span>
+<span class="nc" id="L52">            List&lt;String&gt; children = zk.getChildren(ledgersRootPath, false);</span>
+<span class="nc bnc" id="L53" title="All 2 branches missed.">            for (String child : children) {</span>
+<span class="nc bnc" id="L54" title="All 4 branches missed.">                boolean lParentNode = !isSpecialZnode(child) &amp;&amp; ledgerManager.isLedgerParentNode(child);</span>
+<span class="nc" id="L55">                boolean lIdGenerator = isLeadgerIdGeneratorZnode(child);</span>
+
+<span class="nc bnc" id="L57" title="All 4 branches missed.">                if (lParentNode || lIdGenerator) {</span>
+<span class="nc" id="L58">                    ZKUtil.deleteRecursive(zk, ledgersRootPath + &quot;/&quot; + child);</span>
+                }
+<span class="nc" id="L60">            }</span>
+        }
+
+        Class&lt;? extends LedgerManagerFactory&gt; factoryClass;
+        try {
+<span class="nc" id="L65">            factoryClass = conf.getLedgerManagerFactoryClass();</span>
+<span class="nc" id="L66">        } catch (ConfigurationException e) {</span>
+<span class="nc" id="L67">            throw new IOException(&quot;Failed to get ledger manager factory class from configuration : &quot;, e);</span>
+<span class="nc" id="L68">        }</span>
+
+<span class="nc" id="L70">        layoutManager.deleteLedgerLayout();</span>
+        // Create new layout information again.
+<span class="nc" id="L72">        createNewLMFactory(conf, layoutManager, factoryClass);</span>
+<span class="nc" id="L73">    }</span>
+
+    @Override
+    public boolean validateAndNukeExistingCluster(AbstractConfiguration&lt;?&gt; conf, LayoutManager layoutManager)
+            throws InterruptedException, KeeperException, IOException {
+<span class="nc" id="L78">        String zkLedgersRootPath = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf);</span>
+<span class="nc" id="L79">        String zkServers = ZKMetadataDriverBase.resolveZkServers(conf);</span>
+<span class="nc" id="L80">        AbstractZkLedgerManager zkLedgerManager = (AbstractZkLedgerManager) newLedgerManager();</span>
+
+        /*
+         * before proceeding with nuking existing cluster, make sure there
+         * are no unexpected znodes under ledgersRootPath
+         */
+<span class="nc" id="L86">        List&lt;String&gt; ledgersRootPathChildrenList = zk.getChildren(zkLedgersRootPath, false);</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        for (String ledgersRootPathChildren : ledgersRootPathChildrenList) {</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            if ((!AbstractZkLedgerManager.isSpecialZnode(ledgersRootPathChildren))</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                    &amp;&amp; (!zkLedgerManager.isLedgerParentNode(ledgersRootPathChildren))) {</span>
+<span class="nc" id="L90">                log.error(&quot;Found unexpected znode : {} under ledgersRootPath : {} so exiting nuke operation&quot;,</span>
+                        ledgersRootPathChildren, zkLedgersRootPath);
+<span class="nc" id="L92">                return false;</span>
+            }
+<span class="nc" id="L94">        }</span>
+
+        // formatting ledgermanager deletes ledger znodes
+<span class="nc" id="L97">        format(conf, layoutManager);</span>
+
+        // now delete all the special nodes recursively
+<span class="nc" id="L100">        ledgersRootPathChildrenList = zk.getChildren(zkLedgersRootPath, false);</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        for (String ledgersRootPathChildren : ledgersRootPathChildrenList) {</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">            if (AbstractZkLedgerManager.isSpecialZnode(ledgersRootPathChildren)) {</span>
+<span class="nc" id="L103">                ZKUtil.deleteRecursive(zk, zkLedgersRootPath + &quot;/&quot; + ledgersRootPathChildren);</span>
+            } else {
+<span class="nc" id="L105">                log.error(&quot;Found unexpected znode : {} under ledgersRootPath : {} so exiting nuke operation&quot;,</span>
+                        ledgersRootPathChildren, zkLedgersRootPath);
+<span class="nc" id="L107">                return false;</span>
+            }
+<span class="nc" id="L109">        }</span>
+
+        // finally deleting the ledgers rootpath
+<span class="nc" id="L112">        zk.delete(zkLedgersRootPath, -1);</span>
+
+<span class="nc" id="L114">        log.info(&quot;Successfully nuked existing cluster, ZKServers: {} ledger root path: {}&quot;,</span>
+                zkServers, zkLedgersRootPath);
+<span class="nc" id="L116">        return true;</span>
+    }
+
+    // v1 layout
+    static final int V1 = 1;
+
+    /**
+     * Create new Ledger Manager Factory.
+     *
+     * @param conf
+     *          Configuration Object.
+     * @param layoutManager
+     *          layout manager
+     * @return new ledger manager factory
+     * @throws IOException
+     */
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public static LedgerManagerFactory newLedgerManagerFactory(
+        final AbstractConfiguration&lt;?&gt; conf, LayoutManager layoutManager)
+            throws IOException, InterruptedException {
+        String metadataServiceUriStr;
+        try {
+<span class="nc" id="L138">            metadataServiceUriStr = conf.getMetadataServiceUri();</span>
+<span class="nc" id="L139">        } catch (ConfigurationException e) {</span>
+<span class="nc" id="L140">            log.error(&quot;Failed to retrieve metadata service uri from configuration&quot;, e);</span>
+<span class="nc" id="L141">            throw new IOException(</span>
+                &quot;Failed to retrieve metadata service uri from configuration&quot;, e);
+<span class="nc" id="L143">        }</span>
+
+        Class&lt;? extends LedgerManagerFactory&gt; factoryClass;
+        String ledgerRootPath;
+        // `metadataServiceUri` can be null when constructing bookkeeper client using an external zookeeper client.
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (null == metadataServiceUriStr) { //</span>
+            try {
+<span class="nc" id="L150">                factoryClass = conf.getLedgerManagerFactoryClass();</span>
+<span class="nc" id="L151">            } catch (ConfigurationException e) {</span>
+<span class="nc" id="L152">                log.error(&quot;Failed to get ledger manager factory class when using an external zookeeper client&quot;, e);</span>
+<span class="nc" id="L153">                throw new IOException(</span>
+                    &quot;Failed to get ledger manager factory class when using an external zookeeper client&quot;, e);
+<span class="nc" id="L155">            }</span>
+<span class="nc" id="L156">            ledgerRootPath = conf.getZkLedgersRootPath();</span>
+        } else {
+<span class="nc" id="L158">            URI metadataServiceUri = URI.create(metadataServiceUriStr);</span>
+<span class="nc" id="L159">            factoryClass = ZKMetadataDriverBase.resolveLedgerManagerFactory(metadataServiceUri);</span>
+<span class="nc" id="L160">            ledgerRootPath = metadataServiceUri.getPath();</span>
+        }
+
+<span class="nc bnc" id="L163" title="All 4 branches missed.">        if (null == ledgerRootPath || ledgerRootPath.length() == 0) {</span>
+<span class="nc" id="L164">            throw new IOException(&quot;Empty Ledger Root Path.&quot;);</span>
+        }
+
+        // if layoutManager is null, return the default ledger manager
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (layoutManager == null) {</span>
+<span class="nc" id="L169">            return new FlatLedgerManagerFactory()</span>
+<span class="nc" id="L170">                   .initialize(conf, null, FlatLedgerManagerFactory.CUR_VERSION);</span>
+        }
+
+        LedgerManagerFactory lmFactory;
+
+        // check that the configured ledger manager is
+        // compatible with the existing layout
+<span class="nc" id="L177">        LedgerLayout layout = layoutManager.readLedgerLayout();</span>
+
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (layout == null) { // no existing layout</span>
+<span class="nc" id="L180">            lmFactory = createNewLMFactory(conf, layoutManager, factoryClass);</span>
+<span class="nc" id="L181">            return lmFactory</span>
+<span class="nc" id="L182">                    .initialize(conf, layoutManager, lmFactory.getCurrentVersion());</span>
+        }
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L185">            log.debug(&quot;read ledger layout {}&quot;, layout);</span>
+        }
+
+        // there is existing layout, we need to look into the layout.
+        // handle pre V2 layout
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (layout.getLayoutFormatVersion() &lt;= V1) {</span>
+            // pre V2 layout we use type of ledger manager
+<span class="nc" id="L192">            String lmType = conf.getLedgerManagerType();</span>
+<span class="nc bnc" id="L193" title="All 4 branches missed.">            if (lmType != null &amp;&amp; !layout.getManagerFactoryClass().equals(lmType)) {</span>
+<span class="nc" id="L194">                throw new IOException(&quot;Configured layout &quot; + lmType</span>
+<span class="nc" id="L195">                        + &quot; does not match existing layout &quot;  + layout.getManagerFactoryClass());</span>
+            }
+
+            // create the ledger manager
+<span class="nc bnc" id="L199" title="All 2 branches missed.">            if (FlatLedgerManagerFactory.NAME.equals(layout.getManagerFactoryClass())) {</span>
+<span class="nc" id="L200">                lmFactory = new FlatLedgerManagerFactory();</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            } else if (HierarchicalLedgerManagerFactory.NAME.equals(layout.getManagerFactoryClass())) {</span>
+<span class="nc" id="L202">                lmFactory = new HierarchicalLedgerManagerFactory();</span>
+            } else {
+<span class="nc" id="L204">                throw new IOException(&quot;Unknown ledger manager type: &quot; + lmType);</span>
+            }
+<span class="nc" id="L206">            return lmFactory.initialize(conf, layoutManager, layout.getManagerVersion());</span>
+        }
+
+        // handle V2 layout case
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        if (factoryClass != null</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                &amp;&amp; !isSameLedgerManagerFactory(</span>
+<span class="nc" id="L212">                    conf, layout.getManagerFactoryClass(), factoryClass.getName())</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">                &amp;&amp; conf.getProperty(AbstractConfiguration.LEDGER_MANAGER_FACTORY_DISABLE_CLASS_CHECK) == null) {</span>
+                // Disable should ONLY happen during compatibility testing.
+
+<span class="nc" id="L216">            throw new IOException(&quot;Configured layout &quot; + factoryClass.getName()</span>
+<span class="nc" id="L217">                                + &quot; does not match existing layout &quot;  + layout.getManagerFactoryClass());</span>
+        }
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        if (factoryClass == null) {</span>
+            // no factory specified in configuration
+            try {
+<span class="nc" id="L222">                Class&lt;?&gt; theCls = Class.forName(layout.getManagerFactoryClass());</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                if (!LedgerManagerFactory.class.isAssignableFrom(theCls)) {</span>
+<span class="nc" id="L224">                    throw new IOException(&quot;Wrong ledger manager factory &quot; + layout.getManagerFactoryClass());</span>
+                }
+<span class="nc" id="L226">                factoryClass = theCls.asSubclass(LedgerManagerFactory.class);</span>
+<span class="nc" id="L227">            } catch (ClassNotFoundException | IOException e) {</span>
+<span class="nc" id="L228">                factoryClass = attemptToResolveShadedLedgerManagerFactory(</span>
+                    conf,
+<span class="nc" id="L230">                    layout.getManagerFactoryClass(),</span>
+                    e);
+<span class="nc" id="L232">            }</span>
+        }
+        // instantiate a factory
+<span class="nc" id="L235">        lmFactory = ReflectionUtils.newInstance(factoryClass);</span>
+<span class="nc" id="L236">        return lmFactory.initialize(conf, layoutManager, layout.getManagerVersion());</span>
+    }
+
+    private static String normalizedLedgerManagerFactoryClassName(String factoryClass,
+                                                                  String shadedClassPrefix,
+                                                                  boolean isShadedClassAllowed) {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (isShadedClassAllowed) {</span>
+<span class="nc bnc" id="L243" title="All 4 branches missed.">            if (null == factoryClass || null == shadedClassPrefix) {</span>
+<span class="nc" id="L244">                return factoryClass;</span>
+            } else {
+<span class="nc" id="L246">                return factoryClass.replace(shadedClassPrefix, &quot;&quot;);</span>
+            }
+        } else {
+<span class="nc" id="L249">            return factoryClass;</span>
+        }
+    }
+
+    private static boolean isSameLedgerManagerFactory(
+            AbstractConfiguration&lt;?&gt; conf, String leftFactoryClass, String rightFactoryClass) {
+<span class="nc" id="L255">        leftFactoryClass = normalizedLedgerManagerFactoryClassName(</span>
+            leftFactoryClass,
+<span class="nc" id="L257">            conf.getShadedLedgerManagerFactoryClassPrefix(),</span>
+<span class="nc" id="L258">            conf.isShadedLedgerManagerFactoryClassAllowed());</span>
+<span class="nc" id="L259">        rightFactoryClass = normalizedLedgerManagerFactoryClassName(</span>
+            rightFactoryClass,
+<span class="nc" id="L261">            conf.getShadedLedgerManagerFactoryClassPrefix(),</span>
+<span class="nc" id="L262">            conf.isShadedLedgerManagerFactoryClassAllowed());</span>
+<span class="nc" id="L263">        return Objects.equals(leftFactoryClass, rightFactoryClass);</span>
+    }
+
+    private static Class&lt;? extends LedgerManagerFactory&gt; attemptToResolveShadedLedgerManagerFactory(
+            AbstractConfiguration&lt;?&gt; conf, String lmfClassName, Throwable cause) throws IOException {
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if (conf.isShadedLedgerManagerFactoryClassAllowed()) {</span>
+<span class="nc" id="L269">            String shadedPrefix = conf.getShadedLedgerManagerFactoryClassPrefix();</span>
+<span class="nc" id="L270">            log.warn(&quot;Failed to instantiate ledger manager factory {}, trying its shaded class {}{}&quot;,</span>
+                lmfClassName, shadedPrefix, lmfClassName);
+            // try shading class
+            try {
+<span class="nc" id="L274">                return resolveShadedLedgerManagerFactory(lmfClassName, shadedPrefix);</span>
+<span class="nc" id="L275">            } catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L276">                throw new IOException(&quot;Failed to instantiate ledger manager factory &quot;</span>
+                    + lmfClassName + &quot; and its shaded class &quot; + shadedPrefix + lmfClassName, cnfe);
+            }
+        } else {
+<span class="nc" id="L280">            throw new IOException(&quot;Failed to instantiate ledger manager factory &quot;</span>
+                + lmfClassName, cause);
+        }
+    }
+
+    private static Class&lt;? extends LedgerManagerFactory&gt; resolveShadedLedgerManagerFactory(String lmfClassName,
+                                                                                           String shadedClassPrefix)
+            throws ClassNotFoundException, IOException {
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        if (null == lmfClassName) {</span>
+<span class="nc" id="L289">            return null;</span>
+        } else {
+            // this is to address the issue when using the dlog shaded jar
+<span class="nc" id="L292">            Class&lt;?&gt; theCls = Class.forName(shadedClassPrefix + lmfClassName);</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">            if (!LedgerManagerFactory.class.isAssignableFrom(theCls)) {</span>
+<span class="nc" id="L294">                throw new IOException(&quot;Wrong shaded ledger manager factory : &quot; + shadedClassPrefix + lmfClassName);</span>
+            }
+<span class="nc" id="L296">            return theCls.asSubclass(LedgerManagerFactory.class);</span>
+        }
+    }
+
+    /**
+     * Creates the new layout and stores in zookeeper and returns the
+     * LedgerManagerFactory instance.
+     */
+    @SuppressWarnings(&quot;deprecation&quot;)
+    protected static LedgerManagerFactory createNewLMFactory(
+            final AbstractConfiguration conf, final LayoutManager layoutManager,
+            Class&lt;? extends LedgerManagerFactory&gt; factoryClass)
+            throws IOException, InterruptedException {
+
+        LedgerManagerFactory lmFactory;
+        LedgerLayout layout;
+        // use default ledger manager factory if no one provided
+<span class="nc bnc" id="L313" title="All 2 branches missed.">        if (factoryClass == null) {</span>
+            // for backward compatibility, check manager type
+<span class="nc" id="L315">            String lmType = conf.getLedgerManagerType();</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            if (lmType == null) {</span>
+<span class="nc" id="L317">                factoryClass = HierarchicalLedgerManagerFactory.class;</span>
+            } else {
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                if (FlatLedgerManagerFactory.NAME.equals(lmType)) {</span>
+<span class="nc" id="L320">                    factoryClass = FlatLedgerManagerFactory.class;</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">                } else if (HierarchicalLedgerManagerFactory.NAME.equals(lmType)) {</span>
+<span class="nc" id="L322">                    factoryClass = HierarchicalLedgerManagerFactory.class;</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                } else if (LongHierarchicalLedgerManagerFactory.NAME.equals(lmType)) {</span>
+<span class="nc" id="L324">                    factoryClass = LongHierarchicalLedgerManagerFactory.class;</span>
+                } else {
+<span class="nc" id="L326">                    throw new IOException(&quot;Unknown ledger manager type: &quot;</span>
+                            + lmType);
+                }
+            }
+        }
+
+<span class="nc" id="L332">        lmFactory = ReflectionUtils.newInstance(factoryClass);</span>
+
+<span class="nc" id="L334">        layout = new LedgerLayout(factoryClass.getName(),</span>
+<span class="nc" id="L335">                lmFactory.getCurrentVersion());</span>
+        try {
+<span class="nc" id="L337">            layoutManager.storeLedgerLayout(layout);</span>
+<span class="nc" id="L338">        } catch (LedgerLayoutExistsException e) {</span>
+<span class="nc" id="L339">            LedgerLayout layout2 = layoutManager.readLedgerLayout();</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            if (!layout2.equals(layout)) {</span>
+<span class="nc" id="L341">                throw new IOException(</span>
+                        &quot;Contention writing to layout to zookeeper, &quot;
+                                + &quot; other layout &quot; + layout2
+                                + &quot; is incompatible with our &quot; + &quot;layout &quot;
+                                + layout);
+            }
+<span class="nc" id="L347">        }</span>
+<span class="nc" id="L348">        return lmFactory;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

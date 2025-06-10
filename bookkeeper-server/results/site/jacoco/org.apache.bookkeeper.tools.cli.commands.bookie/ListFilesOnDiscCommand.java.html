@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ListFilesOnDiscCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookie</a> &gt; <span class="el_source">ListFilesOnDiscCommand.java</span></div><h1>ListFilesOnDiscCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.bookie;
+
+import com.beust.jcommander.Parameter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import java.io.File;
+import java.io.IOException;
+import java.util.List;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.bookie.BookieShell;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to list the files in JournalDirectories/LedgerDirectories/IndexDirectories.
+ */
+public class ListFilesOnDiscCommand extends BookieCommand&lt;ListFilesOnDiscCommand.LFODFlags &gt; {
+
+    private static final String NAME = &quot;listfilesondisc&quot;;
+    private static final String DESC = &quot;List the files in JournalDirectories/LedgerDirectories/IndexDirectories.&quot;;
+<span class="nc" id="L43">    private static final Logger LOG = LoggerFactory.getLogger(ListFilesOnDiscCommand.class);</span>
+
+    public ListFilesOnDiscCommand() {
+<span class="nc" id="L46">        this(new LFODFlags());</span>
+<span class="nc" id="L47">    }</span>
+
+    public ListFilesOnDiscCommand(LFODFlags flags) {
+<span class="nc" id="L50">        super(CliSpec.&lt;LFODFlags&gt;newBuilder().withName(NAME).withDescription(DESC).withFlags(flags).build());</span>
+<span class="nc" id="L51">    }</span>
+
+    /**
+     * Flags for list files on disc command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L57">    @Setter</span>
+<span class="nc" id="L58">    public static class LFODFlags extends CliFlags {</span>
+        @Parameter(names = {&quot;-txn&quot;, &quot;--journal&quot;}, description = &quot;Print list of Journal Files&quot;)
+        private boolean journal;
+
+        @Parameter(names = {&quot;-log&quot;, &quot;--entrylog&quot;}, description = &quot;Print list of EntryLog Files&quot;)
+        private boolean entrylog;
+
+        @Parameter(names = {&quot;-idx&quot;, &quot;--index&quot;}, description = &quot;Print list of Index Files&quot;)
+        private boolean index;
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, LFODFlags cmdFlags) {
+        try {
+<span class="nc" id="L72">            return handler(conf, cmdFlags);</span>
+<span class="nc" id="L73">        } catch (IOException e) {</span>
+<span class="nc" id="L74">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    private boolean handler(ServerConfiguration conf, LFODFlags cmd) throws IOException {
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        if (cmd.journal) {</span>
+<span class="nc" id="L80">            File[] journalDirs = conf.getJournalDirs();</span>
+<span class="nc" id="L81">            List&lt;File&gt; journalFiles = BookieShell.listFilesAndSort(journalDirs, &quot;txn&quot;);</span>
+<span class="nc" id="L82">            LOG.info(&quot;--------- Printing the list of Journal Files ---------&quot;);</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">            for (File journalFile : journalFiles) {</span>
+<span class="nc" id="L84">                LOG.info(&quot;{}&quot;, journalFile.getCanonicalPath());</span>
+<span class="nc" id="L85">            }</span>
+<span class="nc" id="L86">            LOG.info(&quot;&quot;);</span>
+        }
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        if (cmd.entrylog) {</span>
+<span class="nc" id="L89">            File[] ledgerDirs = conf.getLedgerDirs();</span>
+<span class="nc" id="L90">            List&lt;File&gt; ledgerFiles = BookieShell.listFilesAndSort(ledgerDirs, &quot;log&quot;);</span>
+<span class="nc" id="L91">            LOG.info(&quot;--------- Printing the list of EntryLog/Ledger Files ---------&quot;);</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            for (File ledgerFile : ledgerFiles) {</span>
+<span class="nc" id="L93">                LOG.info(&quot;{}&quot;, ledgerFile.getCanonicalPath());</span>
+<span class="nc" id="L94">            }</span>
+<span class="nc" id="L95">            LOG.info(&quot;&quot;);</span>
+        }
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        if (cmd.index) {</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            File[] indexDirs = (conf.getIndexDirs() == null) ? conf.getLedgerDirs() : conf.getIndexDirs();</span>
+<span class="nc" id="L99">            List&lt;File&gt; indexFiles = BookieShell.listFilesAndSort(indexDirs, &quot;idx&quot;);</span>
+<span class="nc" id="L100">            LOG.info(&quot;--------- Printing the list of Index Files ---------&quot;);</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">            for (File indexFile : indexFiles) {</span>
+<span class="nc" id="L102">                LOG.info(&quot;{}&quot;, indexFile.getCanonicalPath());</span>
+<span class="nc" id="L103">            }</span>
+        }
+<span class="nc" id="L105">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

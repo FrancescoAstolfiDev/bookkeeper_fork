@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ZkLedgerAuditorManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">ZkLedgerAuditorManager.java</span></div><h1>ZkLedgerAuditorManager.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.bookkeeper.proto.DataFormats.AuditorVoteFormat;
+import static org.apache.bookkeeper.replication.ReplicationStats.ELECTION_ATTEMPTS;
+
+import com.google.protobuf.TextFormat;
+import java.io.IOException;
+import java.io.Serializable;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.function.Consumer;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+import org.apache.bookkeeper.util.BookKeeperConstants;
+import org.apache.bookkeeper.util.ZkUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.ACL;
+
+/**
+ * ZK based implementation of LedgerAuditorManager.
+ */
+<span class="nc" id="L52">@Slf4j</span>
+public class ZkLedgerAuditorManager implements LedgerAuditorManager {
+
+    private final ZooKeeper zkc;
+    private final ServerConfiguration conf;
+    private final String basePath;
+    private final String electionPath;
+
+    private String myVote;
+
+    private static final String ELECTION_ZNODE = &quot;auditorelection&quot;;
+
+    // Represents the index of the auditor node
+    private static final int AUDITOR_INDEX = 0;
+    // Represents vote prefix
+    private static final String VOTE_PREFIX = &quot;V_&quot;;
+    // Represents path Separator
+    private static final String PATH_SEPARATOR = &quot;/&quot;;
+
+    private volatile Consumer&lt;AuditorEvent&gt; listener;
+<span class="nc" id="L72">    private volatile boolean isClosed = false;</span>
+
+    // Expose Stats
+    @StatsDoc(
+            name = ELECTION_ATTEMPTS,
+            help = &quot;The number of auditor election attempts&quot;
+    )
+    private final Counter electionAttempts;
+
+<span class="nc" id="L81">    public ZkLedgerAuditorManager(ZooKeeper zkc, ServerConfiguration conf, StatsLogger statsLogger) {</span>
+<span class="nc" id="L82">        this.zkc = zkc;</span>
+<span class="nc" id="L83">        this.conf = conf;</span>
+
+<span class="nc" id="L85">        this.basePath = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf) + '/'</span>
+                + BookKeeperConstants.UNDER_REPLICATION_NODE;
+<span class="nc" id="L87">        this.electionPath = basePath + '/' + ELECTION_ZNODE;</span>
+<span class="nc" id="L88">        this.electionAttempts = statsLogger.getCounter(ELECTION_ATTEMPTS);</span>
+<span class="nc" id="L89">    }</span>
+
+    @Override
+    public void tryToBecomeAuditor(String bookieId, Consumer&lt;AuditorEvent&gt; listener)
+            throws IOException, InterruptedException {
+<span class="nc" id="L94">        this.listener = listener;</span>
+<span class="nc" id="L95">        createElectorPath();</span>
+
+        try {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            while (!isClosed) {</span>
+<span class="nc" id="L99">                createMyVote(bookieId);</span>
+
+<span class="nc" id="L101">                List&lt;String&gt; children = zkc.getChildren(getVotePath(&quot;&quot;), false);</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">                if (0 &gt;= children.size()) {</span>
+<span class="nc" id="L103">                    throw new IllegalArgumentException(</span>
+                            &quot;At least one bookie server should present to elect the Auditor!&quot;);
+                }
+
+                // sorting in ascending order of sequential number
+<span class="nc" id="L108">                Collections.sort(children, new ElectionComparator());</span>
+<span class="nc" id="L109">                String voteNode = StringUtils.substringAfterLast(myVote, PATH_SEPARATOR);</span>
+
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                if (children.get(AUDITOR_INDEX).equals(voteNode)) {</span>
+                    // We have been elected as the auditor
+                    // update the auditor bookie id in the election path. This is
+                    // done for debugging purpose
+<span class="nc" id="L115">                    AuditorVoteFormat.Builder builder = AuditorVoteFormat.newBuilder()</span>
+<span class="nc" id="L116">                            .setBookieId(bookieId);</span>
+
+<span class="nc" id="L118">                    zkc.setData(getVotePath(&quot;&quot;),</span>
+<span class="nc" id="L119">                            builder.build().toString().getBytes(UTF_8), -1);</span>
+<span class="nc" id="L120">                    return;</span>
+                 } else {
+                    // If not an auditor, will be watching to my predecessor and
+                    // looking the previous node deletion.
+<span class="nc" id="L124">                    int myIndex = children.indexOf(voteNode);</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                    if (myIndex &lt; 0) {</span>
+<span class="nc" id="L126">                        throw new IllegalArgumentException(&quot;My vote has disappeared&quot;);</span>
+                    }
+
+<span class="nc" id="L129">                    int prevNodeIndex = myIndex - 1;</span>
+
+<span class="nc" id="L131">                    CountDownLatch latch = new CountDownLatch(1);</span>
+
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                    if (null == zkc.exists(getVotePath(PATH_SEPARATOR)</span>
+<span class="nc" id="L134">                            + children.get(prevNodeIndex), event -&gt; latch.countDown())) {</span>
+                        // While adding, the previous znode doesn't exists.
+                        // Again going to election.
+<span class="nc" id="L137">                        continue;</span>
+                    }
+
+                    // Wait for the previous auditor in line to be deleted
+<span class="nc" id="L141">                    latch.await();</span>
+                }
+
+<span class="nc" id="L144">                electionAttempts.inc();</span>
+<span class="nc" id="L145">            }</span>
+<span class="nc" id="L146">        } catch (KeeperException e) {</span>
+<span class="nc" id="L147">            throw new IOException(e);</span>
+<span class="nc" id="L148">        }</span>
+<span class="nc" id="L149">    }</span>
+
+    @Override
+    public BookieId getCurrentAuditor() throws IOException, InterruptedException {
+<span class="nc" id="L153">        String electionRoot = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf) + '/'</span>
+                + BookKeeperConstants.UNDER_REPLICATION_NODE + '/' + ELECTION_ZNODE;
+
+        try {
+<span class="nc" id="L157">            List&lt;String&gt; children = zkc.getChildren(electionRoot, false);</span>
+<span class="nc" id="L158">            Collections.sort(children, new ElectionComparator());</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            if (children.size() &lt; 1) {</span>
+<span class="nc" id="L160">                return null;</span>
+            }
+<span class="nc" id="L162">            String ledger = electionRoot + &quot;/&quot; + children.get(AUDITOR_INDEX);</span>
+<span class="nc" id="L163">            byte[] data = zkc.getData(ledger, false, null);</span>
+
+<span class="nc" id="L165">            AuditorVoteFormat.Builder builder = AuditorVoteFormat.newBuilder();</span>
+<span class="nc" id="L166">            TextFormat.merge(new String(data, UTF_8), builder);</span>
+<span class="nc" id="L167">            AuditorVoteFormat v = builder.build();</span>
+<span class="nc" id="L168">            return BookieId.parse(v.getBookieId());</span>
+<span class="nc" id="L169">        } catch (KeeperException e) {</span>
+<span class="nc" id="L170">            throw new IOException(e);</span>
+        }
+    }
+
+    @Override
+    public void close() throws Exception {
+<span class="nc" id="L176">        log.info(&quot;Shutting down AuditorElector&quot;);</span>
+<span class="nc" id="L177">        isClosed = true;</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        if (myVote != null) {</span>
+            try {
+<span class="nc" id="L180">                zkc.delete(myVote, -1);</span>
+<span class="nc" id="L181">            } catch (KeeperException.NoNodeException nne) {</span>
+                // Ok
+<span class="nc" id="L183">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L184">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L185">                log.warn(&quot;InterruptedException while deleting myVote: &quot; + myVote,</span>
+                        ie);
+<span class="nc" id="L187">            } catch (KeeperException ke) {</span>
+<span class="nc" id="L188">                log.error(&quot;Exception while deleting myVote:&quot; + myVote, ke);</span>
+<span class="nc" id="L189">            }</span>
+        }
+<span class="nc" id="L191">    }</span>
+
+    private void createMyVote(String bookieId) throws IOException, InterruptedException {
+<span class="nc" id="L194">        List&lt;ACL&gt; zkAcls = ZkUtils.getACLs(conf);</span>
+<span class="nc" id="L195">        AuditorVoteFormat.Builder builder = AuditorVoteFormat.newBuilder()</span>
+<span class="nc" id="L196">                .setBookieId(bookieId);</span>
+
+        try {
+<span class="nc bnc" id="L199" title="All 4 branches missed.">            if (null == myVote || null == zkc.exists(myVote, false)) {</span>
+<span class="nc" id="L200">                myVote = zkc.create(getVotePath(PATH_SEPARATOR + VOTE_PREFIX),</span>
+<span class="nc" id="L201">                        builder.build().toString().getBytes(UTF_8), zkAcls,</span>
+                        CreateMode.EPHEMERAL_SEQUENTIAL);
+            }
+<span class="nc" id="L204">        } catch (KeeperException e) {</span>
+<span class="nc" id="L205">            throw new IOException(e);</span>
+<span class="nc" id="L206">        }</span>
+<span class="nc" id="L207">    }</span>
+
+    private void createElectorPath() throws IOException {
+        try {
+<span class="nc" id="L211">            List&lt;ACL&gt; zkAcls = ZkUtils.getACLs(conf);</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            if (zkc.exists(basePath, false) == null) {</span>
+                try {
+<span class="nc" id="L214">                    zkc.create(basePath, new byte[0], zkAcls,</span>
+                            CreateMode.PERSISTENT);
+<span class="nc" id="L216">                } catch (KeeperException.NodeExistsException nee) {</span>
+                    // do nothing, someone else could have created it
+<span class="nc" id="L218">                }</span>
+            }
+<span class="nc bnc" id="L220" title="All 2 branches missed.">            if (zkc.exists(getVotePath(&quot;&quot;), false) == null) {</span>
+                try {
+<span class="nc" id="L222">                    zkc.create(getVotePath(&quot;&quot;), new byte[0],</span>
+                            zkAcls, CreateMode.PERSISTENT);
+<span class="nc" id="L224">                } catch (KeeperException.NodeExistsException nee) {</span>
+                    // do nothing, someone else could have created it
+<span class="nc" id="L226">                }</span>
+            }
+<span class="nc" id="L228">        } catch (KeeperException ke) {</span>
+<span class="nc" id="L229">            throw new IOException(&quot;Failed to initialize Auditor Elector&quot;, ke);</span>
+<span class="nc" id="L230">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L231">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L232">            throw new IOException(&quot;Failed to initialize Auditor Elector&quot;, ie);</span>
+<span class="nc" id="L233">        }</span>
+<span class="nc" id="L234">    }</span>
+
+    private String getVotePath(String vote) {
+<span class="nc" id="L237">        return electionPath + vote;</span>
+    }
+
+    private void handleZkWatch(WatchedEvent event) {
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        if (isClosed) {</span>
+<span class="nc" id="L242">            return;</span>
+        }
+
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        if (event.getState() == Watcher.Event.KeeperState.Expired) {</span>
+<span class="nc" id="L246">            log.error(&quot;Lost ZK connection, shutting down&quot;);</span>
+
+<span class="nc" id="L248">            listener.accept(AuditorEvent.SessionLost);</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">        } else if (event.getType() == Watcher.Event.EventType.NodeDeleted) {</span>
+<span class="nc" id="L250">            listener.accept(AuditorEvent.VoteWasDeleted);</span>
+        }
+<span class="nc" id="L252">    }</span>
+
+    /**
+     * Compare the votes in the ascending order of the sequence number. Vote
+     * format is 'V_sequencenumber', comparator will do sorting based on the
+     * numeric sequence value.
+     */
+    private static class ElectionComparator
+            implements Comparator&lt;String&gt;, Serializable {
+        /**
+         * Return -1 if the first vote is less than second. Return 1 if the
+         * first vote is greater than second. Return 0 if the votes are equal.
+         */
+        @Override
+        public int compare(String vote1, String vote2) {
+<span class="nc" id="L267">            long voteSeqId1 = getVoteSequenceId(vote1);</span>
+<span class="nc" id="L268">            long voteSeqId2 = getVoteSequenceId(vote2);</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">            int result = voteSeqId1 &lt; voteSeqId2 ? -1</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                    : (voteSeqId1 &gt; voteSeqId2 ? 1 : 0);</span>
+<span class="nc" id="L271">            return result;</span>
+        }
+
+        private long getVoteSequenceId(String vote) {
+<span class="nc" id="L275">            String voteId = StringUtils.substringAfter(vote, VOTE_PREFIX);</span>
+<span class="nc" id="L276">            return Long.parseLong(voteId);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

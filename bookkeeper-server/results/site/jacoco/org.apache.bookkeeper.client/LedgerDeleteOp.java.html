@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerDeleteOp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">LedgerDeleteOp.java</span></div><h1>LedgerDeleteOp.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.client;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.apache.bookkeeper.client.AsyncCallback.DeleteCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncDeleteCallback;
+import org.apache.bookkeeper.client.api.DeleteBuilder;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.versioning.Version;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Encapsulates asynchronous ledger delete operation.
+ *
+ */
+class LedgerDeleteOp {
+
+<span class="nc" id="L42">    static final Logger LOG = LoggerFactory.getLogger(LedgerDeleteOp.class);</span>
+
+    final BookKeeper bk;
+    final long ledgerId;
+    final DeleteCallback cb;
+    final Object ctx;
+    final long startTime;
+    final OpStatsLogger deleteOpLogger;
+
+    /**
+     * Constructor.
+     *
+     * @param bk
+     *            BookKeeper object
+     * @param ledgerId
+     *            ledger Id
+     * @param cb
+     *            callback implementation
+     * @param ctx
+     *            optional control object
+     */
+    LedgerDeleteOp(BookKeeper bk, BookKeeperClientStats clientStats,
+<span class="nc" id="L64">                   long ledgerId, DeleteCallback cb, Object ctx) {</span>
+<span class="nc" id="L65">        this.bk = bk;</span>
+<span class="nc" id="L66">        this.ledgerId = ledgerId;</span>
+<span class="nc" id="L67">        this.cb = cb;</span>
+<span class="nc" id="L68">        this.ctx = ctx;</span>
+<span class="nc" id="L69">        this.startTime = MathUtils.nowInNano();</span>
+<span class="nc" id="L70">        this.deleteOpLogger = clientStats.getDeleteOpLogger();</span>
+<span class="nc" id="L71">    }</span>
+
+    /**
+     * Initiates the operation.
+     */
+    public void initiate() {
+        // Asynchronously delete the ledger from meta manager
+        // When this completes, it will invoke the callback method below.
+<span class="nc" id="L79">        bk.getLedgerManager().removeLedgerMetadata(ledgerId, Version.ANY)</span>
+<span class="nc" id="L80">            .whenCompleteAsync((ignore, exception) -&gt; {</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">                    if (exception != null) {</span>
+<span class="nc" id="L82">                        deleteOpLogger.registerFailedEvent(MathUtils.elapsedNanos(startTime), TimeUnit.NANOSECONDS);</span>
+                    } else {
+<span class="nc" id="L84">                        deleteOpLogger.registerSuccessfulEvent(MathUtils.elapsedNanos(startTime), TimeUnit.NANOSECONDS);</span>
+                    }
+<span class="nc" id="L86">                    cb.deleteComplete(BKException.getExceptionCode(exception), this.ctx);</span>
+<span class="nc" id="L87">                }, bk.getMainWorkerPool().chooseThread(ledgerId));</span>
+<span class="nc" id="L88">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L92">        return String.format(&quot;LedgerDeleteOp(%d)&quot;, ledgerId);</span>
+    }
+
+    static class DeleteBuilderImpl  implements DeleteBuilder {
+
+        private Long builderLedgerId;
+        private final BookKeeper bk;
+
+<span class="nc" id="L100">        DeleteBuilderImpl(BookKeeper bk) {</span>
+<span class="nc" id="L101">            this.bk = bk;</span>
+<span class="nc" id="L102">        }</span>
+
+        @Override
+        public DeleteBuilder withLedgerId(long ledgerId) {
+<span class="nc" id="L106">            this.builderLedgerId = ledgerId;</span>
+<span class="nc" id="L107">            return this;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Void&gt; execute() {
+<span class="nc" id="L112">            CompletableFuture&lt;Void&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L113">            SyncDeleteCallback result = new SyncDeleteCallback(future);</span>
+<span class="nc" id="L114">            delete(builderLedgerId, result);</span>
+<span class="nc" id="L115">            return future;</span>
+        }
+
+        private boolean validate() {
+<span class="nc bnc" id="L119" title="All 4 branches missed.">            if (builderLedgerId == null || builderLedgerId &lt; 0) {</span>
+<span class="nc" id="L120">                LOG.error(&quot;invalid ledgerId {} &lt; 0&quot;, builderLedgerId);</span>
+<span class="nc" id="L121">                return false;</span>
+            }
+<span class="nc" id="L123">            return true;</span>
+        }
+
+        private void delete(Long ledgerId, DeleteCallback cb) {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (!validate()) {</span>
+<span class="nc" id="L128">                cb.deleteComplete(BKException.Code.IncorrectParameterException, null);</span>
+<span class="nc" id="L129">                return;</span>
+            }
+<span class="nc" id="L131">            LedgerDeleteOp op = new LedgerDeleteOp(bk, bk.getClientCtx().getClientStats(), ledgerId, cb, null);</span>
+<span class="nc" id="L132">            ReentrantReadWriteLock closeLock = bk.getCloseLock();</span>
+<span class="nc" id="L133">            closeLock.readLock().lock();</span>
+            try {
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                if (bk.isClosed()) {</span>
+<span class="nc" id="L136">                    cb.deleteComplete(BKException.Code.ClientClosedException, null);</span>
+<span class="nc" id="L137">                    return;</span>
+                }
+<span class="nc" id="L139">                op.initiate();</span>
+            } finally {
+<span class="nc" id="L141">                closeLock.readLock().unlock();</span>
+            }
+<span class="nc" id="L143">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

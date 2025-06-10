@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AuditorTask.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">AuditorTask.java</span></div><h1>AuditorTask.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.replication;
+
+import com.google.common.collect.Lists;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BiConsumer;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+abstract class AuditorTask implements Runnable {
+<span class="nc" id="L43">    private static final Logger LOG = LoggerFactory.getLogger(AuditorTask.class);</span>
+
+    protected final ServerConfiguration conf;
+    protected AuditorStats auditorStats;
+    protected BookKeeperAdmin admin;
+    protected LedgerManager ledgerManager;
+    protected LedgerUnderreplicationManager ledgerUnderreplicationManager;
+    private final ShutdownTaskHandler shutdownTaskHandler;
+    private final BiConsumer&lt;AtomicBoolean, Throwable&gt; hasAuditCheckTask;
+<span class="nc" id="L52">    private final AtomicBoolean hasTask = new AtomicBoolean(false);</span>
+
+    AuditorTask(ServerConfiguration conf,
+                AuditorStats auditorStats,
+                BookKeeperAdmin admin,
+                LedgerManager ledgerManager,
+                LedgerUnderreplicationManager ledgerUnderreplicationManager,
+                ShutdownTaskHandler shutdownTaskHandler,
+<span class="nc" id="L60">                BiConsumer&lt;AtomicBoolean, Throwable&gt; hasAuditCheckTask) {</span>
+<span class="nc" id="L61">        this.conf = conf;</span>
+<span class="nc" id="L62">        this.auditorStats = auditorStats;</span>
+<span class="nc" id="L63">        this.admin = admin;</span>
+<span class="nc" id="L64">        this.ledgerManager = ledgerManager;</span>
+<span class="nc" id="L65">        this.ledgerUnderreplicationManager = ledgerUnderreplicationManager;</span>
+<span class="nc" id="L66">        this.shutdownTaskHandler = shutdownTaskHandler;</span>
+<span class="nc" id="L67">        this.hasAuditCheckTask = hasAuditCheckTask;</span>
+<span class="nc" id="L68">    }</span>
+
+    @Override
+    public void run() {
+<span class="nc" id="L72">        runTask();</span>
+<span class="nc" id="L73">    }</span>
+
+    protected abstract void runTask();
+
+    protected boolean isLedgerReplicationEnabled() throws ReplicationException.UnavailableException {
+<span class="nc" id="L78">        return ledgerUnderreplicationManager.isLedgerReplicationEnabled();</span>
+    }
+
+    protected CompletableFuture&lt;?&gt; publishSuspectedLedgersAsync(Collection&lt;String&gt; missingBookies, Set&lt;Long&gt; ledgers) {
+<span class="nc bnc" id="L82" title="All 4 branches missed.">        if (null == ledgers || ledgers.size() == 0) {</span>
+            // there is no ledgers available for this bookie and just
+            // ignoring the bookie failures
+<span class="nc" id="L85">            LOG.info(&quot;There is no ledgers for the failed bookie: {}&quot;, missingBookies);</span>
+<span class="nc" id="L86">            return FutureUtils.Void();</span>
+        }
+<span class="nc" id="L88">        LOG.info(&quot;Following ledgers: {} of bookie: {} are identified as underreplicated&quot;, ledgers, missingBookies);</span>
+<span class="nc" id="L89">        auditorStats.getNumUnderReplicatedLedger().registerSuccessfulValue(ledgers.size());</span>
+<span class="nc" id="L90">        LongAdder underReplicatedSize = new LongAdder();</span>
+<span class="nc" id="L91">        FutureUtils.processList(</span>
+<span class="nc" id="L92">                Lists.newArrayList(ledgers),</span>
+                ledgerId -&gt;
+<span class="nc" id="L94">                        ledgerManager.readLedgerMetadata(ledgerId).whenComplete((metadata, exception) -&gt; {</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                            if (exception == null) {</span>
+<span class="nc" id="L96">                                underReplicatedSize.add(metadata.getValue().getLength());</span>
+                            }
+<span class="nc" id="L98">                        }), null).whenComplete((res, e) -&gt; {</span>
+<span class="nc" id="L99">            auditorStats.getUnderReplicatedLedgerTotalSize().registerSuccessfulValue(underReplicatedSize.longValue());</span>
+<span class="nc" id="L100">        });</span>
+
+<span class="nc" id="L102">        return FutureUtils.processList(</span>
+<span class="nc" id="L103">                Lists.newArrayList(ledgers),</span>
+<span class="nc" id="L104">                ledgerId -&gt; ledgerUnderreplicationManager.markLedgerUnderreplicatedAsync(ledgerId, missingBookies),</span>
+                null
+        );
+    }
+
+    protected List&lt;String&gt; getAvailableBookies() throws BKException {
+        // Get the available bookies
+<span class="nc" id="L111">        Collection&lt;BookieId&gt; availableBkAddresses = admin.getAvailableBookies();</span>
+<span class="nc" id="L112">        Collection&lt;BookieId&gt; readOnlyBkAddresses = admin.getReadOnlyBookies();</span>
+<span class="nc" id="L113">        availableBkAddresses.addAll(readOnlyBkAddresses);</span>
+
+<span class="nc" id="L115">        List&lt;String&gt; availableBookies = new ArrayList&lt;String&gt;();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        for (BookieId addr : availableBkAddresses) {</span>
+<span class="nc" id="L117">            availableBookies.add(addr.toString());</span>
+<span class="nc" id="L118">        }</span>
+<span class="nc" id="L119">        return availableBookies;</span>
+    }
+
+    /**
+     * Get BookKeeper client according to configuration.
+     * @param conf
+     * @return
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    BookKeeper getBookKeeper(ServerConfiguration conf) throws IOException, InterruptedException {
+<span class="nc" id="L130">        return Auditor.createBookKeeperClient(conf);</span>
+    }
+
+    /**
+     * Get BookKeeper admin according to bookKeeper client.
+     * @param bookKeeper
+     * @return
+     */
+    BookKeeperAdmin getBookKeeperAdmin(final BookKeeper bookKeeper) {
+<span class="nc" id="L139">        return new BookKeeperAdmin(bookKeeper, auditorStats.getStatsLogger(), new ClientConfiguration(conf));</span>
+    }
+
+    protected void submitShutdownTask() {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (shutdownTaskHandler != null) {</span>
+<span class="nc" id="L144">            shutdownTaskHandler.submitShutdownTask();</span>
+        }
+<span class="nc" id="L146">    }</span>
+
+    public abstract void shutdown();
+
+    protected boolean hasBookieCheckTask() {
+<span class="nc" id="L151">        hasTask.set(false);</span>
+<span class="nc" id="L152">        hasAuditCheckTask.accept(hasTask, null);</span>
+<span class="nc" id="L153">        return hasTask.get();</span>
+    }
+
+    /**
+     * ShutdownTaskHandler used to shutdown auditor executor.
+     */
+    interface ShutdownTaskHandler {
+        void submitShutdownTask();
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

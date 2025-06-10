@@ -1,0 +1,335 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JournalChannel.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">JournalChannel.java</span></div><h1>JournalChannel.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import java.io.Closeable;
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.Arrays;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.util.PageCacheUtil;
+import org.apache.bookkeeper.util.ZeroBuffer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Simple wrapper around FileChannel to add versioning
+ * information to the file.
+ */
+class JournalChannel implements Closeable {
+<span class="nc" id="L43">    private static final Logger LOG = LoggerFactory.getLogger(JournalChannel.class);</span>
+
+    static final long MB = 1024 * 1024L;
+    final BookieFileChannel channel;
+    final int fd;
+    final FileChannel fc;
+    final int formatVersion;
+    BufferedChannel bc;
+<span class="nc" id="L51">    long nextPrealloc = 0;</span>
+
+<span class="nc" id="L53">    final byte[] magicWord = &quot;BKLG&quot;.getBytes(UTF_8);</span>
+
+    static final int SECTOR_SIZE = 512;
+    private static final int START_OF_FILE = -12345;
+    private static final long cacheDropLagBytes = 8 * MB;
+
+    // No header
+    static final int V1 = 1;
+    // Adding header
+    static final int V2 = 2;
+    // Adding ledger key
+    static final int V3 = 3;
+    // Adding fencing key
+    static final int V4 = 4;
+    // 1) expanding header to 512
+    // 2) Padding writes to align sector size
+    static final int V5 = 5;
+    // Adding explicit lac entry
+    public static final int V6 = 6;
+
+    static final int HEADER_SIZE = SECTOR_SIZE; // align header to sector size
+    static final int VERSION_HEADER_SIZE = 8; // 4byte magic word, 4 byte version
+    static final int MIN_COMPAT_JOURNAL_FORMAT_VERSION = V1;
+    static final int CURRENT_JOURNAL_FORMAT_VERSION = V6;
+
+    private final long preAllocSize;
+    private final int journalAlignSize;
+    private final boolean fRemoveFromPageCache;
+    public final ByteBuffer zeros;
+
+    // The position of the file channel's last drop position
+<span class="nc" id="L84">    private long lastDropPosition = 0L;</span>
+
+    final ServerConfiguration configuration;
+
+    // Mostly used by tests
+    JournalChannel(File journalDirectory, long logId) throws IOException {
+<span class="nc" id="L90">        this(journalDirectory, logId, 4 * MB, 65536, START_OF_FILE, new ServerConfiguration(),</span>
+            new DefaultFileChannelProvider());
+<span class="nc" id="L92">    }</span>
+
+    // Open journal for scanning starting from the first record in journal.
+    JournalChannel(File journalDirectory, long logId,
+                   long preAllocSize, int writeBufferSize, ServerConfiguration conf,
+                   FileChannelProvider provider) throws IOException {
+<span class="nc" id="L98">        this(journalDirectory, logId, preAllocSize, writeBufferSize, START_OF_FILE, conf, provider);</span>
+<span class="nc" id="L99">    }</span>
+
+    // Open journal for scanning starting from given position.
+    JournalChannel(File journalDirectory, long logId,
+                   long preAllocSize, int writeBufferSize, long position, ServerConfiguration conf,
+                   FileChannelProvider provider) throws IOException {
+<span class="nc" id="L105">         this(journalDirectory, logId, preAllocSize, writeBufferSize, SECTOR_SIZE,</span>
+                 position, false, V5, Journal.BufferedChannelBuilder.DEFAULT_BCBUILDER,
+             conf, provider, null);
+<span class="nc" id="L108">    }</span>
+
+    // Open journal to write
+    JournalChannel(File journalDirectory, long logId,
+                   long preAllocSize, int writeBufferSize, int journalAlignSize,
+                   boolean fRemoveFromPageCache, int formatVersionToWrite,
+                   ServerConfiguration conf, FileChannelProvider provider) throws IOException {
+<span class="nc" id="L115">        this(journalDirectory, logId, preAllocSize, writeBufferSize, journalAlignSize, fRemoveFromPageCache,</span>
+                formatVersionToWrite, Journal.BufferedChannelBuilder.DEFAULT_BCBUILDER, conf, provider, null);
+<span class="nc" id="L117">    }</span>
+
+    JournalChannel(File journalDirectory, long logId,
+                   long preAllocSize, int writeBufferSize, int journalAlignSize,
+                   boolean fRemoveFromPageCache, int formatVersionToWrite,
+                   Journal.BufferedChannelBuilder bcBuilder, ServerConfiguration conf,
+                   FileChannelProvider provider, Long toReplaceLogId) throws IOException {
+<span class="nc" id="L124">        this(journalDirectory, logId, preAllocSize, writeBufferSize, journalAlignSize,</span>
+                START_OF_FILE, fRemoveFromPageCache, formatVersionToWrite, bcBuilder, conf, provider, toReplaceLogId);
+<span class="nc" id="L126">    }</span>
+
+    /**
+     * Create a journal file.
+     * Allows injection of BufferedChannelBuilder for testing purposes.
+     *
+     * @param journalDirectory
+     *          directory to store the journal file.
+     * @param logId
+     *          log id for the journal file.
+     * @param preAllocSize
+     *          pre allocation size.
+     * @param writeBufferSize
+     *          write buffer size.
+     * @param journalAlignSize
+     *          size to align journal writes.
+     * @param position
+     *          position to start read/write
+     * @param fRemoveFromPageCache
+     *          whether to remove cached pages from page cache.
+     * @param formatVersionToWrite
+     *          format version to write
+     * @throws IOException
+     */
+    private JournalChannel(File journalDirectory, long logId,
+                           long preAllocSize, int writeBufferSize, int journalAlignSize,
+                           long position, boolean fRemoveFromPageCache,
+                           int formatVersionToWrite, Journal.BufferedChannelBuilder bcBuilder,
+                           ServerConfiguration conf,
+<span class="nc" id="L155">                           FileChannelProvider provider, Long toReplaceLogId) throws IOException {</span>
+<span class="nc" id="L156">        this.journalAlignSize = journalAlignSize;</span>
+<span class="nc" id="L157">        this.zeros = ByteBuffer.allocate(journalAlignSize);</span>
+<span class="nc" id="L158">        this.preAllocSize = preAllocSize - preAllocSize % journalAlignSize;</span>
+<span class="nc" id="L159">        this.fRemoveFromPageCache = fRemoveFromPageCache;</span>
+<span class="nc" id="L160">        this.configuration = conf;</span>
+
+<span class="nc" id="L162">        boolean reuseFile = false;</span>
+<span class="nc" id="L163">        File fn = new File(journalDirectory, Long.toHexString(logId) + &quot;.txn&quot;);</span>
+<span class="nc bnc" id="L164" title="All 6 branches missed.">        if (toReplaceLogId != null &amp;&amp; logId != toReplaceLogId &amp;&amp; provider.supportReuseFile()) {</span>
+<span class="nc" id="L165">            File toReplaceFile = new File(journalDirectory, Long.toHexString(toReplaceLogId) + &quot;.txn&quot;);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if (toReplaceFile.exists()) {</span>
+<span class="nc" id="L167">                renameJournalFile(toReplaceFile, fn);</span>
+<span class="nc" id="L168">                provider.notifyRename(toReplaceFile, fn);</span>
+<span class="nc" id="L169">                reuseFile = true;</span>
+            }
+        }
+<span class="nc" id="L172">        channel = provider.open(fn, configuration);</span>
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (formatVersionToWrite &lt; V4) {</span>
+<span class="nc" id="L175">            throw new IOException(&quot;Invalid journal format to write : version = &quot; + formatVersionToWrite);</span>
+        }
+
+<span class="nc" id="L178">        LOG.info(&quot;Opening journal {}&quot;, fn);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (!channel.fileExists(fn)) { // create new journal file to write, write version</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">            if (!fn.createNewFile()) {</span>
+<span class="nc" id="L181">                LOG.error(&quot;Journal file {}, that shouldn't exist, already exists. &quot;</span>
+                          + &quot; is there another bookie process running?&quot;, fn);
+<span class="nc" id="L183">                throw new IOException(&quot;File &quot; + fn</span>
+                        + &quot; suddenly appeared, is another bookie process running?&quot;);
+            }
+<span class="nc" id="L186">            fc = channel.getFileChannel();</span>
+<span class="nc" id="L187">            formatVersion = formatVersionToWrite;</span>
+<span class="nc" id="L188">            writeHeader(bcBuilder, writeBufferSize);</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        } else if (reuseFile) { // Open an existing journal to write, it needs fileChannelProvider support reuse file.</span>
+<span class="nc" id="L190">            fc = channel.getFileChannel();</span>
+<span class="nc" id="L191">            formatVersion = formatVersionToWrite;</span>
+<span class="nc" id="L192">            writeHeader(bcBuilder, writeBufferSize);</span>
+        } else {  // open an existing file to read.
+<span class="nc" id="L194">            fc = channel.getFileChannel();</span>
+            // readonly, use fileChannel directly, no need to use BufferedChannel
+
+<span class="nc" id="L197">            ByteBuffer bb = ByteBuffer.allocate(VERSION_HEADER_SIZE);</span>
+<span class="nc" id="L198">            int c = fc.read(bb);</span>
+<span class="nc" id="L199">            bb.flip();</span>
+
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            if (c == VERSION_HEADER_SIZE) {</span>
+<span class="nc" id="L202">                byte[] first4 = new byte[4];</span>
+<span class="nc" id="L203">                bb.get(first4);</span>
+
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                if (Arrays.equals(first4, magicWord)) {</span>
+<span class="nc" id="L206">                    formatVersion = bb.getInt();</span>
+                } else {
+                    // pre magic word journal, reset to 0;
+<span class="nc" id="L209">                    formatVersion = V1;</span>
+                }
+<span class="nc" id="L211">            } else {</span>
+                // no header, must be old version
+<span class="nc" id="L213">                formatVersion = V1;</span>
+            }
+
+<span class="nc bnc" id="L216" title="All 4 branches missed.">            if (formatVersion &lt; MIN_COMPAT_JOURNAL_FORMAT_VERSION</span>
+                || formatVersion &gt; CURRENT_JOURNAL_FORMAT_VERSION) {
+<span class="nc" id="L218">                String err = String.format(&quot;Invalid journal version, unable to read.&quot;</span>
+                        + &quot; Expected between (%d) and (%d), got (%d)&quot;,
+<span class="nc" id="L220">                        MIN_COMPAT_JOURNAL_FORMAT_VERSION, CURRENT_JOURNAL_FORMAT_VERSION,</span>
+<span class="nc" id="L221">                        formatVersion);</span>
+<span class="nc" id="L222">                LOG.error(err);</span>
+<span class="nc" id="L223">                throw new IOException(err);</span>
+            }
+
+            try {
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                if (position == START_OF_FILE) {</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                    if (formatVersion &gt;= V5) {</span>
+<span class="nc" id="L229">                        fc.position(HEADER_SIZE);</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                    } else if (formatVersion &gt;= V2) {</span>
+<span class="nc" id="L231">                        fc.position(VERSION_HEADER_SIZE);</span>
+                    } else {
+<span class="nc" id="L233">                        fc.position(0);</span>
+                    }
+                } else {
+<span class="nc" id="L236">                    fc.position(position);</span>
+                }
+<span class="nc" id="L238">            } catch (IOException e) {</span>
+<span class="nc" id="L239">                LOG.error(&quot;Bookie journal file can seek to position :&quot;, e);</span>
+<span class="nc" id="L240">                throw e;</span>
+<span class="nc" id="L241">            }</span>
+        }
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (fRemoveFromPageCache) {</span>
+<span class="nc" id="L244">            this.fd = PageCacheUtil.getSysFileDescriptor(channel.getFD());</span>
+        } else {
+<span class="nc" id="L246">            this.fd = -1;</span>
+        }
+<span class="nc" id="L248">    }</span>
+
+    private void writeHeader(Journal.BufferedChannelBuilder bcBuilder,
+                             int writeBufferSize) throws IOException {
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        int headerSize = (V4 == formatVersion) ? VERSION_HEADER_SIZE : HEADER_SIZE;</span>
+<span class="nc" id="L253">        ByteBuffer bb = ByteBuffer.allocate(headerSize);</span>
+<span class="nc" id="L254">        ZeroBuffer.put(bb);</span>
+<span class="nc" id="L255">        bb.clear();</span>
+<span class="nc" id="L256">        bb.put(magicWord);</span>
+<span class="nc" id="L257">        bb.putInt(formatVersion);</span>
+<span class="nc" id="L258">        bb.clear();</span>
+<span class="nc" id="L259">        fc.write(bb);</span>
+
+<span class="nc" id="L261">        bc = bcBuilder.create(fc, writeBufferSize);</span>
+<span class="nc" id="L262">        forceWrite(true);</span>
+<span class="nc" id="L263">        nextPrealloc = this.preAllocSize;</span>
+<span class="nc" id="L264">        fc.write(zeros, nextPrealloc - journalAlignSize);</span>
+<span class="nc" id="L265">    }</span>
+
+    public static void renameJournalFile(File source, File target) throws IOException {
+<span class="nc bnc" id="L268" title="All 6 branches missed.">        if (source == null || target == null || !source.renameTo(target)) {</span>
+<span class="nc" id="L269">            LOG.error(&quot;Failed to rename file {} to {}&quot;, source, target);</span>
+<span class="nc" id="L270">            throw new IOException(&quot;Failed to rename file &quot; + source + &quot; to &quot; + target);</span>
+        }
+<span class="nc" id="L272">    }</span>
+
+    int getFormatVersion() {
+<span class="nc" id="L275">        return formatVersion;</span>
+    }
+
+    BufferedChannel getBufferedChannel() throws IOException {
+<span class="nc bnc" id="L279" title="All 2 branches missed.">        if (bc == null) {</span>
+<span class="nc" id="L280">            throw new IOException(&quot;Read only journal channel&quot;);</span>
+        }
+<span class="nc" id="L282">        return bc;</span>
+    }
+
+    void preAllocIfNeeded(long size) throws IOException {
+<span class="nc bnc" id="L286" title="All 2 branches missed.">        if (bc.position() + size &gt; nextPrealloc) {</span>
+<span class="nc" id="L287">            nextPrealloc += preAllocSize;</span>
+<span class="nc" id="L288">            zeros.clear();</span>
+<span class="nc" id="L289">            fc.write(zeros, nextPrealloc - journalAlignSize);</span>
+        }
+<span class="nc" id="L291">    }</span>
+
+    int read(ByteBuffer dst)
+            throws IOException {
+<span class="nc" id="L295">        return fc.read(dst);</span>
+    }
+
+    @Override
+    public void close() throws IOException {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (bc != null) {</span>
+<span class="nc" id="L301">            bc.close();</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">        } else if (fc != null) {</span>
+<span class="nc" id="L303">            fc.close();</span>
+        }
+<span class="nc" id="L305">    }</span>
+
+    public void forceWrite(boolean forceMetadata) throws IOException {
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L309">            LOG.debug(&quot;Journal ForceWrite&quot;);</span>
+        }
+<span class="nc" id="L311">        long newForceWritePosition = bc.forceWrite(forceMetadata);</span>
+        //
+        // For POSIX_FADV_DONTNEED, we want to drop from the beginning
+        // of the file to a position prior to the current position.
+        //
+        // The cacheDropLagBytes is to prevent dropping a page that will
+        // be appended again, which would introduce random seeking on journal
+        // device.
+        //
+        // &lt;======== drop ==========&gt;
+        //                           &lt;-----------LAG------------&gt;
+        // +------------------------+---------------------------O
+        // lastDropPosition     newDropPos             lastForceWritePosition
+        //
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (fRemoveFromPageCache) {</span>
+<span class="nc" id="L326">            long newDropPos = newForceWritePosition - cacheDropLagBytes;</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            if (lastDropPosition &lt; newDropPos) {</span>
+<span class="nc" id="L328">                PageCacheUtil.bestEffortRemoveFromPageCache(fd, lastDropPosition, newDropPos - lastDropPosition);</span>
+            }
+<span class="nc" id="L330">            this.lastDropPosition = newDropPos;</span>
+        }
+<span class="nc" id="L332">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

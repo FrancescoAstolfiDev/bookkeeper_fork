@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RegenerateInterleavedStorageIndexFileCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookie</a> &gt; <span class="el_source">RegenerateInterleavedStorageIndexFileCommand.java</span></div><h1>RegenerateInterleavedStorageIndexFileCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.bookie;
+
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.converters.CommaParameterSplitter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.bookie.InterleavedStorageRegenerateIndexOp;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to regenerate an index file for interleaved storage.
+ */
+public class RegenerateInterleavedStorageIndexFileCommand
+    extends BookieCommand&lt;RegenerateInterleavedStorageIndexFileCommand.RISIFFlags&gt; {
+
+<span class="nc" id="L47">    static final Logger LOG = LoggerFactory.getLogger(RegenerateInterleavedStorageIndexFileCommand.class);</span>
+
+    private static final String NAME = &quot;regenerate-interleaved-storage-index-file&quot;;
+    private static final String DESC =
+        &quot;Regenerate an interleaved storage index file, from available entrylogger &quot; + &quot;files.&quot;;
+    private static final String DEFAULT = &quot;&quot;;
+
+    public RegenerateInterleavedStorageIndexFileCommand() {
+<span class="nc" id="L55">        this(new RISIFFlags());</span>
+<span class="nc" id="L56">    }</span>
+
+    private RegenerateInterleavedStorageIndexFileCommand(RISIFFlags flags) {
+<span class="nc" id="L59">        super(CliSpec.&lt;RISIFFlags&gt;newBuilder()</span>
+<span class="nc" id="L60">                  .withName(NAME)</span>
+<span class="nc" id="L61">                  .withDescription(DESC)</span>
+<span class="nc" id="L62">                  .withFlags(flags)</span>
+<span class="nc" id="L63">                  .build());</span>
+<span class="nc" id="L64">    }</span>
+
+    /**
+     * Flags for regenerate interleaved storage index file command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L70">    @Setter</span>
+<span class="nc" id="L71">    public static class RISIFFlags extends CliFlags {</span>
+
+<span class="nc" id="L73">        @Parameter(names = { &quot;-p&quot;, &quot;--password&quot; },</span>
+            description = &quot;The bookie stores the password in the index file, so we need it to regenerate.&quot;
+                          + &quot;This must match the value in the ledger metadata.&quot;)
+        private String password = DEFAULT;
+
+<span class="nc" id="L78">        @Parameter(names = { &quot;-b&quot;, &quot;--b64password&quot; },</span>
+            description = &quot;The password in base64 encoding, for cases where the password is not UTF-8.&quot;)
+        private String b64Password = DEFAULT;
+
+        @Parameter(names = { &quot;-d&quot;, &quot;--dryrun&quot; }, description = &quot;Process the entryLogger, but don't write anything.&quot;)
+        private boolean dryRun;
+
+        @Parameter(names = { &quot;-l&quot;, &quot;--ledgerids&quot; },
+            description = &quot;Ledger(s) whose index needs to be regenerated. Multiple can be specified, comma separated.&quot;,
+            splitter = CommaParameterSplitter.class)
+        private List&lt;Long&gt; ledgerIds;
+
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, RISIFFlags cmdFlags) {
+        try {
+<span class="nc" id="L95">            return generate(conf, cmdFlags);</span>
+<span class="nc" id="L96">        } catch (Exception e) {</span>
+<span class="nc" id="L97">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    private boolean generate(ServerConfiguration conf, RISIFFlags flags) throws NoSuchAlgorithmException, IOException {
+<span class="nc" id="L102">        validateFlags(flags);</span>
+        byte[] password;
+<span class="nc bnc" id="L104" title="All 2 branches missed.">        if (!flags.password.equals(DEFAULT)) {</span>
+<span class="nc" id="L105">            password = flags.password.getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        } else if (!flags.b64Password.equals(DEFAULT)) {</span>
+<span class="nc" id="L107">            password = Base64.getDecoder().decode(flags.b64Password);</span>
+        } else {
+<span class="nc" id="L109">            LOG.error(&quot;The password must be specified to regenerate the index file&quot;);</span>
+<span class="nc" id="L110">            return false;</span>
+        }
+
+<span class="nc" id="L113">        Set&lt;Long&gt; ledgerIds = flags.ledgerIds.stream().collect(Collectors.toSet());</span>
+
+<span class="nc" id="L115">        LOG.info(&quot;=== Rebuilding index file for {} ===&quot;, ledgerIds);</span>
+<span class="nc" id="L116">        ServerConfiguration serverConfiguration = new ServerConfiguration(conf);</span>
+<span class="nc" id="L117">        InterleavedStorageRegenerateIndexOp i = new InterleavedStorageRegenerateIndexOp(serverConfiguration, ledgerIds,</span>
+                                                                                        password);
+<span class="nc" id="L119">        i.initiate(flags.dryRun);</span>
+
+<span class="nc" id="L121">        LOG.info(&quot;-- Done rebuilding index file for {} --&quot;, ledgerIds);</span>
+<span class="nc" id="L122">        return true;</span>
+    }
+
+    private void validateFlags(RISIFFlags flags) {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (flags.password == null) {</span>
+<span class="nc" id="L127">            flags.password = DEFAULT;</span>
+        }
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (flags.b64Password == null) {</span>
+<span class="nc" id="L130">            flags.b64Password = DEFAULT;</span>
+        }
+<span class="nc" id="L132">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

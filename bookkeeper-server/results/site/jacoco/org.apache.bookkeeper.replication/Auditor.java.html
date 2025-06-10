@@ -1,0 +1,663 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Auditor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">Auditor.java</span></div><h1>Auditor.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.replication;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.SettableFuture;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerManagerFactory;
+import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
+import org.apache.bookkeeper.replication.ReplicationException.BKAuditException;
+import org.apache.bookkeeper.replication.ReplicationException.CompatibilityException;
+import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.commons.collections4.CollectionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Auditor is a single entity in the entire Bookie cluster and will be watching
+ * all the bookies under 'ledgerrootpath/available' zkpath. When any of the
+ * bookie failed or disconnected from zk, he will start initiating the
+ * re-replication activities by keeping all the corresponding ledgers of the
+ * failed bookie as underreplicated znode in zk.
+ *
+ * &lt;p&gt;TODO: eliminate the direct usage of zookeeper here {@link https://github.com/apache/bookkeeper/issues/1332}
+ */
+public class Auditor implements AutoCloseable {
+<span class="nc" id="L69">    private static final Logger LOG = LoggerFactory.getLogger(Auditor.class);</span>
+    private final ServerConfiguration conf;
+    private final BookKeeper bkc;
+    private final boolean ownBkc;
+    private final BookKeeperAdmin admin;
+    private final boolean ownAdmin;
+    private BookieLedgerIndexer bookieLedgerIndexer;
+    private LedgerManager ledgerManager;
+    private LedgerUnderreplicationManager ledgerUnderreplicationManager;
+    private final ScheduledExecutorService executor;
+<span class="nc" id="L79">    private List&lt;String&gt; knownBookies = new ArrayList&lt;String&gt;();</span>
+    private final String bookieIdentifier;
+    protected volatile Future&lt;?&gt; auditTask;
+<span class="nc" id="L82">    private final Set&lt;String&gt; bookiesToBeAudited = Sets.newHashSet();</span>
+    private volatile int lostBookieRecoveryDelayBeforeChange;
+    protected AuditorBookieCheckTask auditorBookieCheckTask;
+    protected AuditorTask auditorCheckAllLedgersTask;
+    protected AuditorTask auditorPlacementPolicyCheckTask;
+    protected AuditorTask auditorReplicasCheckTask;
+<span class="nc" id="L88">    private final List&lt;AuditorTask&gt; allAuditorTasks = Lists.newArrayList();</span>
+
+    private final AuditorStats auditorStats;
+
+    static BookKeeper createBookKeeperClient(ServerConfiguration conf) throws InterruptedException, IOException {
+<span class="nc" id="L93">        return createBookKeeperClient(conf, NullStatsLogger.INSTANCE);</span>
+    }
+
+    static BookKeeper createBookKeeperClient(ServerConfiguration conf, StatsLogger statsLogger)
+            throws InterruptedException, IOException {
+<span class="nc" id="L98">        ClientConfiguration clientConfiguration = new ClientConfiguration(conf);</span>
+<span class="nc" id="L99">        clientConfiguration.setClientRole(ClientConfiguration.CLIENT_ROLE_SYSTEM);</span>
+        try {
+<span class="nc" id="L101">            return BookKeeper.forConfig(clientConfiguration).statsLogger(statsLogger).build();</span>
+<span class="nc" id="L102">        } catch (BKException e) {</span>
+<span class="nc" id="L103">            throw new IOException(&quot;Failed to create bookkeeper client&quot;, e);</span>
+        }
+    }
+
+    static BookKeeper createBookKeeperClientThrowUnavailableException(ServerConfiguration conf)
+            throws UnavailableException {
+        try {
+<span class="nc" id="L110">            return createBookKeeperClient(conf);</span>
+<span class="nc" id="L111">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L112">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L113">            throw new UnavailableException(&quot;Failed to create bookkeeper client&quot;, e);</span>
+<span class="nc" id="L114">        } catch (IOException e) {</span>
+<span class="nc" id="L115">            throw new UnavailableException(&quot;Failed to create bookkeeper client&quot;, e);</span>
+        }
+    }
+
+    public Auditor(final String bookieIdentifier,
+                   ServerConfiguration conf,
+                   StatsLogger statsLogger)
+            throws UnavailableException {
+<span class="nc" id="L123">        this(</span>
+                bookieIdentifier,
+                conf,
+<span class="nc" id="L126">                createBookKeeperClientThrowUnavailableException(conf),</span>
+                true,
+                statsLogger);
+<span class="nc" id="L129">    }</span>
+
+    public Auditor(final String bookieIdentifier,
+                   ServerConfiguration conf,
+                   BookKeeper bkc,
+                   boolean ownBkc,
+                   StatsLogger statsLogger)
+            throws UnavailableException {
+<span class="nc" id="L137">        this(bookieIdentifier,</span>
+                conf,
+                bkc,
+                ownBkc,
+                new BookKeeperAdmin(bkc, statsLogger, new ClientConfiguration(conf)),
+                true,
+                statsLogger);
+<span class="nc" id="L144">    }</span>
+
+    public Auditor(final String bookieIdentifier,
+                   ServerConfiguration conf,
+                   BookKeeper bkc,
+                   boolean ownBkc,
+                   BookKeeperAdmin admin,
+                   boolean ownAdmin,
+                   StatsLogger statsLogger)
+<span class="nc" id="L153">            throws UnavailableException {</span>
+<span class="nc" id="L154">        this.conf = conf;</span>
+<span class="nc" id="L155">        this.bookieIdentifier = bookieIdentifier;</span>
+<span class="nc" id="L156">        this.auditorStats = new AuditorStats(statsLogger);</span>
+
+<span class="nc" id="L158">        this.bkc = bkc;</span>
+<span class="nc" id="L159">        this.ownBkc = ownBkc;</span>
+<span class="nc" id="L160">        this.admin = admin;</span>
+<span class="nc" id="L161">        this.ownAdmin = ownAdmin;</span>
+<span class="nc" id="L162">        initialize(conf, bkc);</span>
+
+<span class="nc" id="L164">        AuditorTask.ShutdownTaskHandler shutdownTaskHandler = this::submitShutdownTask;</span>
+<span class="nc" id="L165">        BiConsumer&lt;Void, Throwable&gt; submitBookieCheckTask = (ignore, throwable) -&gt; this.submitBookieCheckTask();</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        BiConsumer&lt;AtomicBoolean, Throwable&gt; hasAuditCheckTask = (flag, throwable) -&gt; flag.set(auditTask != null);</span>
+<span class="nc" id="L167">        this.auditorBookieCheckTask = new AuditorBookieCheckTask(</span>
+                conf, auditorStats, admin, ledgerManager,
+                ledgerUnderreplicationManager, shutdownTaskHandler,
+                bookieLedgerIndexer, hasAuditCheckTask, submitBookieCheckTask);
+<span class="nc" id="L171">        allAuditorTasks.add(auditorBookieCheckTask);</span>
+<span class="nc" id="L172">        this.auditorCheckAllLedgersTask = new AuditorCheckAllLedgersTask(</span>
+                conf, auditorStats, admin, ledgerManager,
+                ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask);
+<span class="nc" id="L175">        allAuditorTasks.add(auditorCheckAllLedgersTask);</span>
+<span class="nc" id="L176">        this.auditorPlacementPolicyCheckTask = new AuditorPlacementPolicyCheckTask(</span>
+                conf, auditorStats, admin, ledgerManager,
+                ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask);
+<span class="nc" id="L179">        allAuditorTasks.add(auditorPlacementPolicyCheckTask);</span>
+<span class="nc" id="L180">        this.auditorReplicasCheckTask = new AuditorReplicasCheckTask(</span>
+                conf, auditorStats, admin, ledgerManager,
+                ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask);
+<span class="nc" id="L183">        allAuditorTasks.add(auditorReplicasCheckTask);</span>
+<span class="nc" id="L184">        executor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {</span>
+            @Override
+            public Thread newThread(Runnable r) {
+<span class="nc" id="L187">                Thread t = new Thread(r, &quot;AuditorBookie-&quot; + bookieIdentifier);</span>
+<span class="nc" id="L188">                t.setDaemon(true);</span>
+<span class="nc" id="L189">                return t;</span>
+            }
+        });
+<span class="nc" id="L192">    }</span>
+
+    private void initialize(ServerConfiguration conf, BookKeeper bkc)
+            throws UnavailableException {
+        try {
+<span class="nc" id="L197">            LedgerManagerFactory ledgerManagerFactory = bkc.getLedgerManagerFactory();</span>
+<span class="nc" id="L198">            ledgerManager = ledgerManagerFactory.newLedgerManager();</span>
+<span class="nc" id="L199">            this.bookieLedgerIndexer = new BookieLedgerIndexer(ledgerManager);</span>
+
+<span class="nc" id="L201">            this.ledgerUnderreplicationManager = ledgerManagerFactory</span>
+<span class="nc" id="L202">                    .newLedgerUnderreplicationManager();</span>
+<span class="nc" id="L203">            LOG.info(&quot;AuthProvider used by the Auditor is {}&quot;,</span>
+<span class="nc" id="L204">                    admin.getConf().getClientAuthProviderFactoryClass());</span>
+<span class="nc" id="L205">            if (this.ledgerUnderreplicationManager</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                    .initializeLostBookieRecoveryDelay(conf.getLostBookieRecoveryDelay())) {</span>
+<span class="nc" id="L207">                LOG.info(&quot;Initializing lostBookieRecoveryDelay zNode to the conf value: {}&quot;,</span>
+<span class="nc" id="L208">                        conf.getLostBookieRecoveryDelay());</span>
+            } else {
+<span class="nc" id="L210">                LOG.info(&quot;Valid lostBookieRecoveryDelay zNode is available, so not creating &quot;</span>
+                        + &quot;lostBookieRecoveryDelay zNode as part of Auditor initialization &quot;);
+            }
+<span class="nc" id="L213">            lostBookieRecoveryDelayBeforeChange = this.ledgerUnderreplicationManager.getLostBookieRecoveryDelay();</span>
+<span class="nc" id="L214">        } catch (CompatibilityException ce) {</span>
+<span class="nc" id="L215">            throw new UnavailableException(</span>
+                    &quot;CompatibilityException while initializing Auditor&quot;, ce);
+<span class="nc" id="L217">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L218">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L219">            throw new UnavailableException(</span>
+                    &quot;Interrupted while initializing Auditor&quot;, ie);
+<span class="nc" id="L221">        }</span>
+<span class="nc" id="L222">    }</span>
+
+    private void submitShutdownTask() {
+<span class="nc" id="L225">        synchronized (this) {</span>
+<span class="nc" id="L226">            LOG.info(&quot;Executing submitShutdownTask&quot;);</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">            if (executor.isShutdown()) {</span>
+<span class="nc" id="L228">                LOG.info(&quot;executor is already shutdown&quot;);</span>
+<span class="nc" id="L229">                return;</span>
+            }
+<span class="nc" id="L231">            executor.submit(() -&gt; {</span>
+<span class="nc" id="L232">                synchronized (Auditor.this) {</span>
+<span class="nc" id="L233">                    LOG.info(&quot;Shutting down Auditor's Executor&quot;);</span>
+<span class="nc" id="L234">                    executor.shutdown();</span>
+<span class="nc" id="L235">                }</span>
+<span class="nc" id="L236">            });</span>
+<span class="nc" id="L237">        }</span>
+<span class="nc" id="L238">    }</span>
+
+    @VisibleForTesting
+    synchronized Future&lt;?&gt; submitAuditTask() {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (executor.isShutdown()) {</span>
+<span class="nc" id="L243">            SettableFuture&lt;Void&gt; f = SettableFuture.&lt;Void&gt;create();</span>
+<span class="nc" id="L244">            f.setException(new BKAuditException(&quot;Auditor shutting down&quot;));</span>
+<span class="nc" id="L245">            return f;</span>
+        }
+<span class="nc" id="L247">        return executor.submit(() -&gt; {</span>
+            try {
+<span class="nc" id="L249">                waitIfLedgerReplicationDisabled();</span>
+<span class="nc" id="L250">                int lostBookieRecoveryDelay = Auditor.this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L251">                        .getLostBookieRecoveryDelay();</span>
+<span class="nc" id="L252">                List&lt;String&gt; availableBookies = getAvailableBookies();</span>
+
+                // casting to String, as knownBookies and availableBookies
+                // contains only String values
+                // find new bookies(if any) and update the known bookie list
+<span class="nc" id="L257">                Collection&lt;String&gt; newBookies = CollectionUtils.subtract(</span>
+                        availableBookies, knownBookies);
+<span class="nc" id="L259">                knownBookies.addAll(newBookies);</span>
+<span class="nc bnc" id="L260" title="All 4 branches missed.">                if (!bookiesToBeAudited.isEmpty() &amp;&amp; knownBookies.containsAll(bookiesToBeAudited)) {</span>
+                    // the bookie, which went down earlier and had an audit scheduled for,
+                    // has come up. So let us stop tracking it and cancel the audit. Since
+                    // we allow delaying of audit when there is only one failed bookie,
+                    // bookiesToBeAudited should just have 1 element and hence containsAll
+                    // check should be ok
+<span class="nc bnc" id="L266" title="All 4 branches missed.">                    if (auditTask != null &amp;&amp; auditTask.cancel(false)) {</span>
+<span class="nc" id="L267">                        auditTask = null;</span>
+<span class="nc" id="L268">                        auditorStats.getNumDelayedBookieAuditsCancelled().inc();</span>
+                    }
+<span class="nc" id="L270">                    bookiesToBeAudited.clear();</span>
+                }
+
+                // find lost bookies(if any)
+<span class="nc" id="L274">                bookiesToBeAudited.addAll(CollectionUtils.subtract(knownBookies, availableBookies));</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">                if (bookiesToBeAudited.size() == 0) {</span>
+<span class="nc" id="L276">                    return;</span>
+                }
+
+<span class="nc" id="L279">                knownBookies.removeAll(bookiesToBeAudited);</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                if (lostBookieRecoveryDelay == 0) {</span>
+<span class="nc" id="L281">                    auditorBookieCheckTask.startAudit(false);</span>
+<span class="nc" id="L282">                    bookiesToBeAudited.clear();</span>
+<span class="nc" id="L283">                    return;</span>
+                }
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                if (bookiesToBeAudited.size() &gt; 1) {</span>
+                    // if more than one bookie is down, start the audit immediately;
+<span class="nc" id="L287">                    LOG.info(&quot;Multiple bookie failure; not delaying bookie audit. &quot;</span>
+                                    + &quot;Bookies lost now: {}; All lost bookies: {}&quot;,
+<span class="nc" id="L289">                            CollectionUtils.subtract(knownBookies, availableBookies),</span>
+                            bookiesToBeAudited);
+<span class="nc bnc" id="L291" title="All 4 branches missed.">                    if (auditTask != null &amp;&amp; auditTask.cancel(false)) {</span>
+<span class="nc" id="L292">                        auditTask = null;</span>
+<span class="nc" id="L293">                        auditorStats.getNumDelayedBookieAuditsCancelled().inc();</span>
+                    }
+<span class="nc" id="L295">                    auditorBookieCheckTask.startAudit(false);</span>
+<span class="nc" id="L296">                    bookiesToBeAudited.clear();</span>
+<span class="nc" id="L297">                    return;</span>
+                }
+<span class="nc bnc" id="L299" title="All 2 branches missed.">                if (auditTask == null) {</span>
+                    // if there is no scheduled audit, schedule one
+<span class="nc" id="L301">                    auditTask = executor.schedule(() -&gt; {</span>
+<span class="nc" id="L302">                        auditorBookieCheckTask.startAudit(false);</span>
+<span class="nc" id="L303">                        auditTask = null;</span>
+<span class="nc" id="L304">                        bookiesToBeAudited.clear();</span>
+<span class="nc" id="L305">                    }, lostBookieRecoveryDelay, TimeUnit.SECONDS);</span>
+<span class="nc" id="L306">                    auditorStats.getNumBookieAuditsDelayed().inc();</span>
+<span class="nc" id="L307">                    LOG.info(&quot;Delaying bookie audit by {} secs for {}&quot;, lostBookieRecoveryDelay,</span>
+                            bookiesToBeAudited);
+                }
+<span class="nc" id="L310">            } catch (BKException bke) {</span>
+<span class="nc" id="L311">                LOG.error(&quot;Exception getting bookie list&quot;, bke);</span>
+<span class="nc" id="L312">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L313">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L314">                LOG.error(&quot;Interrupted while watching available bookies &quot;, ie);</span>
+<span class="nc" id="L315">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L316">                LOG.error(&quot;Exception while watching available bookies&quot;, ue);</span>
+<span class="nc" id="L317">            }</span>
+<span class="nc" id="L318">        });</span>
+    }
+
+    synchronized Future&lt;?&gt; submitLostBookieRecoveryDelayChangedEvent() {
+<span class="nc bnc" id="L322" title="All 2 branches missed.">        if (executor.isShutdown()) {</span>
+<span class="nc" id="L323">            SettableFuture&lt;Void&gt; f = SettableFuture.&lt;Void&gt;create();</span>
+<span class="nc" id="L324">            f.setException(new BKAuditException(&quot;Auditor shutting down&quot;));</span>
+<span class="nc" id="L325">            return f;</span>
+        }
+<span class="nc" id="L327">        return executor.submit(() -&gt; {</span>
+<span class="nc" id="L328">            int lostBookieRecoveryDelay = -1;</span>
+            try {
+<span class="nc" id="L330">                waitIfLedgerReplicationDisabled();</span>
+<span class="nc" id="L331">                lostBookieRecoveryDelay = Auditor.this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L332">                        .getLostBookieRecoveryDelay();</span>
+                // if there is pending auditTask, cancel the task. So that it can be rescheduled
+                // after new lostBookieRecoveryDelay period
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                if (auditTask != null) {</span>
+<span class="nc" id="L336">                    LOG.info(&quot;lostBookieRecoveryDelay period has been changed so canceling the pending AuditTask&quot;);</span>
+<span class="nc" id="L337">                    auditTask.cancel(false);</span>
+<span class="nc" id="L338">                    auditorStats.getNumDelayedBookieAuditsCancelled().inc();</span>
+                }
+
+                // if lostBookieRecoveryDelay is set to its previous value then consider it as
+                // signal to trigger the Audit immediately.
+<span class="nc bnc" id="L343" title="All 4 branches missed.">                if ((lostBookieRecoveryDelay == 0)</span>
+                        || (lostBookieRecoveryDelay == lostBookieRecoveryDelayBeforeChange)) {
+<span class="nc" id="L345">                    LOG.info(</span>
+                            &quot;lostBookieRecoveryDelay has been set to 0 or reset to its previous value, &quot;
+                                    + &quot;so starting AuditTask. Current lostBookieRecoveryDelay: {}, &quot;
+                                    + &quot;previous lostBookieRecoveryDelay: {}&quot;,
+<span class="nc" id="L349">                            lostBookieRecoveryDelay, lostBookieRecoveryDelayBeforeChange);</span>
+<span class="nc" id="L350">                    auditorBookieCheckTask.startAudit(false);</span>
+<span class="nc" id="L351">                    auditTask = null;</span>
+<span class="nc" id="L352">                    bookiesToBeAudited.clear();</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                } else if (auditTask != null) {</span>
+<span class="nc" id="L354">                    LOG.info(&quot;lostBookieRecoveryDelay has been set to {}, so rescheduling AuditTask accordingly&quot;,</span>
+<span class="nc" id="L355">                            lostBookieRecoveryDelay);</span>
+<span class="nc" id="L356">                    auditTask = executor.schedule(() -&gt; {</span>
+<span class="nc" id="L357">                        auditorBookieCheckTask.startAudit(false);</span>
+<span class="nc" id="L358">                        auditTask = null;</span>
+<span class="nc" id="L359">                        bookiesToBeAudited.clear();</span>
+<span class="nc" id="L360">                    }, lostBookieRecoveryDelay, TimeUnit.SECONDS);</span>
+<span class="nc" id="L361">                    auditorStats.getNumBookieAuditsDelayed().inc();</span>
+                }
+<span class="nc" id="L363">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L364">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L365">                LOG.error(&quot;Interrupted while for LedgersReplication to be enabled &quot;, ie);</span>
+<span class="nc" id="L366">            } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L367">                LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L368">                submitShutdownTask();</span>
+<span class="nc" id="L369">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L370">                LOG.error(&quot;Exception while reading from ZK&quot;, ue);</span>
+            } finally {
+<span class="nc bnc" id="L372" title="All 2 branches missed.">                if (lostBookieRecoveryDelay != -1) {</span>
+<span class="nc" id="L373">                    lostBookieRecoveryDelayBeforeChange = lostBookieRecoveryDelay;</span>
+                }
+            }
+<span class="nc" id="L376">        });</span>
+    }
+
+    public void start() {
+<span class="nc" id="L380">        LOG.info(&quot;I'm starting as Auditor Bookie. ID: {}&quot;, bookieIdentifier);</span>
+        // on startup watching available bookie and based on the
+        // available bookies determining the bookie failures.
+<span class="nc" id="L383">        synchronized (this) {</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">            if (executor.isShutdown()) {</span>
+<span class="nc" id="L385">                return;</span>
+            }
+
+            try {
+<span class="nc" id="L389">                watchBookieChanges();</span>
+                // Start with all available bookies
+                // to handle situations where the auditor
+                // is started after some bookies have already failed
+<span class="nc" id="L393">                knownBookies = admin.getAllBookies().stream()</span>
+<span class="nc" id="L394">                        .map(BookieId::toString)</span>
+<span class="nc" id="L395">                        .collect(Collectors.toList());</span>
+<span class="nc" id="L396">                this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L397">                        .notifyLostBookieRecoveryDelayChanged(new LostBookieRecoveryDelayChangedCb());</span>
+<span class="nc" id="L398">            } catch (BKException bke) {</span>
+<span class="nc" id="L399">                LOG.error(&quot;Couldn't get bookie list, so exiting&quot;, bke);</span>
+<span class="nc" id="L400">                submitShutdownTask();</span>
+<span class="nc" id="L401">                return;</span>
+<span class="nc" id="L402">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L403">                LOG.error(&quot;Exception while registering for change notification, so exiting&quot;, ue);</span>
+<span class="nc" id="L404">                submitShutdownTask();</span>
+<span class="nc" id="L405">                return;</span>
+<span class="nc" id="L406">            }</span>
+<span class="nc" id="L407">            scheduleBookieCheckTask();</span>
+<span class="nc" id="L408">            scheduleCheckAllLedgersTask();</span>
+<span class="nc" id="L409">            schedulePlacementPolicyCheckTask();</span>
+<span class="nc" id="L410">            scheduleReplicasCheckTask();</span>
+<span class="nc" id="L411">        }</span>
+<span class="nc" id="L412">    }</span>
+
+    protected void submitBookieCheckTask() {
+<span class="nc" id="L415">        executor.submit(auditorBookieCheckTask);</span>
+<span class="nc" id="L416">    }</span>
+
+    private void scheduleBookieCheckTask() {
+<span class="nc" id="L419">        long bookieCheckInterval = conf.getAuditorPeriodicBookieCheckInterval();</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">        if (bookieCheckInterval == 0) {</span>
+<span class="nc" id="L421">            LOG.info(&quot;Auditor periodic bookie checking disabled, running once check now anyhow&quot;);</span>
+<span class="nc" id="L422">            submitBookieCheckTask();</span>
+        } else {
+<span class="nc" id="L424">            LOG.info(&quot;Auditor periodic bookie checking enabled&quot; + &quot; 'auditorPeriodicBookieCheckInterval' {} seconds&quot;,</span>
+<span class="nc" id="L425">                    bookieCheckInterval);</span>
+<span class="nc" id="L426">            executor.scheduleAtFixedRate(auditorBookieCheckTask, 0, bookieCheckInterval, TimeUnit.SECONDS);</span>
+        }
+<span class="nc" id="L428">    }</span>
+
+    private void scheduleCheckAllLedgersTask() {
+<span class="nc" id="L431">        long interval = conf.getAuditorPeriodicCheckInterval();</span>
+
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        if (interval &gt; 0) {</span>
+<span class="nc" id="L434">            LOG.info(&quot;Auditor periodic ledger checking enabled&quot; + &quot; 'auditorPeriodicCheckInterval' {} seconds&quot;,</span>
+<span class="nc" id="L435">                    interval);</span>
+
+            long checkAllLedgersLastExecutedCTime;
+            long durationSinceLastExecutionInSecs;
+            long initialDelay;
+            try {
+<span class="nc" id="L441">                checkAllLedgersLastExecutedCTime = ledgerUnderreplicationManager.getCheckAllLedgersCTime();</span>
+<span class="nc" id="L442">            } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L443">                LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L444">                submitShutdownTask();</span>
+<span class="nc" id="L445">                return;</span>
+<span class="nc" id="L446">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L447">                LOG.error(&quot;Got UnavailableException while trying to get checkAllLedgersCTime&quot;, ue);</span>
+<span class="nc" id="L448">                checkAllLedgersLastExecutedCTime = -1;</span>
+<span class="nc" id="L449">            }</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">            if (checkAllLedgersLastExecutedCTime == -1) {</span>
+<span class="nc" id="L451">                durationSinceLastExecutionInSecs = -1;</span>
+<span class="nc" id="L452">                initialDelay = 0;</span>
+            } else {
+<span class="nc" id="L454">                durationSinceLastExecutionInSecs = (System.currentTimeMillis() - checkAllLedgersLastExecutedCTime)</span>
+                        / 1000;
+<span class="nc bnc" id="L456" title="All 2 branches missed.">                if (durationSinceLastExecutionInSecs &lt; 0) {</span>
+                    // this can happen if there is no strict time ordering
+<span class="nc" id="L458">                    durationSinceLastExecutionInSecs = 0;</span>
+                }
+<span class="nc bnc" id="L460" title="All 2 branches missed.">                initialDelay = durationSinceLastExecutionInSecs &gt; interval ? 0</span>
+<span class="nc" id="L461">                        : (interval - durationSinceLastExecutionInSecs);</span>
+            }
+<span class="nc" id="L463">            LOG.info(</span>
+                    &quot;checkAllLedgers scheduling info.  checkAllLedgersLastExecutedCTime: {} &quot;
+                            + &quot;durationSinceLastExecutionInSecs: {} initialDelay: {} interval: {}&quot;,
+<span class="nc" id="L466">                    checkAllLedgersLastExecutedCTime, durationSinceLastExecutionInSecs, initialDelay, interval);</span>
+
+<span class="nc" id="L468">            executor.scheduleAtFixedRate(auditorCheckAllLedgersTask, initialDelay, interval, TimeUnit.SECONDS);</span>
+<span class="nc" id="L469">        } else {</span>
+<span class="nc" id="L470">            LOG.info(&quot;Periodic checking disabled&quot;);</span>
+        }
+<span class="nc" id="L472">    }</span>
+
+    private void schedulePlacementPolicyCheckTask() {
+<span class="nc" id="L475">        long interval = conf.getAuditorPeriodicPlacementPolicyCheckInterval();</span>
+
+<span class="nc bnc" id="L477" title="All 2 branches missed.">        if (interval &gt; 0) {</span>
+<span class="nc" id="L478">            LOG.info(&quot;Auditor periodic placement policy check enabled&quot;</span>
+<span class="nc" id="L479">                    + &quot; 'auditorPeriodicPlacementPolicyCheckInterval' {} seconds&quot;, interval);</span>
+
+            long placementPolicyCheckLastExecutedCTime;
+            long durationSinceLastExecutionInSecs;
+            long initialDelay;
+            try {
+<span class="nc" id="L485">                placementPolicyCheckLastExecutedCTime = ledgerUnderreplicationManager.getPlacementPolicyCheckCTime();</span>
+<span class="nc" id="L486">            } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L487">                LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L488">                submitShutdownTask();</span>
+<span class="nc" id="L489">                return;</span>
+<span class="nc" id="L490">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L491">                LOG.error(&quot;Got UnavailableException while trying to get placementPolicyCheckCTime&quot;, ue);</span>
+<span class="nc" id="L492">                placementPolicyCheckLastExecutedCTime = -1;</span>
+<span class="nc" id="L493">            }</span>
+<span class="nc bnc" id="L494" title="All 2 branches missed.">            if (placementPolicyCheckLastExecutedCTime == -1) {</span>
+<span class="nc" id="L495">                durationSinceLastExecutionInSecs = -1;</span>
+<span class="nc" id="L496">                initialDelay = 0;</span>
+            } else {
+<span class="nc" id="L498">                durationSinceLastExecutionInSecs = (System.currentTimeMillis() - placementPolicyCheckLastExecutedCTime)</span>
+                        / 1000;
+<span class="nc bnc" id="L500" title="All 2 branches missed.">                if (durationSinceLastExecutionInSecs &lt; 0) {</span>
+                    // this can happen if there is no strict time ordering
+<span class="nc" id="L502">                    durationSinceLastExecutionInSecs = 0;</span>
+                }
+<span class="nc bnc" id="L504" title="All 2 branches missed.">                initialDelay = durationSinceLastExecutionInSecs &gt; interval ? 0</span>
+<span class="nc" id="L505">                        : (interval - durationSinceLastExecutionInSecs);</span>
+            }
+<span class="nc" id="L507">            LOG.info(</span>
+                    &quot;placementPolicyCheck scheduling info.  placementPolicyCheckLastExecutedCTime: {} &quot;
+                            + &quot;durationSinceLastExecutionInSecs: {} initialDelay: {} interval: {}&quot;,
+<span class="nc" id="L510">                    placementPolicyCheckLastExecutedCTime, durationSinceLastExecutionInSecs, initialDelay, interval);</span>
+
+<span class="nc" id="L512">            executor.scheduleAtFixedRate(auditorPlacementPolicyCheckTask, initialDelay, interval, TimeUnit.SECONDS);</span>
+<span class="nc" id="L513">        } else {</span>
+<span class="nc" id="L514">            LOG.info(&quot;Periodic placementPolicy check disabled&quot;);</span>
+        }
+<span class="nc" id="L516">    }</span>
+
+    private void scheduleReplicasCheckTask() {
+<span class="nc" id="L519">        long interval = conf.getAuditorPeriodicReplicasCheckInterval();</span>
+
+<span class="nc bnc" id="L521" title="All 2 branches missed.">        if (interval &lt;= 0) {</span>
+<span class="nc" id="L522">            LOG.info(&quot;Periodic replicas check disabled&quot;);</span>
+<span class="nc" id="L523">            return;</span>
+        }
+
+<span class="nc" id="L526">        LOG.info(&quot;Auditor periodic replicas check enabled&quot; + &quot; 'auditorReplicasCheckInterval' {} seconds&quot;, interval);</span>
+        long replicasCheckLastExecutedCTime;
+        long durationSinceLastExecutionInSecs;
+        long initialDelay;
+        try {
+<span class="nc" id="L531">            replicasCheckLastExecutedCTime = ledgerUnderreplicationManager.getReplicasCheckCTime();</span>
+<span class="nc" id="L532">        } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L533">            LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L534">            submitShutdownTask();</span>
+<span class="nc" id="L535">            return;</span>
+<span class="nc" id="L536">        } catch (UnavailableException ue) {</span>
+<span class="nc" id="L537">            LOG.error(&quot;Got UnavailableException while trying to get replicasCheckCTime&quot;, ue);</span>
+<span class="nc" id="L538">            replicasCheckLastExecutedCTime = -1;</span>
+<span class="nc" id="L539">        }</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        if (replicasCheckLastExecutedCTime == -1) {</span>
+<span class="nc" id="L541">            durationSinceLastExecutionInSecs = -1;</span>
+<span class="nc" id="L542">            initialDelay = 0;</span>
+        } else {
+<span class="nc" id="L544">            durationSinceLastExecutionInSecs = (System.currentTimeMillis() - replicasCheckLastExecutedCTime) / 1000;</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">            if (durationSinceLastExecutionInSecs &lt; 0) {</span>
+                // this can happen if there is no strict time ordering
+<span class="nc" id="L547">                durationSinceLastExecutionInSecs = 0;</span>
+            }
+<span class="nc bnc" id="L549" title="All 2 branches missed.">            initialDelay = durationSinceLastExecutionInSecs &gt; interval ? 0</span>
+<span class="nc" id="L550">                    : (interval - durationSinceLastExecutionInSecs);</span>
+        }
+<span class="nc" id="L552">        LOG.info(</span>
+                &quot;replicasCheck scheduling info. replicasCheckLastExecutedCTime: {} &quot;
+                        + &quot;durationSinceLastExecutionInSecs: {} initialDelay: {} interval: {}&quot;,
+<span class="nc" id="L555">                replicasCheckLastExecutedCTime, durationSinceLastExecutionInSecs, initialDelay, interval);</span>
+
+<span class="nc" id="L557">        executor.scheduleAtFixedRate(auditorReplicasCheckTask, initialDelay, interval, TimeUnit.SECONDS);</span>
+<span class="nc" id="L558">    }</span>
+
+<span class="nc" id="L560">    private class LostBookieRecoveryDelayChangedCb implements GenericCallback&lt;Void&gt; {</span>
+        @Override
+        public void operationComplete(int rc, Void result) {
+            try {
+<span class="nc" id="L564">                Auditor.this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L565">                        .notifyLostBookieRecoveryDelayChanged(LostBookieRecoveryDelayChangedCb.this);</span>
+<span class="nc" id="L566">            } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L567">                LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L568">                submitShutdownTask();</span>
+<span class="nc" id="L569">            } catch (UnavailableException ae) {</span>
+<span class="nc" id="L570">                LOG.error(&quot;Exception while registering for a LostBookieRecoveryDelay notification&quot;, ae);</span>
+<span class="nc" id="L571">            }</span>
+<span class="nc" id="L572">            Auditor.this.submitLostBookieRecoveryDelayChangedEvent();</span>
+<span class="nc" id="L573">        }</span>
+    }
+
+    private void waitIfLedgerReplicationDisabled() throws UnavailableException,
+            InterruptedException {
+<span class="nc bnc" id="L578" title="All 2 branches missed.">        if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L579">            ReplicationEnableCb cb = new ReplicationEnableCb();</span>
+<span class="nc" id="L580">            LOG.info(&quot;LedgerReplication is disabled externally through Zookeeper, &quot;</span>
+                    + &quot;since DISABLE_NODE ZNode is created, so waiting until it is enabled&quot;);
+<span class="nc" id="L582">            ledgerUnderreplicationManager.notifyLedgerReplicationEnabled(cb);</span>
+<span class="nc" id="L583">            cb.await();</span>
+        }
+<span class="nc" id="L585">    }</span>
+
+    protected List&lt;String&gt; getAvailableBookies() throws BKException {
+        // Get the available bookies
+<span class="nc" id="L589">        Collection&lt;BookieId&gt; availableBkAddresses = admin.getAvailableBookies();</span>
+<span class="nc" id="L590">        Collection&lt;BookieId&gt; readOnlyBkAddresses = admin.getReadOnlyBookies();</span>
+<span class="nc" id="L591">        availableBkAddresses.addAll(readOnlyBkAddresses);</span>
+
+<span class="nc" id="L593">        List&lt;String&gt; availableBookies = new ArrayList&lt;String&gt;();</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">        for (BookieId addr : availableBkAddresses) {</span>
+<span class="nc" id="L595">            availableBookies.add(addr.toString());</span>
+<span class="nc" id="L596">        }</span>
+<span class="nc" id="L597">        return availableBookies;</span>
+    }
+
+    private void watchBookieChanges() throws BKException {
+<span class="nc" id="L601">        admin.watchWritableBookiesChanged(bookies -&gt; submitAuditTask());</span>
+<span class="nc" id="L602">        admin.watchReadOnlyBookiesChanged(bookies -&gt; submitAuditTask());</span>
+<span class="nc" id="L603">    }</span>
+
+    /**
+     * Shutdown the auditor.
+     */
+    public void shutdown() {
+<span class="nc" id="L609">        LOG.info(&quot;Shutting down auditor&quot;);</span>
+<span class="nc" id="L610">        executor.shutdown();</span>
+        try {
+<span class="nc bnc" id="L612" title="All 2 branches missed.">            while (!executor.awaitTermination(30, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L613">                LOG.warn(&quot;Executor not shutting down, interrupting&quot;);</span>
+<span class="nc" id="L614">                executor.shutdownNow();</span>
+            }
+
+            // shutdown all auditorTasks to clean some resource
+<span class="nc" id="L618">            allAuditorTasks.forEach(AuditorTask::shutdown);</span>
+<span class="nc" id="L619">            allAuditorTasks.clear();</span>
+
+<span class="nc bnc" id="L621" title="All 2 branches missed.">            if (ownAdmin) {</span>
+<span class="nc" id="L622">                admin.close();</span>
+            }
+<span class="nc bnc" id="L624" title="All 2 branches missed.">            if (ownBkc) {</span>
+<span class="nc" id="L625">                bkc.close();</span>
+            }
+<span class="nc bnc" id="L627" title="All 2 branches missed.">            if (ledgerManager != null) {</span>
+<span class="nc" id="L628">                ledgerManager.close();</span>
+            }
+<span class="nc bnc" id="L630" title="All 2 branches missed.">            if (ledgerUnderreplicationManager != null) {</span>
+<span class="nc" id="L631">                ledgerUnderreplicationManager.close();</span>
+            }
+<span class="nc" id="L633">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L634">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L635">            LOG.warn(&quot;Interrupted while shutting down auditor bookie&quot;, ie);</span>
+<span class="nc" id="L636">        } catch (UnavailableException | IOException | BKException bke) {</span>
+<span class="nc" id="L637">            LOG.warn(&quot;Exception while shutting down auditor bookie&quot;, bke);</span>
+<span class="nc" id="L638">        }</span>
+<span class="nc" id="L639">    }</span>
+
+    @Override
+    public void close() {
+<span class="nc" id="L643">        shutdown();</span>
+<span class="nc" id="L644">    }</span>
+
+    /**
+     * Return true if auditor is running otherwise return false.
+     *
+     * @return auditor status
+     */
+    public boolean isRunning() {
+<span class="nc bnc" id="L652" title="All 2 branches missed.">        return !executor.isShutdown();</span>
+    }
+
+    int getLostBookieRecoveryDelayBeforeChange() {
+<span class="nc" id="L656">        return lostBookieRecoveryDelayBeforeChange;</span>
+    }
+
+    Future&lt;?&gt; getAuditTask() {
+<span class="nc" id="L660">        return auditTask;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

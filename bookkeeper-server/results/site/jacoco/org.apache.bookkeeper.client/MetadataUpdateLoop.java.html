@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MetadataUpdateLoop.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">MetadataUpdateLoop.java</span></div><h1>MetadataUpdateLoop.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import com.google.common.util.concurrent.RateLimiter;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.function.Supplier;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Mechanism to safely update the metadata of a ledger.
+ *
+ * &lt;p&gt;The loop takes the following steps:
+ * 1. Check if the metadata needs to be changed.
+ * 2. Make a copy of the metadata and modify it.
+ * 3. Write the modified copy to zookeeper.
+ * 3.1 If the write succeeds, go to 6.
+ * 3.2 If the write fails because of a failed compare and swap, go to 4.
+ * 4. Read the metadata back from the store
+ * 5. Update the local copy of the metadata with the metadata read in 4, go to 1.
+ * 6. Update the local copy of the metadata with the metadata which has just been written.
+ *
+ * &lt;p&gt;All mutating operations are compare and swap operation. If the compare fails, another
+ * iteration of the loop begins.
+ */
+class MetadataUpdateLoop {
+<span class="nc" id="L50">    static final Logger LOG = LoggerFactory.getLogger(MetadataUpdateLoop.class);</span>
+
+    private final LedgerManager lm;
+    private final long ledgerId;
+    private final Supplier&lt;Versioned&lt;LedgerMetadata&gt;&gt; currentLocalValue;
+    private final NeedsUpdatePredicate needsTransformation;
+    private final MetadataTransform transform;
+    private final LocalValueUpdater updateLocalValue;
+    private final RateLimiter throttler;
+
+    private final String logContext;
+<span class="nc" id="L61">    private volatile int writeLoopCount = 0;</span>
+<span class="nc" id="L62">    private static final AtomicIntegerFieldUpdater&lt;MetadataUpdateLoop&gt; WRITE_LOOP_COUNT_UPDATER =</span>
+<span class="nc" id="L63">        AtomicIntegerFieldUpdater.newUpdater(MetadataUpdateLoop.class, &quot;writeLoopCount&quot;);</span>
+
+    interface NeedsUpdatePredicate {
+        boolean needsUpdate(LedgerMetadata metadata) throws Exception;
+    }
+
+    interface MetadataTransform {
+        LedgerMetadata transform(LedgerMetadata metadata) throws Exception;
+    }
+
+    interface LocalValueUpdater {
+        boolean updateValue(Versioned&lt;LedgerMetadata&gt; oldValue, Versioned&lt;LedgerMetadata&gt; newValue);
+    }
+
+    MetadataUpdateLoop(LedgerManager lm,
+            long ledgerId,
+            Supplier&lt;Versioned&lt;LedgerMetadata&gt;&gt; currentLocalValue,
+            NeedsUpdatePredicate needsTransformation,
+            MetadataTransform transform,
+            LocalValueUpdater updateLocalValue) {
+<span class="nc" id="L83">        this(lm, ledgerId, currentLocalValue, needsTransformation, transform, updateLocalValue, null);</span>
+<span class="nc" id="L84">    }</span>
+    /**
+     * Construct the loop. This takes a set of functions which may be called multiple times
+     * during the loop.
+     *
+     * @param lm the ledger manager used for reading and writing metadata
+     * @param ledgerId the id of the ledger we will be operating on
+     * @param currentLocalValue should return the current local value of the metadata
+     * @param needsTransformation should return true, if the metadata needs to be modified.
+     *                            should throw an exception, if this update doesn't make sense.
+     * @param transform takes a metadata objects, transforms, and returns it, without modifying
+     *                  the original
+     * @param updateLocalValue if the local value matches the first parameter, update it to the
+     *                         second parameter and return true, return false otherwise
+     */
+    MetadataUpdateLoop(LedgerManager lm,
+            long ledgerId,
+            Supplier&lt;Versioned&lt;LedgerMetadata&gt;&gt; currentLocalValue,
+            NeedsUpdatePredicate needsTransformation,
+            MetadataTransform transform,
+            LocalValueUpdater updateLocalValue,
+<span class="nc" id="L105">            RateLimiter throttler) {</span>
+<span class="nc" id="L106">        this.lm = lm;</span>
+<span class="nc" id="L107">        this.ledgerId = ledgerId;</span>
+<span class="nc" id="L108">        this.currentLocalValue = currentLocalValue;</span>
+<span class="nc" id="L109">        this.needsTransformation = needsTransformation;</span>
+<span class="nc" id="L110">        this.transform = transform;</span>
+<span class="nc" id="L111">        this.updateLocalValue = updateLocalValue;</span>
+<span class="nc" id="L112">        this.throttler = throttler;</span>
+
+<span class="nc" id="L114">        this.logContext = String.format(&quot;UpdateLoop(ledgerId=%d,loopId=%08x)&quot;, ledgerId, System.identityHashCode(this));</span>
+<span class="nc" id="L115">    }</span>
+
+    CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; run() {
+<span class="nc" id="L118">        CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L120">        writeLoop(currentLocalValue.get(), promise);</span>
+
+<span class="nc" id="L122">        return promise;</span>
+    }
+
+    private void writeLoop(Versioned&lt;LedgerMetadata&gt; currentLocal,
+                           CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise) {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L128">            LOG.debug(&quot;{} starting write loop iteration, attempt {}&quot;,</span>
+<span class="nc" id="L129">                    logContext, WRITE_LOOP_COUNT_UPDATER.incrementAndGet(this));</span>
+        }
+        try {
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if (needsTransformation.needsUpdate(currentLocal.getValue())) {</span>
+<span class="nc" id="L133">                LedgerMetadata transformed = transform.transform(currentLocal.getValue());</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                if (throttler != null) {</span>
+                    // throttler to control updates per second
+<span class="nc" id="L136">                    throttler.acquire();</span>
+                }
+<span class="nc" id="L138">                lm.writeLedgerMetadata(ledgerId, transformed, currentLocal.getVersion())</span>
+<span class="nc" id="L139">                    .whenComplete((writtenMetadata, ex) -&gt; {</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                            if (ex == null) {</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                                if (updateLocalValue.updateValue(currentLocal, writtenMetadata)) {</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L143">                                        LOG.debug(&quot;{} success&quot;, logContext);</span>
+                                    }
+<span class="nc" id="L145">                                    promise.complete(writtenMetadata);</span>
+                                } else {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L148">                                        LOG.debug(&quot;{} local value changed while we were writing, try again&quot;,</span>
+                                                logContext);
+                                    }
+<span class="nc" id="L151">                                    writeLoop(currentLocalValue.get(), promise);</span>
+                                }
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                            } else if (ex instanceof BKException.BKMetadataVersionException) {</span>
+<span class="nc" id="L154">                                LOG.info(&quot;{} conflict writing metadata to store, update local value and try again&quot;,</span>
+                                         logContext);
+<span class="nc" id="L156">                                updateLocalValueFromStore(ledgerId).whenComplete((readMetadata, readEx) -&gt; {</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">                                        if (readEx == null) {</span>
+<span class="nc" id="L158">                                            writeLoop(readMetadata, promise);</span>
+                                        } else {
+<span class="nc" id="L160">                                            promise.completeExceptionally(readEx);</span>
+                                        }
+<span class="nc" id="L162">                                    });</span>
+                            } else {
+<span class="nc" id="L164">                                LOG.error(&quot;{} Error writing metadata to store&quot;, logContext, ex);</span>
+<span class="nc" id="L165">                                promise.completeExceptionally(ex);</span>
+                            }
+<span class="nc" id="L167">                        });</span>
+<span class="nc" id="L168">            } else {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L170">                    LOG.debug(&quot;{} Update not needed, completing&quot;, logContext);</span>
+                }
+<span class="nc" id="L172">                promise.complete(currentLocal);</span>
+            }
+<span class="nc" id="L174">        } catch (Exception e) {</span>
+<span class="nc" id="L175">            LOG.error(&quot;{} Exception updating&quot;, logContext, e);</span>
+<span class="nc" id="L176">            promise.completeExceptionally(e);</span>
+<span class="nc" id="L177">        }</span>
+<span class="nc" id="L178">    }</span>
+
+    private CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; updateLocalValueFromStore(long ledgerId) {
+<span class="nc" id="L181">        CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L183">        readLoop(ledgerId, promise);</span>
+
+<span class="nc" id="L185">        return promise;</span>
+    }
+
+    private void readLoop(long ledgerId, CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise) {
+<span class="nc" id="L189">        Versioned&lt;LedgerMetadata&gt; current = currentLocalValue.get();</span>
+
+<span class="nc" id="L191">        lm.readLedgerMetadata(ledgerId).whenComplete(</span>
+                (read, exception) -&gt; {
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                    if (exception != null) {</span>
+<span class="nc" id="L194">                        LOG.error(&quot;{} Failed to read metadata from store&quot;,</span>
+                                  logContext, exception);
+<span class="nc" id="L196">                        promise.completeExceptionally(exception);</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                    } else if (current.getVersion().compare(read.getVersion()) == Version.Occurred.CONCURRENTLY) {</span>
+                        // no update needed, these are the same in the immutable world
+<span class="nc" id="L199">                        promise.complete(current);</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                    } else if (updateLocalValue.updateValue(current, read)) {</span>
+                        // updated local value successfully
+<span class="nc" id="L202">                        promise.complete(read);</span>
+                    } else {
+                        // local value changed while we were reading,
+                        // look at new value, and try to read again
+<span class="nc" id="L206">                        readLoop(ledgerId, promise);</span>
+                    }
+<span class="nc" id="L208">                });</span>
+<span class="nc" id="L209">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

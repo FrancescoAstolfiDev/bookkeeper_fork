@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MetadataAsyncIterator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.datainteg</a> &gt; <span class="el_source">MetadataAsyncIterator.java</span></div><h1>MetadataAsyncIterator.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.bookie.datainteg;
+
+import io.reactivex.rxjava3.core.Completable;
+import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.core.Scheduler;
+import io.reactivex.rxjava3.disposables.Disposable;
+import java.io.IOException;
+import java.util.Iterator;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.versioning.Versioned;
+
+/**
+ * An rxjava ledger metadata iterator.
+ */
+<span class="nc" id="L42">@Slf4j</span>
+public class MetadataAsyncIterator {
+    private final Scheduler scheduler;
+    private final LedgerManager ledgerManager;
+    private final long zkTimeoutMs;
+    private final int maxInFlight;
+
+    MetadataAsyncIterator(Scheduler scheduler,
+                          LedgerManager ledgerManager, int maxInFlight,
+<span class="nc" id="L51">                          int zkTimeout, TimeUnit zkTimeoutUnit) {</span>
+<span class="nc" id="L52">        this.scheduler = scheduler;</span>
+<span class="nc" id="L53">        this.ledgerManager = ledgerManager;</span>
+<span class="nc" id="L54">        this.maxInFlight = maxInFlight;</span>
+<span class="nc" id="L55">        this.zkTimeoutMs = zkTimeoutUnit.toMillis(zkTimeout);</span>
+<span class="nc" id="L56">    }</span>
+
+
+    private static class FlatIterator {
+        final LedgerManager.LedgerRangeIterator ranges;
+<span class="nc" id="L61">        Iterator&lt;Long&gt; range = null;</span>
+<span class="nc" id="L62">        FlatIterator(LedgerManager.LedgerRangeIterator ranges) {</span>
+<span class="nc" id="L63">            this.ranges = ranges;</span>
+<span class="nc" id="L64">        }</span>
+        boolean hasNext() throws IOException {
+<span class="nc bnc" id="L66" title="All 4 branches missed.">            if (range == null || !range.hasNext()) {</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                if (ranges.hasNext()) {</span>
+<span class="nc" id="L68">                    range = ranges.next().getLedgers().iterator();</span>
+                }
+            }
+<span class="nc bnc" id="L71" title="All 4 branches missed.">            return range != null &amp;&amp; range.hasNext();</span>
+        }
+        Long next() throws IOException {
+<span class="nc" id="L74">            return range.next();</span>
+        }
+    }
+
+    public CompletableFuture&lt;Void&gt; forEach(BiFunction&lt;Long, LedgerMetadata, CompletableFuture&lt;Void&gt;&gt; consumer) {
+<span class="nc" id="L79">        CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L80">        final Disposable disposable = Flowable.&lt;Long, FlatIterator&gt;generate(</span>
+<span class="nc" id="L81">                        () -&gt; new FlatIterator(ledgerManager.getLedgerRanges(zkTimeoutMs)),</span>
+                        (iter, emitter) -&gt; {
+                            try {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                                if (iter.hasNext()) {</span>
+<span class="nc" id="L85">                                    emitter.onNext(iter.next());</span>
+                                } else {
+<span class="nc" id="L87">                                    emitter.onComplete();</span>
+                                }
+<span class="nc" id="L89">                            } catch (Exception e) {</span>
+<span class="nc" id="L90">                                emitter.onError(e);</span>
+<span class="nc" id="L91">                            }</span>
+<span class="nc" id="L92">                        })</span>
+<span class="nc" id="L93">                .subscribeOn(scheduler)</span>
+<span class="nc" id="L94">                .flatMapCompletable((ledgerId) -&gt; Completable.fromCompletionStage(processOne(ledgerId, consumer)),</span>
+                        false /* delayErrors */,
+                        maxInFlight)
+<span class="nc" id="L97">                .subscribe(() -&gt; promise.complete(null),</span>
+<span class="nc" id="L98">                        t -&gt; promise.completeExceptionally(unwrap(t)));</span>
+<span class="nc" id="L99">        promise.whenComplete((result, ex) -&gt; disposable.dispose());</span>
+<span class="nc" id="L100">        return promise;</span>
+    }
+
+    private CompletableFuture&lt;Void&gt; processOne(long ledgerId,
+                                               BiFunction&lt;Long, LedgerMetadata, CompletableFuture&lt;Void&gt;&gt; consumer) {
+<span class="nc" id="L105">        return ledgerManager.readLedgerMetadata(ledgerId)</span>
+<span class="nc" id="L106">            .thenApply(Versioned::getValue)</span>
+<span class="nc" id="L107">            .thenCompose((metadata) -&gt; consumer.apply(ledgerId, metadata))</span>
+<span class="nc" id="L108">            .exceptionally((e) -&gt; {</span>
+<span class="nc" id="L109">                    Throwable realException = unwrap(e);</span>
+<span class="nc" id="L110">                    log.warn(&quot;Got exception processing ledger {}&quot;, ledgerId, realException);</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                    if (realException instanceof BKException.BKNoSuchLedgerExistsOnMetadataServerException) {</span>
+<span class="nc" id="L112">                        return null;</span>
+                    } else {
+<span class="nc" id="L114">                        throw new CompletionException(realException);</span>
+                    }
+                });
+    }
+
+    static Throwable unwrap(Throwable e) {
+<span class="nc bnc" id="L120" title="All 4 branches missed.">        if (e instanceof CompletionException || e instanceof ExecutionException) {</span>
+<span class="nc" id="L121">            return unwrap(e.getCause());</span>
+        }
+<span class="nc" id="L123">        return e;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BookieStatus.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">BookieStatus.java</span></div><h1>BookieStatus.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ * &lt;p&gt;
+ * http://www.apache.org/licenses/LICENSE-2.0
+ * &lt;p&gt;
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.bookkeeper.util.BookKeeperConstants.BOOKIE_STATUS_FILENAME;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The status object represents the current status of a bookie instance.
+ */
+public class BookieStatus {
+
+<span class="nc" id="L42">    private static final Logger LOG = LoggerFactory.getLogger(BookieStatus.class);</span>
+
+    static final int CURRENT_STATUS_LAYOUT_VERSION = 1;
+
+<span class="nc" id="L46">    enum BookieMode {</span>
+<span class="nc" id="L47">        READ_ONLY,</span>
+<span class="nc" id="L48">        READ_WRITE</span>
+    }
+
+    private static final long INVALID_UPDATE_TIME = -1;
+
+    private int layoutVersion;
+    private long lastUpdateTime;
+    private volatile BookieMode bookieMode;
+
+<span class="nc" id="L57">    BookieStatus() {</span>
+<span class="nc" id="L58">        this.bookieMode = BookieMode.READ_WRITE;</span>
+<span class="nc" id="L59">        this.layoutVersion = CURRENT_STATUS_LAYOUT_VERSION;</span>
+<span class="nc" id="L60">        this.lastUpdateTime = INVALID_UPDATE_TIME;</span>
+<span class="nc" id="L61">    }</span>
+
+    private BookieMode getBookieMode() {
+<span class="nc" id="L64">        return bookieMode;</span>
+    }
+
+    public boolean isInWritable() {
+<span class="nc" id="L68">        return bookieMode.equals(BookieMode.READ_WRITE);</span>
+    }
+
+    synchronized boolean setToWritableMode() {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">        if (!bookieMode.equals(BookieMode.READ_WRITE)) {</span>
+<span class="nc" id="L73">            bookieMode = BookieMode.READ_WRITE;</span>
+<span class="nc" id="L74">            this.lastUpdateTime = System.currentTimeMillis();</span>
+<span class="nc" id="L75">            return true;</span>
+        }
+<span class="nc" id="L77">        return false;</span>
+    }
+
+    boolean isInReadOnlyMode() {
+<span class="nc" id="L81">        return bookieMode.equals(BookieMode.READ_ONLY);</span>
+    }
+
+    synchronized boolean setToReadOnlyMode() {
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (!bookieMode.equals(BookieMode.READ_ONLY)) {</span>
+<span class="nc" id="L86">            bookieMode = BookieMode.READ_ONLY;</span>
+<span class="nc" id="L87">            this.lastUpdateTime = System.currentTimeMillis();</span>
+<span class="nc" id="L88">            return true;</span>
+        }
+<span class="nc" id="L90">        return false;</span>
+    }
+
+    /**
+     * Write bookie status to multiple directories in best effort.
+     *
+     * @param directories list of directories to write to
+     *
+     */
+    synchronized void writeToDirectories(List&lt;File&gt; directories) {
+<span class="nc" id="L100">        boolean success = false;</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        for (File dir : directories) {</span>
+            try {
+<span class="nc" id="L103">                File statusFile = new File(dir, BOOKIE_STATUS_FILENAME);</span>
+<span class="nc" id="L104">                writeToFile(statusFile, toString());</span>
+<span class="nc" id="L105">                success = true;</span>
+<span class="nc" id="L106">            } catch (IOException e) {</span>
+<span class="nc" id="L107">                LOG.warn(&quot;IOException while trying to write bookie status to directory {}.&quot;</span>
+                    + &quot; This is fine if not all directories are failed.&quot;, dir);
+<span class="nc" id="L109">            }</span>
+<span class="nc" id="L110">        }</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (success) {</span>
+<span class="nc" id="L112">            LOG.info(&quot;Successfully persist bookie status {}&quot;, this.bookieMode);</span>
+        } else {
+<span class="nc" id="L114">            LOG.warn(&quot;Failed to persist bookie status {}&quot;, this.bookieMode);</span>
+        }
+<span class="nc" id="L116">    }</span>
+
+    /**
+     * Write content to the file. If file does not exist, it will create one.
+     *
+     * @param file file that you want to write to
+     * @param body content to write
+     * @throws IOException
+     */
+    private static void writeToFile(File file, String body) throws IOException {
+<span class="nc" id="L126">        try (FileOutputStream fos = new FileOutputStream(file);</span>
+<span class="nc" id="L127">             BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, UTF_8))) {</span>
+<span class="nc" id="L128">            bw.write(body);</span>
+        }
+<span class="nc" id="L130">    }</span>
+
+    /**
+     * Read bookie status from the status files, and update the bookie status if read succeed.
+     * If a status file is not readable or not found, it will skip and try to read from the next file.
+     *
+     * @param directories list of directories that store the status file
+     */
+    void readFromDirectories(List&lt;File&gt; directories) {
+<span class="nc" id="L139">        boolean success = false;</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        for (File dir : directories) {</span>
+<span class="nc" id="L141">            File statusFile = new File(dir, BOOKIE_STATUS_FILENAME);</span>
+            try {
+<span class="nc" id="L143">                BookieStatus status = readFromFile(statusFile);</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                if (null != status) {</span>
+<span class="nc" id="L145">                    synchronized (status) {</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                        if (status.lastUpdateTime &gt; this.lastUpdateTime) {</span>
+<span class="nc" id="L147">                            this.lastUpdateTime = status.lastUpdateTime;</span>
+<span class="nc" id="L148">                            this.layoutVersion = status.layoutVersion;</span>
+<span class="nc" id="L149">                            this.bookieMode = status.bookieMode;</span>
+<span class="nc" id="L150">                            success = true;</span>
+                        }
+<span class="nc" id="L152">                    }</span>
+                }
+<span class="nc" id="L154">            } catch (IOException e) {</span>
+<span class="nc" id="L155">                LOG.warn(&quot;IOException while trying to read bookie status from directory {}.&quot;</span>
+                    + &quot; This is fine if not all directories failed.&quot;, dir);
+<span class="nc" id="L157">            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L158">                LOG.warn(&quot;IllegalArgumentException while trying to read bookie status from directory {}.&quot;</span>
+                    + &quot; This is fine if not all directories failed.&quot;, dir);
+<span class="nc" id="L160">            }</span>
+<span class="nc" id="L161">        }</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (success) {</span>
+<span class="nc" id="L163">            LOG.info(&quot;Successfully retrieve bookie status {} from disks.&quot;, getBookieMode());</span>
+        } else {
+<span class="nc" id="L165">            LOG.warn(&quot;Failed to retrieve bookie status from disks.&quot;</span>
+<span class="nc" id="L166">                    + &quot; Fall back to current or default bookie status: {}&quot;, getBookieMode());</span>
+        }
+<span class="nc" id="L168">    }</span>
+
+
+    /**
+     * Function to read the bookie status from a single file.
+     *
+     * @param file file to read from
+     * @return BookieStatus if not error, null if file not exist or any exception happens
+     * @throws IOException
+     */
+    private BookieStatus readFromFile(File file)
+            throws IOException, IllegalArgumentException {
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (!file.exists()) {</span>
+<span class="nc" id="L181">            return null;</span>
+        }
+
+<span class="nc" id="L184">        try (BufferedReader reader = new BufferedReader(</span>
+            new InputStreamReader(new FileInputStream(file), UTF_8))) {
+<span class="nc" id="L186">            return parse(reader);</span>
+        }
+    }
+
+    /**
+     * Parse the bookie status object using appropriate layout version.
+     *
+     * @param reader
+     * @return BookieStatus if parse succeed, otherwise return null
+     * @throws IOException
+     */
+    public BookieStatus parse(BufferedReader reader)
+            throws IOException, IllegalArgumentException {
+<span class="nc" id="L199">        BookieStatus status = new BookieStatus();</span>
+<span class="nc" id="L200">        String line = reader.readLine();</span>
+<span class="nc bnc" id="L201" title="All 4 branches missed.">        if (line == null || line.trim().isEmpty()) {</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L203">                LOG.debug(&quot;Empty line when parsing bookie status&quot;);</span>
+            }
+<span class="nc" id="L205">            return null;</span>
+        }
+<span class="nc" id="L207">        String[] parts = line.split(&quot;,&quot;);</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">        if (parts.length == 0) {</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L210">                LOG.debug(&quot;Error in parsing bookie status: {}&quot;, line);</span>
+            }
+<span class="nc" id="L212">            return null;</span>
+        }
+<span class="nc" id="L214">        synchronized (status) {</span>
+<span class="nc" id="L215">            status.layoutVersion = Integer.parseInt(parts[0].trim());</span>
+<span class="nc bnc" id="L216" title="All 4 branches missed.">            if (status.layoutVersion == 1 &amp;&amp; parts.length == 3) {</span>
+<span class="nc" id="L217">                status.bookieMode = BookieMode.valueOf(parts[1]);</span>
+<span class="nc" id="L218">                status.lastUpdateTime = Long.parseLong(parts[2].trim());</span>
+<span class="nc" id="L219">                return status;</span>
+            }
+<span class="nc" id="L221">        }</span>
+<span class="nc" id="L222">        return null;</span>
+
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L228">        StringBuilder builder = new StringBuilder();</span>
+<span class="nc" id="L229">        builder.append(CURRENT_STATUS_LAYOUT_VERSION);</span>
+<span class="nc" id="L230">        builder.append(&quot;,&quot;);</span>
+<span class="nc" id="L231">        builder.append(getBookieMode());</span>
+<span class="nc" id="L232">        builder.append(&quot;,&quot;);</span>
+<span class="nc" id="L233">        builder.append(System.currentTimeMillis());</span>
+<span class="nc" id="L234">        builder.append(&quot;\n&quot;);</span>
+<span class="nc" id="L235">        return builder.toString();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

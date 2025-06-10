@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BufferedChannel.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">BufferedChannel.java</span></div><h1>BufferedChannel.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.util.ReferenceCountUtil;
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Provides a buffering layer in front of a FileChannel.
+ */
+public class BufferedChannel extends BufferedReadChannel implements Closeable {
+    /**
+     * The capacity of the write buffer.
+     */
+    protected final int writeCapacity;
+    /**
+     * The position of the file channel's write pointer.
+     */
+<span class="nc" id="L44">    protected AtomicLong writeBufferStartPosition = new AtomicLong(0);</span>
+    /**
+     * The buffer used to write operations.
+     */
+    protected final ByteBuf writeBuffer;
+    /**
+     * The absolute position of the next write operation.
+     */
+    protected volatile long position;
+
+    /*
+     * if unpersistedBytesBound is non-zero value, then after writing to
+     * writeBuffer, it will check if the unpersistedBytes is greater than
+     * unpersistedBytesBound and then calls flush method if it is greater.
+     *
+     * It is a best-effort feature, since 'forceWrite' method is not
+     * synchronized and unpersistedBytes is reset in 'forceWrite' method before
+     * calling fileChannel.force
+     */
+    protected final long unpersistedBytesBound;
+    private final boolean doRegularFlushes;
+
+    /*
+     * it tracks the number of bytes which are not persisted yet by force
+     * writing the FileChannel. The unpersisted bytes could be in writeBuffer or
+     * in fileChannel system cache.
+     */
+    protected final AtomicLong unpersistedBytes;
+
+<span class="nc" id="L73">    private boolean closed = false;</span>
+
+    // make constructor to be public for unit test
+    public BufferedChannel(ByteBufAllocator allocator, FileChannel fc, int capacity) throws IOException {
+        // Use the same capacity for read and write buffers.
+<span class="nc" id="L78">        this(allocator, fc, capacity, 0L);</span>
+<span class="nc" id="L79">    }</span>
+
+    public BufferedChannel(ByteBufAllocator allocator, FileChannel fc, int capacity, long unpersistedBytesBound)
+            throws IOException {
+        // Use the same capacity for read and write buffers.
+<span class="nc" id="L84">        this(allocator, fc, capacity, capacity, unpersistedBytesBound);</span>
+<span class="nc" id="L85">    }</span>
+
+    public BufferedChannel(ByteBufAllocator allocator, FileChannel fc, int writeCapacity, int readCapacity,
+            long unpersistedBytesBound) throws IOException {
+<span class="nc" id="L89">        super(fc, readCapacity);</span>
+<span class="nc" id="L90">        this.writeCapacity = writeCapacity;</span>
+<span class="nc" id="L91">        this.position = fc.position();</span>
+<span class="nc" id="L92">        this.writeBufferStartPosition.set(position);</span>
+<span class="nc" id="L93">        this.writeBuffer = allocator.directBuffer(writeCapacity);</span>
+<span class="nc" id="L94">        this.unpersistedBytes = new AtomicLong(0);</span>
+<span class="nc" id="L95">        this.unpersistedBytesBound = unpersistedBytesBound;</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        this.doRegularFlushes = unpersistedBytesBound &gt; 0;</span>
+<span class="nc" id="L97">    }</span>
+
+    @Override
+    public synchronized void close() throws IOException {
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if (closed) {</span>
+<span class="nc" id="L102">            return;</span>
+        }
+<span class="nc" id="L104">        ReferenceCountUtil.release(writeBuffer);</span>
+<span class="nc" id="L105">        fileChannel.close();</span>
+<span class="nc" id="L106">        closed = true;</span>
+<span class="nc" id="L107">    }</span>
+
+    /**
+     * Write all the data in src to the {@link FileChannel}. Note that this function can
+     * buffer or re-order writes based on the implementation. These writes will be flushed
+     * to the disk only when flush() is invoked.
+     *
+     * @param src The source ByteBuffer which contains the data to be written.
+     * @throws IOException if a write operation fails.
+     */
+    public void write(ByteBuf src) throws IOException {
+<span class="nc" id="L118">        int copied = 0;</span>
+<span class="nc" id="L119">        boolean shouldForceWrite = false;</span>
+<span class="nc" id="L120">        synchronized (this) {</span>
+<span class="nc" id="L121">            int len = src.readableBytes();</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            while (copied &lt; len) {</span>
+<span class="nc" id="L123">                int bytesToCopy = Math.min(src.readableBytes() - copied, writeBuffer.writableBytes());</span>
+<span class="nc" id="L124">                writeBuffer.writeBytes(src, src.readerIndex() + copied, bytesToCopy);</span>
+<span class="nc" id="L125">                copied += bytesToCopy;</span>
+
+                // if we have run out of buffer space, we should flush to the
+                // file
+<span class="nc bnc" id="L129" title="All 2 branches missed.">                if (!writeBuffer.isWritable()) {</span>
+<span class="nc" id="L130">                    flush();</span>
+                }
+<span class="nc" id="L132">            }</span>
+<span class="nc" id="L133">            position += copied;</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            if (doRegularFlushes) {</span>
+<span class="nc" id="L135">                unpersistedBytes.addAndGet(copied);</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                if (unpersistedBytes.get() &gt;= unpersistedBytesBound) {</span>
+<span class="nc" id="L137">                    flush();</span>
+<span class="nc" id="L138">                    shouldForceWrite = true;</span>
+                }
+            }
+<span class="nc" id="L141">        }</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (shouldForceWrite) {</span>
+<span class="nc" id="L143">            forceWrite(false);</span>
+        }
+<span class="nc" id="L145">    }</span>
+
+    /**
+     * Get the position where the next write operation will begin writing from.
+     * @return
+     */
+    public long position() {
+<span class="nc" id="L152">        return position;</span>
+    }
+
+    /**
+     * Get the position of the file channel's write pointer.
+     * @return
+     */
+    public long getFileChannelPosition() {
+<span class="nc" id="L160">        return writeBufferStartPosition.get();</span>
+    }
+
+    /**
+     * calls both flush and forceWrite methods.
+     *
+     * @param forceMetadata
+     *            - If true then this method is required to force changes to
+     *            both the file's content and metadata to be written to storage;
+     *            otherwise, it need only force content changes to be written
+     * @throws IOException
+     */
+    public void flushAndForceWrite(boolean forceMetadata) throws IOException {
+<span class="nc" id="L173">        flush();</span>
+<span class="nc" id="L174">        forceWrite(forceMetadata);</span>
+<span class="nc" id="L175">    }</span>
+
+    /**
+     * calls both flush and forceWrite methods if regular flush is enabled.
+     *
+     * @param forceMetadata
+     *            - If true then this method is required to force changes to
+     *            both the file's content and metadata to be written to storage;
+     *            otherwise, it need only force content changes to be written
+     * @throws IOException
+     */
+    public void flushAndForceWriteIfRegularFlush(boolean forceMetadata) throws IOException {
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        if (doRegularFlushes) {</span>
+<span class="nc" id="L188">            flushAndForceWrite(forceMetadata);</span>
+        }
+<span class="nc" id="L190">    }</span>
+
+    /**
+     * Write any data in the buffer to the file and advance the writeBufferPosition.
+     * Callers are expected to synchronize appropriately
+     *
+     * @throws IOException if the write fails.
+     */
+    public synchronized void flush() throws IOException {
+<span class="nc" id="L199">        ByteBuffer toWrite = writeBuffer.internalNioBuffer(0, writeBuffer.writerIndex());</span>
+        do {
+<span class="nc" id="L201">            fileChannel.write(toWrite);</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        } while (toWrite.hasRemaining());</span>
+<span class="nc" id="L203">        writeBuffer.clear();</span>
+<span class="nc" id="L204">        writeBufferStartPosition.set(fileChannel.position());</span>
+<span class="nc" id="L205">    }</span>
+
+    /**
+     * force a sync operation so that data is persisted to the disk.
+     * @param forceMetadata
+     * @return
+     * @throws IOException
+     */
+    public long forceWrite(boolean forceMetadata) throws IOException {
+        // This is the point up to which we had flushed to the file system page cache
+        // before issuing this force write hence is guaranteed to be made durable by
+        // the force write, any flush that happens after this may or may
+        // not be flushed
+<span class="nc" id="L218">        long positionForceWrite = writeBufferStartPosition.get();</span>
+        /*
+         * since forceWrite method is not called in synchronized block, to make
+         * sure we are not undercounting unpersistedBytes, setting
+         * unpersistedBytes to the current number of bytes in writeBuffer.
+         *
+         * since we are calling fileChannel.force, bytes which are written to
+         * filechannel (system filecache) will be persisted to the disk. So we
+         * dont need to consider those bytes for setting value to
+         * unpersistedBytes.
+         *
+         * In this method fileChannel.force is not called in synchronized block, so
+         * we are doing best efforts to not overcount or undercount unpersistedBytes.
+         * Hence setting writeBuffer.readableBytes() to unpersistedBytes.
+         *
+         */
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (unpersistedBytesBound &gt; 0) {</span>
+<span class="nc" id="L235">            synchronized (this) {</span>
+<span class="nc" id="L236">                unpersistedBytes.set(writeBuffer.readableBytes());</span>
+<span class="nc" id="L237">            }</span>
+        }
+
+<span class="nc" id="L240">        fileChannel.force(forceMetadata);</span>
+<span class="nc" id="L241">        return positionForceWrite;</span>
+    }
+
+    @Override
+    public synchronized int read(ByteBuf dest, long pos, int length) throws IOException {
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (dest.writableBytes() &lt; length) {</span>
+<span class="nc" id="L247">            throw new IllegalArgumentException(&quot;dest buffer remaining capacity is not enough&quot;</span>
+                    + &quot;(must be at least as \&quot;length\&quot;=&quot; + length + &quot;)&quot;);
+        }
+
+<span class="nc" id="L251">        long prevPos = pos;</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        while (length &gt; 0) {</span>
+            // check if it is in the write buffer
+<span class="nc bnc" id="L254" title="All 4 branches missed.">            if (writeBuffer != null &amp;&amp; writeBufferStartPosition.get() &lt;= pos) {</span>
+<span class="nc" id="L255">                int positionInBuffer = (int) (pos - writeBufferStartPosition.get());</span>
+<span class="nc" id="L256">                int bytesToCopy = Math.min(writeBuffer.writerIndex() - positionInBuffer, dest.writableBytes());</span>
+
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                if (bytesToCopy == 0) {</span>
+<span class="nc" id="L259">                    throw new IOException(&quot;Read past EOF&quot;);</span>
+                }
+
+<span class="nc" id="L262">                dest.writeBytes(writeBuffer, positionInBuffer, bytesToCopy);</span>
+<span class="nc" id="L263">                pos += bytesToCopy;</span>
+<span class="nc" id="L264">                length -= bytesToCopy;</span>
+<span class="nc bnc" id="L265" title="All 4 branches missed.">            } else if (writeBuffer == null &amp;&amp; writeBufferStartPosition.get() &lt;= pos) {</span>
+                // here we reach the end
+<span class="nc" id="L267">                break;</span>
+                // first check if there is anything we can grab from the readBuffer
+<span class="nc bnc" id="L269" title="All 4 branches missed.">            } else if (readBufferStartPosition &lt;= pos &amp;&amp; pos &lt; readBufferStartPosition + readBuffer.writerIndex()) {</span>
+<span class="nc" id="L270">                int positionInBuffer = (int) (pos - readBufferStartPosition);</span>
+<span class="nc" id="L271">                int bytesToCopy = Math.min(readBuffer.writerIndex() - positionInBuffer, dest.writableBytes());</span>
+<span class="nc" id="L272">                dest.writeBytes(readBuffer, positionInBuffer, bytesToCopy);</span>
+<span class="nc" id="L273">                pos += bytesToCopy;</span>
+<span class="nc" id="L274">                length -= bytesToCopy;</span>
+                // let's read it
+<span class="nc" id="L276">            } else {</span>
+<span class="nc" id="L277">                readBufferStartPosition = pos;</span>
+
+<span class="nc" id="L279">                int readBytes = fileChannel.read(readBuffer.internalNioBuffer(0, readCapacity),</span>
+                        readBufferStartPosition);
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                if (readBytes &lt;= 0) {</span>
+<span class="nc" id="L282">                    throw new IOException(&quot;Reading from filechannel returned a non-positive value. Short read.&quot;);</span>
+                }
+<span class="nc" id="L284">                readBuffer.writerIndex(readBytes);</span>
+<span class="nc" id="L285">            }</span>
+        }
+<span class="nc" id="L287">        return (int) (pos - prevPos);</span>
+    }
+
+    @Override
+    public synchronized void clear() {
+<span class="nc" id="L292">        super.clear();</span>
+<span class="nc" id="L293">        writeBuffer.clear();</span>
+<span class="nc" id="L294">    }</span>
+
+    public synchronized int getNumOfBytesInWriteBuffer() {
+<span class="nc" id="L297">        return writeBuffer.readableBytes();</span>
+    }
+
+    long getUnpersistedBytes() {
+<span class="nc" id="L301">        return unpersistedBytes.get();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AuditorCheckAllLedgersTask.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">AuditorCheckAllLedgersTask.java</span></div><h1>AuditorCheckAllLedgersTask.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.replication;
+
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Sets;
+import java.io.IOException;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.client.LedgerChecker;
+import org.apache.bookkeeper.client.LedgerFragment;
+import org.apache.bookkeeper.client.LedgerHandle;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks;
+import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
+import org.apache.zookeeper.AsyncCallback;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class AuditorCheckAllLedgersTask extends AuditorTask {
+<span class="nc" id="L51">    private static final Logger LOG = LoggerFactory.getLogger(AuditorBookieCheckTask.class);</span>
+
+    private final Semaphore openLedgerNoRecoverySemaphore;
+    private final int openLedgerNoRecoverySemaphoreWaitTimeoutMSec;
+    private final ExecutorService ledgerCheckerExecutor;
+
+    AuditorCheckAllLedgersTask(ServerConfiguration conf,
+                               AuditorStats auditorStats,
+                               BookKeeperAdmin admin,
+                               LedgerManager ledgerManager,
+                               LedgerUnderreplicationManager ledgerUnderreplicationManager,
+                               ShutdownTaskHandler shutdownTaskHandler,
+                               BiConsumer&lt;AtomicBoolean, Throwable&gt; hasAuditCheckTask)
+            throws UnavailableException {
+<span class="nc" id="L65">        super(conf, auditorStats, admin, ledgerManager,</span>
+                ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask);
+
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (conf.getAuditorMaxNumberOfConcurrentOpenLedgerOperations() &lt;= 0) {</span>
+<span class="nc" id="L69">            LOG.error(&quot;auditorMaxNumberOfConcurrentOpenLedgerOperations should be greater than 0&quot;);</span>
+<span class="nc" id="L70">            throw new UnavailableException(&quot;auditorMaxNumberOfConcurrentOpenLedgerOperations should be greater than 0&quot;);</span>
+        }
+<span class="nc" id="L72">        this.openLedgerNoRecoverySemaphore =</span>
+<span class="nc" id="L73">                new Semaphore(conf.getAuditorMaxNumberOfConcurrentOpenLedgerOperations());</span>
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (conf.getAuditorAcquireConcurrentOpenLedgerOperationsTimeoutMSec() &lt; 0) {</span>
+<span class="nc" id="L76">            LOG.error(&quot;auditorAcquireConcurrentOpenLedgerOperationsTimeoutMSec should be greater than or equal to 0&quot;);</span>
+<span class="nc" id="L77">            throw new UnavailableException(&quot;auditorAcquireConcurrentOpenLedgerOperationsTimeoutMSec &quot;</span>
+                    + &quot;should be greater than or equal to 0&quot;);
+        }
+<span class="nc" id="L80">        this.openLedgerNoRecoverySemaphoreWaitTimeoutMSec =</span>
+<span class="nc" id="L81">                conf.getAuditorAcquireConcurrentOpenLedgerOperationsTimeoutMSec();</span>
+
+<span class="nc" id="L83">        this.ledgerCheckerExecutor = Executors.newSingleThreadExecutor(new ThreadFactory() {</span>
+            @Override
+            public Thread newThread(Runnable r) {
+<span class="nc" id="L86">                Thread t = new Thread(r, &quot;AuditorCheckAllLedgers-LedgerChecker&quot;);</span>
+<span class="nc" id="L87">                t.setDaemon(true);</span>
+<span class="nc" id="L88">                return t;</span>
+            }
+        });
+<span class="nc" id="L91">    }</span>
+
+    @Override
+    protected void runTask() {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (hasBookieCheckTask()) {</span>
+<span class="nc" id="L96">            LOG.info(&quot;Audit bookie task already scheduled; skipping periodic all ledgers check task&quot;);</span>
+<span class="nc" id="L97">            auditorStats.getNumSkippingCheckTaskTimes().inc();</span>
+<span class="nc" id="L98">            return;</span>
+        }
+
+<span class="nc" id="L101">        Stopwatch stopwatch = Stopwatch.createStarted();</span>
+<span class="nc" id="L102">        boolean checkSuccess = false;</span>
+        try {
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (!isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L105">                LOG.info(&quot;Ledger replication disabled, skipping checkAllLedgers&quot;);</span>
+<span class="nc" id="L106">                checkSuccess = true;</span>
+<span class="nc" id="L107">                return;</span>
+            }
+
+<span class="nc" id="L110">            LOG.info(&quot;Starting checkAllLedgers&quot;);</span>
+<span class="nc" id="L111">            checkAllLedgers();</span>
+<span class="nc" id="L112">            long checkAllLedgersDuration = stopwatch.stop().elapsed(TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L113">            LOG.info(&quot;Completed checkAllLedgers in {} milliSeconds&quot;, checkAllLedgersDuration);</span>
+<span class="nc" id="L114">            auditorStats.getCheckAllLedgersTime()</span>
+<span class="nc" id="L115">                    .registerSuccessfulEvent(checkAllLedgersDuration, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L116">            checkSuccess = true;</span>
+<span class="nc" id="L117">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L118">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L119">            LOG.error(&quot;Interrupted while running periodic check&quot;, ie);</span>
+<span class="nc" id="L120">        } catch (BKException bke) {</span>
+<span class="nc" id="L121">            LOG.error(&quot;Exception running periodic check&quot;, bke);</span>
+<span class="nc" id="L122">        } catch (IOException ioe) {</span>
+<span class="nc" id="L123">            LOG.error(&quot;I/O exception running periodic check&quot;, ioe);</span>
+<span class="nc" id="L124">        } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L125">            LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L126">            submitShutdownTask();</span>
+<span class="nc" id="L127">        } catch (UnavailableException ue) {</span>
+<span class="nc" id="L128">            LOG.error(&quot;Underreplication manager unavailable running periodic check&quot;, ue);</span>
+        } finally {
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (!checkSuccess) {</span>
+<span class="nc" id="L131">                long checkAllLedgersDuration = stopwatch.stop().elapsed(TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L132">                auditorStats.getCheckAllLedgersTime()</span>
+<span class="nc" id="L133">                        .registerFailedEvent(checkAllLedgersDuration, TimeUnit.MILLISECONDS);</span>
+            }
+        }
+<span class="nc" id="L136">    }</span>
+
+    @Override
+    public void shutdown() {
+<span class="nc" id="L140">        LOG.info(&quot;Shutting down AuditorCheckAllLedgersTask&quot;);</span>
+<span class="nc" id="L141">        ledgerCheckerExecutor.shutdown();</span>
+        try {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            while (!ledgerCheckerExecutor.awaitTermination(30, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L144">                LOG.warn(&quot;Executor for ledger checker not shutting down, interrupting&quot;);</span>
+<span class="nc" id="L145">                ledgerCheckerExecutor.shutdownNow();</span>
+            }
+
+<span class="nc" id="L148">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L149">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L150">            LOG.warn(&quot;Interrupted while shutting down AuditorCheckAllLedgersTask&quot;, ie);</span>
+<span class="nc" id="L151">        }</span>
+<span class="nc" id="L152">    }</span>
+
+    /**
+     * List all the ledgers and check them individually. This should not
+     * be run very often.
+     */
+    void checkAllLedgers() throws BKException, IOException, InterruptedException {
+<span class="nc" id="L159">        final BookKeeper localClient = getBookKeeper(conf);</span>
+<span class="nc" id="L160">        final BookKeeperAdmin localAdmin = getBookKeeperAdmin(localClient);</span>
+        try {
+<span class="nc" id="L162">            final LedgerChecker checker = new LedgerChecker(localClient, conf.getInFlightReadEntryNumInLedgerChecker());</span>
+
+<span class="nc" id="L164">            final CompletableFuture&lt;Void&gt; processFuture = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L166">            BookkeeperInternalCallbacks.Processor&lt;Long&gt; checkLedgersProcessor = (ledgerId, callback) -&gt; {</span>
+                try {
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                    if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L169">                        LOG.info(&quot;Ledger rereplication has been disabled, aborting periodic check&quot;);</span>
+<span class="nc" id="L170">                        FutureUtils.complete(processFuture, null);</span>
+<span class="nc" id="L171">                        return;</span>
+                    }
+<span class="nc" id="L173">                } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L174">                    LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L175">                    submitShutdownTask();</span>
+<span class="nc" id="L176">                    return;</span>
+<span class="nc" id="L177">                } catch (UnavailableException ue) {</span>
+<span class="nc" id="L178">                    LOG.error(&quot;Underreplication manager unavailable running periodic check&quot;, ue);</span>
+<span class="nc" id="L179">                    FutureUtils.complete(processFuture, null);</span>
+<span class="nc" id="L180">                    return;</span>
+<span class="nc" id="L181">                }</span>
+
+                try {
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                    if (!openLedgerNoRecoverySemaphore.tryAcquire(openLedgerNoRecoverySemaphoreWaitTimeoutMSec,</span>
+                            TimeUnit.MILLISECONDS)) {
+<span class="nc" id="L186">                        LOG.warn(&quot;Failed to acquire semaphore for {} ms, ledgerId: {}&quot;,</span>
+<span class="nc" id="L187">                                openLedgerNoRecoverySemaphoreWaitTimeoutMSec, ledgerId);</span>
+<span class="nc" id="L188">                        FutureUtils.complete(processFuture, null);</span>
+<span class="nc" id="L189">                        return;</span>
+                    }
+<span class="nc" id="L191">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L192">                    LOG.error(&quot;Unable to acquire open ledger operation semaphore &quot;, e);</span>
+<span class="nc" id="L193">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L194">                    FutureUtils.complete(processFuture, null);</span>
+<span class="nc" id="L195">                    return;</span>
+<span class="nc" id="L196">                }</span>
+
+<span class="nc" id="L198">                localAdmin.asyncOpenLedgerNoRecovery(ledgerId, (rc, lh, ctx) -&gt; {</span>
+<span class="nc" id="L199">                    openLedgerNoRecoverySemaphore.release();</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                    if (BKException.Code.OK == rc) {</span>
+                        // BookKeeperClientWorker-OrderedExecutor threads should not execute LedgerChecker#checkLedger
+                        // as this can lead to deadlocks
+<span class="nc" id="L203">                        ledgerCheckerExecutor.execute(() -&gt; {</span>
+<span class="nc" id="L204">                            checker.checkLedger(lh,</span>
+                                    // the ledger handle will be closed after checkLedger is done.
+                                    new ProcessLostFragmentsCb(lh, callback),
+<span class="nc" id="L207">                                    conf.getAuditorLedgerVerificationPercentage());</span>
+                            // we collect the following stats to get a measure of the
+                            // distribution of a single ledger within the bk cluster
+                            // the higher the number of fragments/bookies, the more distributed it is
+<span class="nc" id="L211">                            auditorStats.getNumFragmentsPerLedger().registerSuccessfulValue(lh.getNumFragments());</span>
+<span class="nc" id="L212">                            auditorStats.getNumBookiesPerLedger().registerSuccessfulValue(lh.getNumBookies());</span>
+<span class="nc" id="L213">                            auditorStats.getNumLedgersChecked().inc();</span>
+<span class="nc" id="L214">                            lh.closeAsync();</span>
+<span class="nc" id="L215">                        });</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                    } else if (BKException.Code.NoSuchLedgerExistsOnMetadataServerException == rc) {</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L218">                            LOG.debug(&quot;Ledger {} was deleted before we could check it&quot;, ledgerId);</span>
+                        }
+<span class="nc" id="L220">                        callback.processResult(BKException.Code.OK, null, null);</span>
+                    } else {
+<span class="nc" id="L222">                        LOG.error(&quot;Couldn't open ledger {} to check : {}&quot;, ledgerId, BKException.getMessage(rc));</span>
+<span class="nc" id="L223">                        callback.processResult(rc, null, null);</span>
+                    }
+<span class="nc" id="L225">                }, null);</span>
+<span class="nc" id="L226">            };</span>
+
+<span class="nc" id="L228">            ledgerManager.asyncProcessLedgers(checkLedgersProcessor,</span>
+                    (rc, path, ctx) -&gt; {
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                        if (BKException.Code.OK == rc) {</span>
+<span class="nc" id="L231">                            FutureUtils.complete(processFuture, null);</span>
+                        } else {
+<span class="nc" id="L233">                            FutureUtils.completeExceptionally(processFuture, BKException.create(rc));</span>
+                        }
+<span class="nc" id="L235">                    }, null, BKException.Code.OK, BKException.Code.ReadException);</span>
+<span class="nc" id="L236">            FutureUtils.result(processFuture, BKException.HANDLER);</span>
+            try {
+<span class="nc" id="L238">                ledgerUnderreplicationManager.setCheckAllLedgersCTime(System.currentTimeMillis());</span>
+<span class="nc" id="L239">            } catch (ReplicationException.NonRecoverableReplicationException nre) {</span>
+<span class="nc" id="L240">                LOG.error(&quot;Non Recoverable Exception while reading from ZK&quot;, nre);</span>
+<span class="nc" id="L241">                submitShutdownTask();</span>
+<span class="nc" id="L242">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L243">                LOG.error(&quot;Got exception while trying to set checkAllLedgersCTime&quot;, ue);</span>
+<span class="nc" id="L244">            }</span>
+        } finally {
+<span class="nc" id="L246">            localAdmin.close();</span>
+<span class="nc" id="L247">            localClient.close();</span>
+        }
+<span class="nc" id="L249">    }</span>
+
+    /**
+     * Process the result returned from checking a ledger.
+     */
+    private class ProcessLostFragmentsCb implements BookkeeperInternalCallbacks.GenericCallback&lt;Set&lt;LedgerFragment&gt;&gt; {
+        final LedgerHandle lh;
+        final AsyncCallback.VoidCallback callback;
+
+<span class="nc" id="L258">        ProcessLostFragmentsCb(LedgerHandle lh, AsyncCallback.VoidCallback callback) {</span>
+<span class="nc" id="L259">            this.lh = lh;</span>
+<span class="nc" id="L260">            this.callback = callback;</span>
+<span class="nc" id="L261">        }</span>
+
+        @Override
+        public void operationComplete(int rc, Set&lt;LedgerFragment&gt; fragments) {
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            if (rc == BKException.Code.OK) {</span>
+<span class="nc" id="L266">                Set&lt;BookieId&gt; bookies = Sets.newHashSet();</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                for (LedgerFragment f : fragments) {</span>
+<span class="nc" id="L268">                    bookies.addAll(f.getAddresses());</span>
+<span class="nc" id="L269">                }</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                if (bookies.isEmpty()) {</span>
+                    // no missing fragments
+<span class="nc" id="L272">                    callback.processResult(BKException.Code.OK, null, null);</span>
+                } else {
+<span class="nc" id="L274">                    publishSuspectedLedgersAsync(bookies.stream().map(BookieId::toString).collect(Collectors.toList()),</span>
+<span class="nc" id="L275">                            Sets.newHashSet(lh.getId())</span>
+<span class="nc" id="L276">                    ).whenComplete((result, cause) -&gt; {</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                        if (null != cause) {</span>
+<span class="nc" id="L278">                            LOG.error(&quot;Auditor exception publishing suspected ledger {} with lost bookies {}&quot;,</span>
+<span class="nc" id="L279">                                    lh.getId(), bookies, cause);</span>
+<span class="nc" id="L280">                            callback.processResult(BKException.Code.ReplicationException, null, null);</span>
+                        } else {
+<span class="nc" id="L282">                            callback.processResult(BKException.Code.OK, null, null);</span>
+                        }
+<span class="nc" id="L284">                    });</span>
+                }
+<span class="nc" id="L286">            } else {</span>
+<span class="nc" id="L287">                callback.processResult(rc, null, null);</span>
+            }
+<span class="nc" id="L289">            lh.closeAsync().whenComplete((result, cause) -&gt; {</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">                if (null != cause) {</span>
+<span class="nc" id="L291">                    LOG.warn(&quot;Error closing ledger {} : {}&quot;, lh.getId(), cause.getMessage());</span>
+                }
+<span class="nc" id="L293">            });</span>
+<span class="nc" id="L294">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AutoRecoveryStatusService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">AutoRecoveryStatusService.java</span></div><h1>AutoRecoveryStatusService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.util.Collections;
+import java.util.Map;
+import org.apache.bookkeeper.common.util.JsonUtil;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
+import org.apache.bookkeeper.meta.MetadataDrivers;
+import org.apache.commons.lang3.ObjectUtils;
+
+/**
+ * HttpEndpointService that handles Autorecovery status related http requests.
+ *
+ * &lt;p&gt;&lt;/p&gt;The GET method returns the current status of Autorecovery. The output would be like {&quot;enabled&quot; : true}.
+ *
+ * &lt;p&gt;The PUT method requires a parameter 'enabled', and enables Autorecovery if its value is 'true',
+ * and disables Autorecovery otherwise. The behaviour is idempotent if Autorecovery status is already
+ * the same as desired. The output would be the current status after the action.
+ *
+ */
+@SuppressFBWarnings(&quot;RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE&quot;)
+public class AutoRecoveryStatusService implements HttpEndpointService {
+    protected final ServerConfiguration conf;
+
+<span class="nc" id="L50">    public AutoRecoveryStatusService(ServerConfiguration conf) {</span>
+<span class="nc" id="L51">        this.conf = conf;</span>
+<span class="nc" id="L52">    }</span>
+
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L56">        return MetadataDrivers.runFunctionWithLedgerManagerFactory(conf,</span>
+                ledgerManagerFactory -&gt; {
+<span class="nc" id="L58">                    try (LedgerUnderreplicationManager ledgerUnderreplicationManager = ledgerManagerFactory</span>
+<span class="nc" id="L59">                            .newLedgerUnderreplicationManager()) {</span>
+<span class="nc bnc" id="L60" title="All 3 branches missed.">                        switch (request.getMethod()) {</span>
+                            case GET:
+<span class="nc" id="L62">                                return handleGetStatus(ledgerUnderreplicationManager);</span>
+                            case PUT:
+<span class="nc" id="L64">                                return handlePutStatus(request, ledgerUnderreplicationManager);</span>
+                            default:
+<span class="nc" id="L66">                                return new HttpServiceResponse(&quot;Not found method. Should be GET or PUT method&quot;,</span>
+                                        HttpServer.StatusCode.NOT_FOUND);
+                        }
+<span class="nc bnc" id="L69" title="All 4 branches missed.">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L70">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L71">                        throw new UncheckedExecutionException(e);</span>
+<span class="nc" id="L72">                    } catch (Exception e) {</span>
+<span class="nc" id="L73">                        throw new UncheckedExecutionException(e);</span>
+                    }
+                });
+    }
+
+    private HttpServiceResponse handleGetStatus(LedgerUnderreplicationManager ledgerUnderreplicationManager)
+            throws Exception {
+<span class="nc" id="L80">        String body = JsonUtil.toJson(ImmutableMap.of(&quot;enabled&quot;,</span>
+<span class="nc" id="L81">                ledgerUnderreplicationManager.isLedgerReplicationEnabled()));</span>
+<span class="nc" id="L82">        return new HttpServiceResponse(body, HttpServer.StatusCode.OK);</span>
+    }
+
+    private HttpServiceResponse handlePutStatus(HttpServiceRequest request,
+                                                LedgerUnderreplicationManager ledgerUnderreplicationManager)
+            throws Exception {
+<span class="nc" id="L88">        Map&lt;String, String&gt; params = ObjectUtils.defaultIfNull(request.getParams(), Collections.emptyMap());</span>
+<span class="nc" id="L89">        String enabled = params.get(&quot;enabled&quot;);</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (enabled == null) {</span>
+<span class="nc" id="L91">            return new HttpServiceResponse(&quot;Param 'enabled' not found in &quot; + params,</span>
+                    HttpServer.StatusCode.BAD_REQUEST);
+        }
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (Boolean.parseBoolean(enabled)) {</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L96">                ledgerUnderreplicationManager.enableLedgerReplication();</span>
+            }
+        } else {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L100">                ledgerUnderreplicationManager.disableLedgerReplication();</span>
+            }
+        }
+
+        // use the current status as the response
+<span class="nc" id="L105">        String body = JsonUtil.toJson(ImmutableMap.of(&quot;enabled&quot;,</span>
+<span class="nc" id="L106">                ledgerUnderreplicationManager.isLedgerReplicationEnabled()));</span>
+<span class="nc" id="L107">        return new HttpServiceResponse(body, HttpServer.StatusCode.OK);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

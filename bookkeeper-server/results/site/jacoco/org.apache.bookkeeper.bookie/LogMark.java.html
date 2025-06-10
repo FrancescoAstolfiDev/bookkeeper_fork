@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LogMark.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">LogMark.java</span></div><h1>LogMark.java</h1><pre class="source lang-java linenums">/**
+ * Copyright The Apache Software Foundation
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie;
+
+import java.nio.ByteBuffer;
+
+/**
+ * Journal stream position.
+ */
+public class LogMark {
+    long logFileId;
+    long logFileOffset;
+
+<span class="nc" id="L31">    public static final LogMark MAX_VALUE = new LogMark(Long.MAX_VALUE, Long.MAX_VALUE);</span>
+
+<span class="nc" id="L33">    public LogMark() {</span>
+<span class="nc" id="L34">        setLogMark(0, 0);</span>
+<span class="nc" id="L35">    }</span>
+
+<span class="nc" id="L37">    public LogMark(LogMark other) {</span>
+<span class="nc" id="L38">        setLogMark(other.getLogFileId(), other.getLogFileOffset());</span>
+<span class="nc" id="L39">    }</span>
+
+<span class="nc" id="L41">    public LogMark(long logFileId, long logFileOffset) {</span>
+<span class="nc" id="L42">        setLogMark(logFileId, logFileOffset);</span>
+<span class="nc" id="L43">    }</span>
+
+    public synchronized long getLogFileId() {
+<span class="nc" id="L46">        return logFileId;</span>
+    }
+
+    public synchronized long getLogFileOffset() {
+<span class="nc" id="L50">        return logFileOffset;</span>
+    }
+
+    public synchronized void readLogMark(ByteBuffer bb) {
+<span class="nc" id="L54">        logFileId = bb.getLong();</span>
+<span class="nc" id="L55">        logFileOffset = bb.getLong();</span>
+<span class="nc" id="L56">    }</span>
+
+    public synchronized void writeLogMark(ByteBuffer bb) {
+<span class="nc" id="L59">        bb.putLong(logFileId);</span>
+<span class="nc" id="L60">        bb.putLong(logFileOffset);</span>
+<span class="nc" id="L61">    }</span>
+
+    public synchronized void setLogMark(long logFileId, long logFileOffset) {
+<span class="nc" id="L64">        this.logFileId = logFileId;</span>
+<span class="nc" id="L65">        this.logFileOffset = logFileOffset;</span>
+<span class="nc" id="L66">    }</span>
+
+    public synchronized int compare(LogMark other) {
+<span class="nc" id="L69">        long ret = this.logFileId - other.getLogFileId();</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        if (ret == 0) {</span>
+<span class="nc" id="L71">            ret = this.logFileOffset - other.getLogFileOffset();</span>
+        }
+<span class="nc bnc" id="L73" title="All 4 branches missed.">        return (ret &lt; 0) ? -1 : ((ret &gt; 0) ? 1 : 0);</span>
+    }
+
+    @Override
+    public synchronized String toString() {
+<span class="nc" id="L78">        StringBuilder sb = new StringBuilder();</span>
+
+<span class="nc" id="L80">        sb.append(&quot;LogMark: logFileId - &quot;).append(logFileId)</span>
+<span class="nc" id="L81">                .append(&quot; , logFileOffset - &quot;).append(logFileOffset);</span>
+
+<span class="nc" id="L83">        return sb.toString();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

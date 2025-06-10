@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalConsistencyCheckCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookie</a> &gt; <span class="el_source">LocalConsistencyCheckCommand.java</span></div><h1>LocalConsistencyCheckCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.bookie;
+
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import java.io.IOException;
+import java.util.List;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.LedgerStorage;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to check local storage for inconsistencies.
+ */
+public class LocalConsistencyCheckCommand extends BookieCommand&lt;CliFlags&gt; {
+
+<span class="nc" id="L38">    static final Logger LOG = LoggerFactory.getLogger(LocalConsistencyCheckCommand.class);</span>
+
+    private static final String NAME = &quot;localconsistencycheck&quot;;
+    private static final String DESC = &quot;Validate Ledger Storage internal metadata&quot;;
+
+    public LocalConsistencyCheckCommand() {
+<span class="nc" id="L44">        super(CliSpec.newBuilder()</span>
+<span class="nc" id="L45">                     .withName(NAME)</span>
+<span class="nc" id="L46">                     .withDescription(DESC)</span>
+<span class="nc" id="L47">                     .withFlags(new CliFlags())</span>
+<span class="nc" id="L48">                     .build());</span>
+<span class="nc" id="L49">    }</span>
+
+    @Override
+    public boolean apply(ServerConfiguration conf, CliFlags cmdFlags) {
+        try {
+<span class="nc" id="L54">            return check(conf);</span>
+<span class="nc" id="L55">        } catch (IOException e) {</span>
+<span class="nc" id="L56">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    private boolean check(ServerConfiguration conf) throws IOException {
+<span class="nc" id="L61">        LOG.info(&quot;=== Performing local consistency check ===&quot;);</span>
+<span class="nc" id="L62">        ServerConfiguration serverConfiguration = new ServerConfiguration(conf);</span>
+<span class="nc" id="L63">        LedgerStorage ledgerStorage = BookieImpl.mountLedgerStorageOffline(serverConfiguration, null);</span>
+<span class="nc" id="L64">        List&lt;LedgerStorage.DetectedInconsistency&gt; errors = ledgerStorage.localConsistencyCheck(</span>
+<span class="nc" id="L65">            java.util.Optional.empty());</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (errors.size() &gt; 0) {</span>
+<span class="nc" id="L67">            LOG.info(&quot;=== Check returned errors: ===&quot;);</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            for (LedgerStorage.DetectedInconsistency error : errors) {</span>
+<span class="nc" id="L69">                LOG.error(&quot;Ledger {}, entry {}: &quot;, error.getLedgerId(), error.getEntryId(), error.getException());</span>
+<span class="nc" id="L70">            }</span>
+<span class="nc" id="L71">            return false;</span>
+        } else {
+<span class="nc" id="L73">            LOG.info(&quot;=== Check passed ===&quot;);</span>
+<span class="nc" id="L74">            return true;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,2389 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerHandle.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">LedgerHandle.java</span></div><h1>LedgerHandle.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import static com.google.common.base.Preconditions.checkState;
+import static org.apache.bookkeeper.client.api.BKException.Code.ClientClosedException;
+import static org.apache.bookkeeper.client.api.BKException.Code.WriteException;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
+import com.google.common.collect.Iterators;
+import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.RateLimiter;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import java.security.GeneralSecurityException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import org.apache.bookkeeper.client.AsyncCallback.AddCallback;
+import org.apache.bookkeeper.client.AsyncCallback.AddCallbackWithLatency;
+import org.apache.bookkeeper.client.AsyncCallback.CloseCallback;
+import org.apache.bookkeeper.client.AsyncCallback.ReadCallback;
+import org.apache.bookkeeper.client.AsyncCallback.ReadLastConfirmedCallback;
+import org.apache.bookkeeper.client.BKException.BKIncorrectParameterException;
+import org.apache.bookkeeper.client.BKException.BKReadException;
+import org.apache.bookkeeper.client.DistributionSchedule.WriteSet;
+import org.apache.bookkeeper.client.SyncCallbackUtils.FutureReadLastConfirmed;
+import org.apache.bookkeeper.client.SyncCallbackUtils.FutureReadLastConfirmedAndEntry;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncAddCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncCloseCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncReadCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncReadLastConfirmedCallback;
+import org.apache.bookkeeper.client.api.BKException.Code;
+import org.apache.bookkeeper.client.api.LastConfirmedAndEntry;
+import org.apache.bookkeeper.client.api.LedgerEntries;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.client.api.WriteFlag;
+import org.apache.bookkeeper.client.api.WriteHandle;
+import org.apache.bookkeeper.client.impl.LedgerEntryImpl;
+import org.apache.bookkeeper.common.concurrent.FutureEventListener;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookieProtocol;
+import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.commons.collections4.IteratorUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Ledger handle contains ledger metadata and is used to access the read and
+ * write operations to a ledger.
+ */
+public class LedgerHandle implements WriteHandle {
+<span class="nc" id="L96">    static final Logger LOG = LoggerFactory.getLogger(LedgerHandle.class);</span>
+
+    private static final int STICKY_READ_BOOKIE_INDEX_UNSET = -1;
+
+    final ClientContext clientCtx;
+
+    final byte[] ledgerKey;
+    private Versioned&lt;LedgerMetadata&gt; versionedMetadata;
+    final long ledgerId;
+    final ExecutorService executor;
+    long lastAddPushed;
+    boolean notSupportBatch;
+
+<span class="nc" id="L109">    private enum HandleState {</span>
+<span class="nc" id="L110">        OPEN,</span>
+<span class="nc" id="L111">        CLOSED</span>
+    }
+
+<span class="nc" id="L114">    private HandleState handleState = HandleState.OPEN;</span>
+<span class="nc" id="L115">    private final CompletableFuture&lt;Void&gt; closePromise = new CompletableFuture&lt;&gt;();</span>
+
+    /**
+      * Last entryId which has been confirmed to be written durably to the bookies.
+      * This value is used by readers, the LAC protocol
+      */
+    volatile long lastAddConfirmed;
+
+     /**
+      * Next entryId which is expected to move forward during {@link #sendAddSuccessCallbacks() }. This is important
+      * in order to have an ordered sequence of addEntry acknowledged to the writer
+      */
+    volatile long pendingAddsSequenceHead;
+
+    /**
+     * If bookie sticky reads are enabled, this will contain the index of the bookie
+     * selected as &quot;sticky&quot; for this ledger. The bookie is chosen at random when the
+     * LedgerHandle is created.
+     *
+     * &lt;p&gt;In case of failures, the bookie index will be updated (to the next bookie in
+     * the ensemble) to avoid continuing to attempt to read from a failed bookie.
+     *
+     * &lt;p&gt;If the index is -1, it means the sticky reads are disabled.
+     */
+    private int stickyBookieIndex;
+
+    final AtomicLong length;
+    final DigestManager macManager;
+    final DistributionSchedule distributionSchedule;
+    final RateLimiter throttler;
+    final LoadingCache&lt;BookieId, Long&gt; bookieFailureHistory;
+    final BookiesHealthInfo bookiesHealthInfo;
+    final EnumSet&lt;WriteFlag&gt; writeFlags;
+
+<span class="nc" id="L149">    ScheduledFuture&lt;?&gt; timeoutFuture = null;</span>
+
+<span class="nc" id="L151">    @VisibleForTesting</span>
+    final Map&lt;Integer, BookieId&gt; delayedWriteFailedBookies =
+        new HashMap&lt;Integer, BookieId&gt;();
+
+    /**
+     * Invalid entry id. This value is returned from methods which
+     * should return an entry id but there is no valid entry available.
+     */
+    public static final long INVALID_ENTRY_ID = BookieProtocol.INVALID_ENTRY_ID;
+
+    /**
+     * Invalid ledger id. Ledger IDs must be greater than or equal to 0.
+     * Large negative used to make it easy to spot in logs if erroneously used.
+     */
+    public static final long INVALID_LEDGER_ID = -0xABCDABCDL;
+
+<span class="nc" id="L167">    final Object metadataLock = new Object();</span>
+<span class="nc" id="L168">    boolean changingEnsemble = false;</span>
+<span class="nc" id="L169">    final AtomicInteger numEnsembleChanges = new AtomicInteger(0);</span>
+    Queue&lt;PendingAddOp&gt; pendingAddOps;
+    ExplicitLacFlushPolicy explicitLacFlushPolicy;
+
+    final Counter ensembleChangeCounter;
+    final Counter lacUpdateHitsCounter;
+    final Counter lacUpdateMissesCounter;
+    private final OpStatsLogger clientChannelWriteWaitStats;
+
+    LedgerHandle(ClientContext clientCtx,
+                 long ledgerId, Versioned&lt;LedgerMetadata&gt; versionedMetadata,
+                 BookKeeper.DigestType digestType, byte[] password,
+                 EnumSet&lt;WriteFlag&gt; writeFlags)
+<span class="nc" id="L182">            throws GeneralSecurityException, NumberFormatException {</span>
+<span class="nc" id="L183">        this.clientCtx = clientCtx;</span>
+
+<span class="nc" id="L185">        this.versionedMetadata = versionedMetadata;</span>
+<span class="nc" id="L186">        this.pendingAddOps = new ConcurrentLinkedQueue&lt;PendingAddOp&gt;();</span>
+<span class="nc" id="L187">        this.writeFlags = writeFlags;</span>
+
+<span class="nc" id="L189">        LedgerMetadata metadata = versionedMetadata.getValue();</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (metadata.isClosed()) {</span>
+<span class="nc" id="L191">            lastAddConfirmed = lastAddPushed = metadata.getLastEntryId();</span>
+<span class="nc" id="L192">            length = new AtomicLong(metadata.getLength());</span>
+        } else {
+<span class="nc" id="L194">            lastAddConfirmed = lastAddPushed = INVALID_ENTRY_ID;</span>
+<span class="nc" id="L195">            length = new AtomicLong();</span>
+        }
+
+<span class="nc" id="L198">        this.pendingAddsSequenceHead = lastAddConfirmed;</span>
+
+<span class="nc" id="L200">        this.ledgerId = ledgerId;</span>
+<span class="nc" id="L201">        this.executor = clientCtx.getMainWorkerPool().chooseThread(ledgerId);</span>
+
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (clientCtx.getConf().enableStickyReads</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                &amp;&amp; getLedgerMetadata().getEnsembleSize() == getLedgerMetadata().getWriteQuorumSize()) {</span>
+<span class="nc" id="L205">            stickyBookieIndex = clientCtx.getPlacementPolicy().getStickyReadBookieIndex(metadata, Optional.empty());</span>
+        } else {
+<span class="nc" id="L207">            stickyBookieIndex = STICKY_READ_BOOKIE_INDEX_UNSET;</span>
+        }
+
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        if (clientCtx.getConf().throttleValue &gt; 0) {</span>
+<span class="nc" id="L211">            this.throttler = RateLimiter.create(clientCtx.getConf().throttleValue);</span>
+        } else {
+<span class="nc" id="L213">            this.throttler = null;</span>
+        }
+
+<span class="nc" id="L216">        macManager = DigestManager.instantiate(ledgerId, password, BookKeeper.DigestType.toProtoDigestType(digestType),</span>
+<span class="nc" id="L217">                                               clientCtx.getByteBufAllocator(), clientCtx.getConf().useV2WireProtocol);</span>
+
+        // If the password is empty, pass the same random ledger key which is generated by the hash of the empty
+        // password, so that the bookie can avoid processing the keys for each entry
+<span class="nc" id="L221">        this.ledgerKey = DigestManager.generateMasterKey(password);</span>
+<span class="nc" id="L222">        distributionSchedule = new RoundRobinDistributionSchedule(</span>
+<span class="nc" id="L223">                metadata.getWriteQuorumSize(),</span>
+<span class="nc" id="L224">                metadata.getAckQuorumSize(),</span>
+<span class="nc" id="L225">                metadata.getEnsembleSize());</span>
+<span class="nc" id="L226">        this.bookieFailureHistory = CacheBuilder.newBuilder()</span>
+<span class="nc" id="L227">            .expireAfterWrite(clientCtx.getConf().bookieFailureHistoryExpirationMSec, TimeUnit.MILLISECONDS)</span>
+<span class="nc" id="L228">            .build(new CacheLoader&lt;BookieId, Long&gt;() {</span>
+            @Override
+            public Long load(BookieId key) {
+<span class="nc" id="L231">                return -1L;</span>
+            }
+        });
+<span class="nc" id="L234">        this.bookiesHealthInfo = new BookiesHealthInfo() {</span>
+            @Override
+            public long getBookieFailureHistory(BookieId bookieSocketAddress) {
+<span class="nc" id="L237">                Long lastFailure = bookieFailureHistory.getIfPresent(bookieSocketAddress);</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                return lastFailure == null ? -1L : lastFailure;</span>
+            }
+
+            @Override
+            public long getBookiePendingRequests(BookieId bookieSocketAddress) {
+<span class="nc" id="L243">                return clientCtx.getBookieClient().getNumPendingRequests(bookieSocketAddress, ledgerId);</span>
+            }
+        };
+
+<span class="nc" id="L247">        ensembleChangeCounter = clientCtx.getClientStats().getEnsembleChangeCounter();</span>
+<span class="nc" id="L248">        lacUpdateHitsCounter = clientCtx.getClientStats().getLacUpdateHitsCounter();</span>
+<span class="nc" id="L249">        lacUpdateMissesCounter = clientCtx.getClientStats().getLacUpdateMissesCounter();</span>
+<span class="nc" id="L250">        clientChannelWriteWaitStats = clientCtx.getClientStats().getClientChannelWriteWaitLogger();</span>
+
+<span class="nc" id="L252">        clientCtx.getClientStats().registerPendingAddsGauge(new Gauge&lt;Integer&gt;() {</span>
+                @Override
+                public Integer getDefaultValue() {
+<span class="nc" id="L255">                    return 0;</span>
+                }
+                @Override
+                public Integer getSample() {
+<span class="nc" id="L259">                    return pendingAddOps.size();</span>
+                }
+            });
+
+<span class="nc" id="L263">        initializeWriteHandleState();</span>
+<span class="nc" id="L264">    }</span>
+
+    /**
+     * Notify the LedgerHandle that a read operation was failed on a particular bookie.
+     */
+    void recordReadErrorOnBookie(int bookieIndex) {
+        // If sticky bookie reads are enabled, switch the sticky bookie to the
+        // next bookie in the ensemble so that we avoid to keep reading from the
+        // same failed bookie
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        if (stickyBookieIndex != STICKY_READ_BOOKIE_INDEX_UNSET) {</span>
+            // This will be idempotent when we have multiple read errors on the
+            // same bookie. The net result is that we just go to the next bookie
+<span class="nc" id="L276">            stickyBookieIndex = clientCtx.getPlacementPolicy().getStickyReadBookieIndex(getLedgerMetadata(),</span>
+<span class="nc" id="L277">                    Optional.of(bookieIndex));</span>
+        }
+<span class="nc" id="L279">    }</span>
+
+    protected void initializeWriteHandleState() {
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        if (clientCtx.getConf().explicitLacInterval &gt; 0) {</span>
+<span class="nc" id="L283">            explicitLacFlushPolicy = new ExplicitLacFlushPolicy.ExplicitLacFlushPolicyImpl(</span>
+                    this, clientCtx);
+        } else {
+<span class="nc" id="L286">            explicitLacFlushPolicy = ExplicitLacFlushPolicy.VOID_EXPLICITLAC_FLUSH_POLICY;</span>
+        }
+
+<span class="nc bnc" id="L289" title="All 2 branches missed.">        if (clientCtx.getConf().addEntryQuorumTimeoutNanos &gt; 0) {</span>
+<span class="nc" id="L290">            this.timeoutFuture = clientCtx.getScheduler().scheduleAtFixedRate(</span>
+<span class="nc" id="L291">                    () -&gt; monitorPendingAddOps(),</span>
+<span class="nc" id="L292">                    clientCtx.getConf().timeoutMonitorIntervalSec,</span>
+<span class="nc" id="L293">                    clientCtx.getConf().timeoutMonitorIntervalSec,</span>
+                    TimeUnit.SECONDS);
+        }
+<span class="nc" id="L296">    }</span>
+
+    private void tearDownWriteHandleState() {
+<span class="nc" id="L299">        explicitLacFlushPolicy.stopExplicitLacFlush();</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (timeoutFuture != null) {</span>
+<span class="nc" id="L301">            timeoutFuture.cancel(false);</span>
+        }
+<span class="nc" id="L303">    }</span>
+
+    /**
+     * Get the id of the current ledger.
+     *
+     * @return the id of the ledger
+     */
+    @Override
+    public long getId() {
+<span class="nc" id="L312">        return ledgerId;</span>
+    }
+
+    @VisibleForTesting
+    public EnumSet&lt;WriteFlag&gt; getWriteFlags() {
+<span class="nc" id="L317">        return writeFlags;</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public synchronized long getLastAddConfirmed() {
+<span class="nc" id="L325">        return lastAddConfirmed;</span>
+    }
+
+    synchronized void setLastAddConfirmed(long lac) {
+<span class="nc" id="L329">        this.lastAddConfirmed = lac;</span>
+<span class="nc" id="L330">    }</span>
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public synchronized long getLastAddPushed() {
+<span class="nc" id="L337">        return lastAddPushed;</span>
+    }
+
+    /**
+     * Get the Ledger's key/password.
+     *
+     * @return byte array for the ledger's key/password.
+     */
+    public byte[] getLedgerKey() {
+<span class="nc" id="L346">        return Arrays.copyOf(ledgerKey, ledgerKey.length);</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public LedgerMetadata getLedgerMetadata() {
+<span class="nc" id="L354">        return versionedMetadata.getValue();</span>
+    }
+
+    Versioned&lt;LedgerMetadata&gt; getVersionedLedgerMetadata() {
+<span class="nc" id="L358">        return versionedMetadata;</span>
+    }
+
+    boolean setLedgerMetadata(Versioned&lt;LedgerMetadata&gt; expected, Versioned&lt;LedgerMetadata&gt; newMetadata) {
+<span class="nc" id="L362">        synchronized (this) {</span>
+            // ensure that we only update the metadata if it is the object we expect it to be
+<span class="nc bnc" id="L364" title="All 2 branches missed.">            if (versionedMetadata == expected) {</span>
+<span class="nc" id="L365">                versionedMetadata = newMetadata;</span>
+<span class="nc" id="L366">                LedgerMetadata metadata = versionedMetadata.getValue();</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                if (metadata.isClosed()) {</span>
+<span class="nc" id="L368">                    lastAddConfirmed = lastAddPushed = metadata.getLastEntryId();</span>
+<span class="nc" id="L369">                    length.set(metadata.getLength());</span>
+                }
+<span class="nc" id="L371">                return true;</span>
+            } else {
+<span class="nc" id="L373">                return false;</span>
+            }
+        }
+    }
+
+    /**
+     * Get this ledger's customMetadata map.
+     *
+     * @return map containing user provided customMetadata.
+     */
+    public Map&lt;String, byte[]&gt; getCustomMetadata() {
+<span class="nc" id="L384">        return getLedgerMetadata().getCustomMetadata();</span>
+    }
+
+    /**
+     * Get the number of fragments that makeup this ledger.
+     *
+     * @return the count of fragments
+     */
+    public synchronized long getNumFragments() {
+<span class="nc" id="L393">        return getLedgerMetadata().getAllEnsembles().size();</span>
+    }
+
+    /**
+     * Get the count of unique bookies that own part of this ledger
+     * by going over all the fragments of the ledger.
+     *
+     * @return count of unique bookies
+     */
+    public synchronized long getNumBookies() {
+<span class="nc" id="L403">        Map&lt;Long, ? extends List&lt;BookieId&gt;&gt; m = getLedgerMetadata().getAllEnsembles();</span>
+<span class="nc" id="L404">        Set&lt;BookieId&gt; s = Sets.newHashSet();</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">        for (List&lt;BookieId&gt; aList : m.values()) {</span>
+<span class="nc" id="L406">            s.addAll(aList);</span>
+<span class="nc" id="L407">        }</span>
+<span class="nc" id="L408">        return s.size();</span>
+    }
+
+    /**
+     * Get the DigestManager.
+     *
+     * @return DigestManager for the LedgerHandle
+     */
+    DigestManager getDigestManager() {
+<span class="nc" id="L417">        return macManager;</span>
+    }
+
+    /**
+     *  Add to the length of the ledger in bytes.
+     *
+     * @param delta
+     * @return the length of the ledger after the addition
+     */
+    long addToLength(long delta) {
+<span class="nc" id="L427">        return length.addAndGet(delta);</span>
+    }
+
+    /**
+     * Returns the length of the ledger in bytes.
+     *
+     * @return the length of the ledger in bytes
+     */
+    @Override
+    public long getLength() {
+<span class="nc" id="L437">        return this.length.get();</span>
+    }
+
+    /**
+     * Returns the ledger creation time.
+     *
+     * @return the ledger creation time
+     */
+    public long getCtime() {
+<span class="nc" id="L446">        return getLedgerMetadata().getCtime();</span>
+    }
+
+    /**
+     * Get the Distribution Schedule.
+     *
+     * @return DistributionSchedule for the LedgerHandle
+     */
+    DistributionSchedule getDistributionSchedule() {
+<span class="nc" id="L455">        return distributionSchedule;</span>
+    }
+
+    /**
+     * Get the health info for bookies for this ledger.
+     *
+     * @return BookiesHealthInfo for every bookie in the write set.
+     */
+    BookiesHealthInfo getBookiesHealthInfo() {
+<span class="nc" id="L464">        return bookiesHealthInfo;</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close()
+            throws InterruptedException, BKException {
+<span class="nc" id="L473">        SyncCallbackUtils.waitForResult(closeAsync());</span>
+<span class="nc" id="L474">    }</span>
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CompletableFuture&lt;Void&gt; closeAsync() {
+<span class="nc" id="L481">        CompletableFuture&lt;Void&gt; result = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L482">        SyncCloseCallback callback = new SyncCloseCallback(result);</span>
+<span class="nc" id="L483">        asyncClose(callback, null);</span>
+<span class="nc" id="L484">        return result;</span>
+    }
+
+    /**
+     * Asynchronous close, any adds in flight will return errors.
+     *
+     * &lt;p&gt;Closing a ledger will ensure that all clients agree on what the last entry
+     * of the ledger is. This ensures that, once the ledger has been closed, all
+     * reads from the ledger will return the same set of entries.
+     *
+     * @param cb
+     *          callback implementation
+     * @param ctx
+     *          control object
+     */
+    public void asyncClose(CloseCallback cb, Object ctx) {
+<span class="nc" id="L500">        asyncCloseInternal(cb, ctx, BKException.Code.LedgerClosedException);</span>
+<span class="nc" id="L501">    }</span>
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public synchronized boolean isClosed() {
+<span class="nc" id="L508">        return getLedgerMetadata().isClosed();</span>
+    }
+
+    boolean isHandleWritable() {
+<span class="nc bnc" id="L512" title="All 4 branches missed.">        return !getLedgerMetadata().isClosed() &amp;&amp; handleState == HandleState.OPEN;</span>
+    }
+
+    void asyncCloseInternal(final CloseCallback cb, final Object ctx, final int rc) {
+        try {
+<span class="nc" id="L517">            doAsyncCloseInternal(cb, ctx, rc);</span>
+<span class="nc" id="L518">        } catch (RejectedExecutionException re) {</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L520">                LOG.debug(&quot;Failed to close ledger {} : &quot;, ledgerId, re);</span>
+            }
+<span class="nc" id="L522">            errorOutPendingAdds(BookKeeper.getReturnRc(clientCtx.getBookieClient(), rc));</span>
+<span class="nc" id="L523">            cb.closeComplete(BookKeeper.getReturnRc(clientCtx.getBookieClient(), BKException.Code.InterruptedException),</span>
+                             this, ctx);
+<span class="nc" id="L525">        }</span>
+<span class="nc" id="L526">    }</span>
+
+    /**
+     * Same as public version of asyncClose except that this one takes an
+     * additional parameter which is the return code to hand to all the pending
+     * add ops.
+     *
+     * @param cb
+     * @param ctx
+     * @param rc
+     */
+    void doAsyncCloseInternal(final CloseCallback cb, final Object ctx, final int rc) {
+<span class="nc" id="L538">        executeOrdered(() -&gt; {</span>
+                    final HandleState prevHandleState;
+                    final List&lt;PendingAddOp&gt; pendingAdds;
+                    final long lastEntry;
+                    final long finalLength;
+
+<span class="nc" id="L544">                    closePromise.whenComplete((ignore, ex) -&gt; {</span>
+<span class="nc bnc" id="L545" title="All 2 branches missed.">                        if (ex != null) {</span>
+<span class="nc" id="L546">                            cb.closeComplete(</span>
+<span class="nc" id="L547">                                    BKException.getExceptionCode(ex, BKException.Code.UnexpectedConditionException),</span>
+                                    LedgerHandle.this, ctx);
+                        } else {
+<span class="nc" id="L550">                            cb.closeComplete(BKException.Code.OK, LedgerHandle.this, ctx);</span>
+                        }
+<span class="nc" id="L552">                    });</span>
+
+<span class="nc" id="L554">                    synchronized (LedgerHandle.this) {</span>
+<span class="nc" id="L555">                        prevHandleState = handleState;</span>
+
+                        // drain pending adds first
+<span class="nc" id="L558">                        pendingAdds = drainPendingAddsAndAdjustLength();</span>
+
+                        // taking the length must occur after draining, as draining changes the length
+<span class="nc" id="L561">                        lastEntry = lastAddPushed = LedgerHandle.this.lastAddConfirmed;</span>
+<span class="nc" id="L562">                        finalLength = LedgerHandle.this.length.get();</span>
+<span class="nc" id="L563">                        handleState = HandleState.CLOSED;</span>
+<span class="nc" id="L564">                    }</span>
+
+                    // error out all pending adds during closing, the callbacks shouldn't be
+                    // running under any bk locks.
+                    try {
+<span class="nc" id="L569">                        errorOutPendingAdds(rc, pendingAdds);</span>
+<span class="nc" id="L570">                    } catch (Throwable e) {</span>
+<span class="nc" id="L571">                        closePromise.completeExceptionally(e);</span>
+<span class="nc" id="L572">                        return;</span>
+<span class="nc" id="L573">                    }</span>
+
+<span class="nc bnc" id="L575" title="All 2 branches missed.">                    if (prevHandleState != HandleState.CLOSED) {</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L577">                            LOG.debug(&quot;Closing ledger: {} at entryId {} with {} bytes&quot;, getId(), lastEntry,</span>
+<span class="nc" id="L578">                                    finalLength);</span>
+                        }
+
+<span class="nc" id="L581">                        tearDownWriteHandleState();</span>
+<span class="nc" id="L582">                        new MetadataUpdateLoop(</span>
+<span class="nc" id="L583">                                clientCtx.getLedgerManager(), getId(),</span>
+                                LedgerHandle.this::getVersionedLedgerMetadata,
+                                (metadata) -&gt; {
+<span class="nc bnc" id="L586" title="All 2 branches missed.">                                    if (metadata.isClosed()) {</span>
+                                        /* If the ledger has been closed with the same lastEntry
+                                         * and length that we planned to close with, we have nothing to do,
+                                         * so just return success */
+<span class="nc bnc" id="L590" title="All 2 branches missed.">                                        if (lastEntry == metadata.getLastEntryId()</span>
+<span class="nc bnc" id="L591" title="All 2 branches missed.">                                                &amp;&amp; finalLength == metadata.getLength()) {</span>
+<span class="nc" id="L592">                                            return false;</span>
+                                        } else {
+<span class="nc" id="L594">                                            LOG.error(&quot;Metadata conflict when closing ledger {}.&quot;</span>
+                                                            + &quot; Another client may have recovered the ledger while &quot;
+                                                            + &quot;there&quot;
+                                                            + &quot; were writes outstanding. (local lastEntry:{} &quot;
+                                                            + &quot;length:{}) &quot;
+                                                            + &quot; (metadata lastEntry:{} length:{})&quot;,
+<span class="nc" id="L600">                                                    getId(), lastEntry, finalLength,</span>
+<span class="nc" id="L601">                                                    metadata.getLastEntryId(), metadata.getLength());</span>
+<span class="nc" id="L602">                                            throw new BKException.BKMetadataVersionException();</span>
+                                        }
+                                    } else {
+<span class="nc" id="L605">                                        return true;</span>
+                                    }
+                                },
+                                (metadata) -&gt; {
+<span class="nc" id="L609">                                    return LedgerMetadataBuilder.from(metadata)</span>
+<span class="nc" id="L610">                                            .withClosedState().withLastEntryId(lastEntry)</span>
+<span class="nc" id="L611">                                            .withLength(finalLength).build();</span>
+                                },
+                                LedgerHandle.this::setLedgerMetadata)
+<span class="nc" id="L614">                                .run().whenComplete((metadata, ex) -&gt; {</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">                                    if (ex != null) {</span>
+<span class="nc" id="L616">                                        closePromise.completeExceptionally(ex);</span>
+                                    } else {
+<span class="nc" id="L618">                                        FutureUtils.complete(closePromise, null);</span>
+                                    }
+<span class="nc" id="L620">                                });</span>
+                    }
+<span class="nc" id="L622">                }</span>
+        );
+<span class="nc" id="L624">    }</span>
+
+    /**
+     * Read a sequence of entries synchronously.
+     *
+     * @param firstEntry
+     *          id of first entry of sequence (included)
+     * @param lastEntry
+     *          id of last entry of sequence (included)
+     *
+     * @see #asyncReadEntries(long, long, ReadCallback, Object)
+     */
+    public Enumeration&lt;LedgerEntry&gt; readEntries(long firstEntry, long lastEntry)
+            throws InterruptedException, BKException {
+<span class="nc" id="L638">        CompletableFuture&lt;Enumeration&lt;LedgerEntry&gt;&gt; result = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L640">        asyncReadEntries(firstEntry, lastEntry, new SyncReadCallback(result), null);</span>
+
+<span class="nc" id="L642">        return SyncCallbackUtils.waitForResult(result);</span>
+    }
+
+    /**
+     * Read a sequence of entries synchronously.
+     *
+     * @param startEntry
+     *          start entry id
+     * @param maxCount
+     *          the total entries count.
+     * @param maxSize
+     *          the total entries size.
+     * @see #asyncBatchReadEntries(long, int, long, ReadCallback, Object)
+     */
+    public Enumeration&lt;LedgerEntry&gt; batchReadEntries(long startEntry, int maxCount, long maxSize)
+            throws InterruptedException, BKException {
+<span class="nc" id="L658">        CompletableFuture&lt;Enumeration&lt;LedgerEntry&gt;&gt; result = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L660">        asyncBatchReadEntries(startEntry, maxCount, maxSize, new SyncReadCallback(result), null);</span>
+
+<span class="nc" id="L662">        return SyncCallbackUtils.waitForResult(result);</span>
+    }
+
+    /**
+     * Read a sequence of entries synchronously, allowing to read after the LastAddConfirmed range.&lt;br&gt;
+     * This is the same of
+     * {@link #asyncReadUnconfirmedEntries(long, long, ReadCallback, Object) }
+     *
+     * @param firstEntry
+     *          id of first entry of sequence (included)
+     * @param lastEntry
+     *          id of last entry of sequence (included)
+     *
+     * @see #readEntries(long, long)
+     * @see #asyncReadUnconfirmedEntries(long, long, ReadCallback, Object)
+     * @see #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)
+     */
+    public Enumeration&lt;LedgerEntry&gt; readUnconfirmedEntries(long firstEntry, long lastEntry)
+            throws InterruptedException, BKException {
+<span class="nc" id="L681">        CompletableFuture&lt;Enumeration&lt;LedgerEntry&gt;&gt; result = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L683">        asyncReadUnconfirmedEntries(firstEntry, lastEntry, new SyncReadCallback(result), null);</span>
+
+<span class="nc" id="L685">        return SyncCallbackUtils.waitForResult(result);</span>
+    }
+
+    /**
+     * Read a sequence of entries synchronously, allowing to read after the LastAddConfirmed range.&lt;br&gt;
+     * This is the same of
+     * {@link #asyncBatchReadUnconfirmedEntries(long, int, long, ReadCallback, Object) }
+     *
+     * @param firstEntry
+     *          id of first entry of sequence (included)
+     * @param maxCount
+     *          id of last entry of sequence (included)
+     * @param maxSize
+     *          the total entries size
+     */
+    public Enumeration&lt;LedgerEntry&gt; batchReadUnconfirmedEntries(long firstEntry, int maxCount, long maxSize)
+            throws InterruptedException, BKException {
+<span class="nc" id="L702">        CompletableFuture&lt;Enumeration&lt;LedgerEntry&gt;&gt; result = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L704">        asyncBatchReadUnconfirmedEntries(firstEntry, maxCount, maxSize, new SyncReadCallback(result), null);</span>
+
+<span class="nc" id="L706">        return SyncCallbackUtils.waitForResult(result);</span>
+    }
+
+    /**
+     * Read a sequence of entries asynchronously.
+     *
+     * @param firstEntry
+     *          id of first entry of sequence
+     * @param lastEntry
+     *          id of last entry of sequence
+     * @param cb
+     *          object implementing read callback interface
+     * @param ctx
+     *          control object
+     */
+    public void asyncReadEntries(long firstEntry, long lastEntry, ReadCallback cb, Object ctx) {
+        // Little sanity check
+<span class="nc bnc" id="L723" title="All 4 branches missed.">        if (firstEntry &lt; 0 || firstEntry &gt; lastEntry) {</span>
+<span class="nc" id="L724">            LOG.error(&quot;IncorrectParameterException on ledgerId:{} firstEntry:{} lastEntry:{}&quot;,</span>
+<span class="nc" id="L725">                    ledgerId, firstEntry, lastEntry);</span>
+<span class="nc" id="L726">            cb.readComplete(BKException.Code.IncorrectParameterException, this, null, ctx);</span>
+<span class="nc" id="L727">            return;</span>
+        }
+
+<span class="nc bnc" id="L730" title="All 2 branches missed.">        if (lastEntry &gt; lastAddConfirmed) {</span>
+<span class="nc" id="L731">            LOG.error(&quot;ReadEntries exception on ledgerId:{} firstEntry:{} lastEntry:{} lastAddConfirmed:{}&quot;,</span>
+<span class="nc" id="L732">                    ledgerId, firstEntry, lastEntry, lastAddConfirmed);</span>
+<span class="nc" id="L733">            cb.readComplete(BKException.Code.ReadException, this, null, ctx);</span>
+<span class="nc" id="L734">            return;</span>
+        }
+
+<span class="nc" id="L737">        asyncReadEntriesInternal(firstEntry, lastEntry, cb, ctx, false);</span>
+<span class="nc" id="L738">    }</span>
+
+    /**
+     * Read a sequence of entries in asynchronously.
+     * It send an RPC to get all entries instead of send multi RPC to get all entries.
+     *
+     * @param startEntry
+     *          id of first entry of sequence
+     * @param maxCount
+     *          the entries count
+     * @param maxSize
+     *          the total entries size
+     * @param cb
+     *          object implementing read callback interface
+     * @param ctx
+     *          control object
+     */
+    public void asyncBatchReadEntries(long startEntry, int maxCount, long maxSize, ReadCallback cb, Object ctx) {
+        // Little sanity check
+<span class="nc bnc" id="L757" title="All 4 branches missed.">        if (startEntry &lt; 0 || startEntry &gt; lastAddConfirmed) {</span>
+<span class="nc" id="L758">            LOG.error(&quot;IncorrectParameterException on ledgerId:{} startEntry:{} lastAddConfirmed:{}&quot;,</span>
+<span class="nc" id="L759">                    ledgerId, startEntry, lastAddConfirmed);</span>
+<span class="nc" id="L760">            cb.readComplete(BKException.Code.IncorrectParameterException, this, null, ctx);</span>
+<span class="nc" id="L761">            return;</span>
+        }
+<span class="nc bnc" id="L763" title="All 2 branches missed.">        if (notSupportBatchRead()) {</span>
+<span class="nc" id="L764">            long lastEntry = Math.min(startEntry + maxCount - 1, lastAddConfirmed);</span>
+<span class="nc" id="L765">            asyncReadEntriesInternal(startEntry, lastEntry, cb, ctx, false);</span>
+<span class="nc" id="L766">        } else {</span>
+<span class="nc" id="L767">            asyncBatchReadEntriesInternal(startEntry, maxCount, maxSize, new ReadCallback() {</span>
+                @Override
+                public void readComplete(int rc, LedgerHandle lh, Enumeration&lt;LedgerEntry&gt; seq, Object ctx) {
+                    //If the bookie server not support the batch read request, the bookie server will close the
+                    // connection, then get the BookieHandleNotAvailableException.
+<span class="nc bnc" id="L772" title="All 2 branches missed.">                    if (rc == Code.BookieHandleNotAvailableException) {</span>
+<span class="nc" id="L773">                        notSupportBatch = true;</span>
+<span class="nc" id="L774">                        long lastEntry = Math.min(startEntry + maxCount - 1, lastAddConfirmed);</span>
+<span class="nc" id="L775">                        asyncReadEntriesInternal(startEntry, lastEntry, cb, ctx, false);</span>
+<span class="nc" id="L776">                    } else {</span>
+<span class="nc" id="L777">                        cb.readComplete(rc, lh, seq, ctx);</span>
+                    }
+<span class="nc" id="L779">                }</span>
+            }, ctx, false);
+        }
+<span class="nc" id="L782">    }</span>
+
+    /**
+     * Read a sequence of entries asynchronously, allowing to read after the LastAddConfirmed range.
+     * &lt;br&gt;This is the same of
+     * {@link #asyncReadEntries(long, long, ReadCallback, Object) }
+     * but it lets the client read without checking the local value of LastAddConfirmed, so that it is possible to
+     * read entries for which the writer has not received the acknowledge yet. &lt;br&gt;
+     * For entries which are within the range 0..LastAddConfirmed BookKeeper guarantees that the writer has successfully
+     * received the acknowledge.&lt;br&gt;
+     * For entries outside that range it is possible that the writer never received the acknowledge
+     * and so there is the risk that the reader is seeing entries before the writer and this could result in
+     * a consistency issue in some cases.&lt;br&gt;
+     * With this method you can even read entries before the LastAddConfirmed and entries after it with one call,
+     * the expected consistency will be as described above for each subrange of ids.
+     *
+     * @param firstEntry
+     *          id of first entry of sequence
+     * @param lastEntry
+     *          id of last entry of sequence
+     * @param cb
+     *          object implementing read callback interface
+     * @param ctx
+     *          control object
+     *
+     * @see #asyncReadEntries(long, long, ReadCallback, Object)
+     * @see #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)
+     * @see #readUnconfirmedEntries(long, long)
+     */
+    public void asyncReadUnconfirmedEntries(long firstEntry, long lastEntry, ReadCallback cb, Object ctx) {
+        // Little sanity check
+<span class="nc bnc" id="L813" title="All 4 branches missed.">        if (firstEntry &lt; 0 || firstEntry &gt; lastEntry) {</span>
+<span class="nc" id="L814">            LOG.error(&quot;IncorrectParameterException on ledgerId:{} firstEntry:{} lastEntry:{}&quot;,</span>
+<span class="nc" id="L815">                    ledgerId, firstEntry, lastEntry);</span>
+<span class="nc" id="L816">            cb.readComplete(BKException.Code.IncorrectParameterException, this, null, ctx);</span>
+<span class="nc" id="L817">            return;</span>
+        }
+
+<span class="nc" id="L820">        asyncReadEntriesInternal(firstEntry, lastEntry, cb, ctx, false);</span>
+<span class="nc" id="L821">    }</span>
+
+    /**
+     * Read a sequence of entries asynchronously, allowing to read after the LastAddConfirmed range.
+     * It sends an RPC to get all entries instead of send multi RPC to get all entries.
+     * @param startEntry
+     *          id of first entry of sequence
+     * @param maxCount
+     *          the entries count
+     * @param maxSize
+     *          the total entries size
+     * @param cb
+     *          object implementing read callback interface
+     * @param ctx
+     *          control object
+     */
+    public void asyncBatchReadUnconfirmedEntries(long startEntry, int maxCount, long maxSize, ReadCallback cb,
+            Object ctx) {
+        // Little sanity check
+<span class="nc bnc" id="L840" title="All 2 branches missed.">        if (startEntry &lt; 0) {</span>
+<span class="nc" id="L841">            LOG.error(&quot;IncorrectParameterException on ledgerId:{} firstEntry:{}&quot;, ledgerId, startEntry);</span>
+<span class="nc" id="L842">            cb.readComplete(BKException.Code.IncorrectParameterException, this, null, ctx);</span>
+        }
+<span class="nc bnc" id="L844" title="All 2 branches missed.">        if (notSupportBatchRead()) {</span>
+<span class="nc" id="L845">            long lastEntry = startEntry + maxCount - 1;</span>
+<span class="nc" id="L846">            asyncReadEntriesInternal(startEntry, lastEntry, cb, ctx, false);</span>
+<span class="nc" id="L847">        } else {</span>
+<span class="nc" id="L848">            asyncBatchReadEntriesInternal(startEntry, maxCount, maxSize, new ReadCallback() {</span>
+                @Override
+                public void readComplete(int rc, LedgerHandle lh, Enumeration&lt;LedgerEntry&gt; seq, Object ctx) {
+                    //If the bookie server not support the batch read request, the bookie server will close the
+                    // connection, then get the BookieHandleNotAvailableException.
+<span class="nc bnc" id="L853" title="All 2 branches missed.">                    if (rc == Code.BookieHandleNotAvailableException) {</span>
+<span class="nc" id="L854">                        notSupportBatch = true;</span>
+<span class="nc" id="L855">                        long lastEntry = startEntry + maxCount - 1;</span>
+<span class="nc" id="L856">                        asyncReadEntriesInternal(startEntry, lastEntry, cb, ctx, false);</span>
+<span class="nc" id="L857">                    } else {</span>
+<span class="nc" id="L858">                        cb.readComplete(rc, lh, seq, ctx);</span>
+                    }
+<span class="nc" id="L860">                }</span>
+            }, ctx, false);
+        }
+<span class="nc" id="L863">    }</span>
+
+    /**
+     * Read a sequence of entries asynchronously.
+     *
+     * @param firstEntry
+     *          id of first entry of sequence
+     * @param lastEntry
+     *          id of last entry of sequence
+     */
+    @Override
+    public CompletableFuture&lt;LedgerEntries&gt; readAsync(long firstEntry, long lastEntry) {
+        // Little sanity check
+<span class="nc bnc" id="L876" title="All 4 branches missed.">        if (firstEntry &lt; 0 || firstEntry &gt; lastEntry) {</span>
+<span class="nc" id="L877">            LOG.error(&quot;IncorrectParameterException on ledgerId:{} firstEntry:{} lastEntry:{}&quot;,</span>
+<span class="nc" id="L878">                    ledgerId, firstEntry, lastEntry);</span>
+<span class="nc" id="L879">            return FutureUtils.exception(new BKIncorrectParameterException());</span>
+        }
+
+<span class="nc bnc" id="L882" title="All 2 branches missed.">        if (lastEntry &gt; lastAddConfirmed) {</span>
+<span class="nc" id="L883">            LOG.error(&quot;ReadAsync exception on ledgerId:{} firstEntry:{} lastEntry:{} lastAddConfirmed:{}&quot;,</span>
+<span class="nc" id="L884">                    ledgerId, firstEntry, lastEntry, lastAddConfirmed);</span>
+<span class="nc" id="L885">            return FutureUtils.exception(new BKReadException());</span>
+        }
+
+<span class="nc" id="L888">        return readEntriesInternalAsync(firstEntry, lastEntry, false);</span>
+    }
+
+    /**
+     * Read a sequence of entries in asynchronously.
+     * It sends an RPC to get all entries instead of send multi RPC to get all entries.
+     *
+     * @param startEntry
+     *          id of first entry of sequence
+     * @param maxCount
+     *          the entries count
+     * @param maxSize
+     *          the total entries size
+     */
+    @Override
+    public CompletableFuture&lt;LedgerEntries&gt; batchReadAsync(long startEntry, int maxCount, long maxSize) {
+        // Little sanity check
+<span class="nc bnc" id="L905" title="All 2 branches missed.">        if (startEntry &lt; 0) {</span>
+<span class="nc" id="L906">            LOG.error(&quot;IncorrectParameterException on ledgerId:{} firstEntry:{}&quot;, ledgerId, startEntry);</span>
+<span class="nc" id="L907">            return FutureUtils.exception(new BKIncorrectParameterException());</span>
+        }
+<span class="nc bnc" id="L909" title="All 2 branches missed.">        if (startEntry &gt; lastAddConfirmed) {</span>
+<span class="nc" id="L910">            LOG.error(&quot;ReadAsync exception on ledgerId:{} firstEntry:{} lastAddConfirmed:{}&quot;,</span>
+<span class="nc" id="L911">                    ledgerId, startEntry, lastAddConfirmed);</span>
+<span class="nc" id="L912">            return FutureUtils.exception(new BKReadException());</span>
+        }
+<span class="nc bnc" id="L914" title="All 2 branches missed.">        if (notSupportBatchRead()) {</span>
+<span class="nc" id="L915">            long lastEntry = Math.min(startEntry + maxCount - 1, lastAddConfirmed);</span>
+<span class="nc" id="L916">            return readEntriesInternalAsync(startEntry, lastEntry, false);</span>
+        }
+<span class="nc" id="L918">        CompletableFuture&lt;LedgerEntries&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L919">        batchReadEntriesInternalAsync(startEntry, maxCount, maxSize, false)</span>
+<span class="nc" id="L920">                .whenComplete((entries, ex) -&gt; {</span>
+<span class="nc bnc" id="L921" title="All 2 branches missed.">                    if (ex != null) {</span>
+                        //If the bookie server not support the batch read request, the bookie server will close the
+                        // connection, then get the BookieHandleNotAvailableException.
+<span class="nc bnc" id="L924" title="All 2 branches missed.">                        if (ex instanceof BKException.BKBookieHandleNotAvailableException) {</span>
+<span class="nc" id="L925">                            notSupportBatch = true;</span>
+<span class="nc" id="L926">                            long lastEntry = Math.min(startEntry + maxCount - 1, lastAddConfirmed);</span>
+<span class="nc" id="L927">                            readEntriesInternalAsync(startEntry, lastEntry, false).whenComplete((entries1, ex1) -&gt; {</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">                                if (ex1 != null) {</span>
+<span class="nc" id="L929">                                    future.completeExceptionally(ex1);</span>
+                                } else {
+<span class="nc" id="L931">                                    future.complete(entries1);</span>
+                                }
+<span class="nc" id="L933">                            });</span>
+<span class="nc" id="L934">                        } else {</span>
+<span class="nc" id="L935">                            future.completeExceptionally(ex);</span>
+                        }
+                    } else {
+<span class="nc" id="L938">                        future.complete(entries);</span>
+                    }
+<span class="nc" id="L940">                });</span>
+<span class="nc" id="L941">        return future;</span>
+    }
+
+    private boolean notSupportBatchRead() {
+<span class="nc bnc" id="L945" title="All 2 branches missed.">        if (!clientCtx.getConf().batchReadEnabled) {</span>
+<span class="nc" id="L946">            return true;</span>
+        }
+<span class="nc bnc" id="L948" title="All 2 branches missed.">        if (notSupportBatch) {</span>
+<span class="nc" id="L949">            return true;</span>
+        }
+<span class="nc" id="L951">        LedgerMetadata ledgerMetadata = getLedgerMetadata();</span>
+<span class="nc bnc" id="L952" title="All 2 branches missed.">        return ledgerMetadata.getEnsembleSize() != ledgerMetadata.getWriteQuorumSize();</span>
+    }
+
+    private CompletableFuture&lt;LedgerEntries&gt; batchReadEntriesInternalAsync(long startEntry, int maxCount, long maxSize,
+            boolean isRecoveryRead) {
+<span class="nc" id="L957">        int nettyMaxFrameSizeBytes = clientCtx.getConf().nettyMaxFrameSizeBytes;</span>
+<span class="nc bnc" id="L958" title="All 2 branches missed.">        if (maxSize &gt; nettyMaxFrameSizeBytes) {</span>
+<span class="nc bnc" id="L959" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L960">                LOG.debug(&quot;The max size is greater than nettyMaxFrameSizeBytes, &quot;</span>
+<span class="nc" id="L961">                        + &quot;use nettyMaxFrameSizeBytes:{} to replace it.&quot;, nettyMaxFrameSizeBytes);</span>
+            }
+<span class="nc" id="L963">            maxSize = nettyMaxFrameSizeBytes;</span>
+        }
+<span class="nc bnc" id="L965" title="All 2 branches missed.">        if (maxSize &lt;= 0) {</span>
+<span class="nc bnc" id="L966" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L967">                LOG.debug(&quot;The max size is negative, use nettyMaxFrameSizeBytes:{} to replace it.&quot;,</span>
+<span class="nc" id="L968">                        nettyMaxFrameSizeBytes);</span>
+            }
+<span class="nc" id="L970">            maxSize = nettyMaxFrameSizeBytes;</span>
+        }
+<span class="nc" id="L972">        BatchedReadOp op = new BatchedReadOp(this, clientCtx,</span>
+                startEntry, maxCount, maxSize, isRecoveryRead);
+<span class="nc bnc" id="L974" title="All 2 branches missed.">        if (!clientCtx.isClientClosed()) {</span>
+            // Waiting on the first one.
+            // This is not very helpful if there are multiple ensembles or if bookie goes into unresponsive
+            // state later after N requests sent.
+            // Unfortunately it seems that alternatives are:
+            // - send reads one-by-one (up to the app)
+            // - rework LedgerHandle to send requests one-by-one (maybe later, potential perf impact)
+            // - block worker pool (not good)
+            // Even with this implementation one should be more concerned about OOME when all read responses arrive
+            // or about overloading bookies with these requests then about submission of many small requests.
+            // Naturally one of the solutions would be to submit smaller batches and in this case
+            // current implementation will prevent next batch from starting when bookie is
+            // unresponsive thus helpful enough.
+<span class="nc bnc" id="L987" title="All 2 branches missed.">            if (clientCtx.getConf().waitForWriteSetMs &gt;= 0) {</span>
+<span class="nc" id="L988">                WriteSet ws = distributionSchedule.getWriteSet(startEntry);</span>
+                try {
+<span class="nc bnc" id="L990" title="All 2 branches missed.">                    if (!waitForWritable(ws, ws.size() - 1, clientCtx.getConf().waitForWriteSetMs)) {</span>
+<span class="nc" id="L991">                        op.allowFailFastOnUnwritableChannel();</span>
+                    }
+                } finally {
+<span class="nc" id="L994">                    ws.recycle();</span>
+                }
+            }
+
+<span class="nc bnc" id="L998" title="All 2 branches missed.">            if (isHandleWritable()) {</span>
+                // Ledger handle in read/write mode: submit to OSE for ordered execution.
+<span class="nc" id="L1000">                executeOrdered(op);</span>
+            } else {
+                // Read-only ledger handle: bypass OSE and execute read directly in client thread.
+                // This avoids a context-switch to OSE thread and thus reduces latency.
+<span class="nc" id="L1004">                op.run();</span>
+            }
+        } else {
+<span class="nc" id="L1007">            op.future().completeExceptionally(BKException.create(ClientClosedException));</span>
+        }
+<span class="nc" id="L1009">        return op.future();</span>
+    }
+
+    /**
+     * Read a sequence of entries asynchronously, allowing to read after the LastAddConfirmed range.
+     * &lt;br&gt;This is the same of
+     * {@link #asyncReadEntries(long, long, ReadCallback, Object) }
+     * but it lets the client read without checking the local value of LastAddConfirmed, so that it is possible to
+     * read entries for which the writer has not received the acknowledge yet. &lt;br&gt;
+     * For entries which are within the range 0..LastAddConfirmed BookKeeper guarantees that the writer has successfully
+     * received the acknowledge.&lt;br&gt;
+     * For entries outside that range it is possible that the writer never received the acknowledge
+     * and so there is the risk that the reader is seeing entries before the writer and this could result in
+     * a consistency issue in some cases.&lt;br&gt;
+     * With this method you can even read entries before the LastAddConfirmed and entries after it with one call,
+     * the expected consistency will be as described above for each subrange of ids.
+     *
+     * @param firstEntry
+     *          id of first entry of sequence
+     * @param lastEntry
+     *          id of last entry of sequence
+     *
+     * @see #asyncReadEntries(long, long, ReadCallback, Object)
+     * @see #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)
+     * @see #readUnconfirmedEntries(long, long)
+     */
+    @Override
+    public CompletableFuture&lt;LedgerEntries&gt; readUnconfirmedAsync(long firstEntry, long lastEntry) {
+        // Little sanity check
+<span class="nc bnc" id="L1038" title="All 4 branches missed.">        if (firstEntry &lt; 0 || firstEntry &gt; lastEntry) {</span>
+<span class="nc" id="L1039">            LOG.error(&quot;IncorrectParameterException on ledgerId:{} firstEntry:{} lastEntry:{}&quot;,</span>
+<span class="nc" id="L1040">                    ledgerId, firstEntry, lastEntry);</span>
+<span class="nc" id="L1041">            return FutureUtils.exception(new BKIncorrectParameterException());</span>
+        }
+
+<span class="nc" id="L1044">        return readEntriesInternalAsync(firstEntry, lastEntry, false);</span>
+    }
+
+    void asyncReadEntriesInternal(long firstEntry, long lastEntry, ReadCallback cb,
+                                  Object ctx, boolean isRecoveryRead) {
+<span class="nc bnc" id="L1049" title="All 2 branches missed.">        if (!clientCtx.isClientClosed()) {</span>
+<span class="nc" id="L1050">            readEntriesInternalAsync(firstEntry, lastEntry, isRecoveryRead)</span>
+<span class="nc" id="L1051">                .whenCompleteAsync(new FutureEventListener&lt;LedgerEntries&gt;() {</span>
+                    @Override
+                    public void onSuccess(LedgerEntries entries) {
+<span class="nc" id="L1054">                        cb.readComplete(</span>
+                            Code.OK,
+                            LedgerHandle.this,
+<span class="nc" id="L1057">                            IteratorUtils.asEnumeration(</span>
+<span class="nc" id="L1058">                                Iterators.transform(entries.iterator(), le -&gt; {</span>
+<span class="nc" id="L1059">                                    LedgerEntry entry = new LedgerEntry((LedgerEntryImpl) le);</span>
+<span class="nc" id="L1060">                                    le.close();</span>
+<span class="nc" id="L1061">                                    return entry;</span>
+                                })),
+                            ctx);
+<span class="nc" id="L1064">                    }</span>
+
+                    @Override
+                    public void onFailure(Throwable cause) {
+<span class="nc bnc" id="L1068" title="All 2 branches missed.">                        if (cause instanceof BKException) {</span>
+<span class="nc" id="L1069">                            BKException bke = (BKException) cause;</span>
+<span class="nc" id="L1070">                            cb.readComplete(bke.getCode(), LedgerHandle.this, null, ctx);</span>
+<span class="nc" id="L1071">                        } else {</span>
+<span class="nc" id="L1072">                            cb.readComplete(Code.UnexpectedConditionException, LedgerHandle.this, null, ctx);</span>
+                        }
+<span class="nc" id="L1074">                    }</span>
+<span class="nc" id="L1075">                    }, clientCtx.getMainWorkerPool().chooseThread(ledgerId));</span>
+        } else {
+<span class="nc" id="L1077">            cb.readComplete(Code.ClientClosedException, LedgerHandle.this, null, ctx);</span>
+        }
+<span class="nc" id="L1079">    }</span>
+
+    void asyncBatchReadEntriesInternal(long startEntry, int maxCount, long maxSize, ReadCallback cb,
+            Object ctx, boolean isRecoveryRead) {
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">        if (!clientCtx.isClientClosed()) {</span>
+<span class="nc" id="L1084">            batchReadEntriesInternalAsync(startEntry, maxCount, maxSize, isRecoveryRead)</span>
+<span class="nc" id="L1085">                    .whenCompleteAsync(new FutureEventListener&lt;LedgerEntries&gt;() {</span>
+                        @Override
+                        public void onSuccess(LedgerEntries entries) {
+<span class="nc" id="L1088">                            cb.readComplete(</span>
+                                    Code.OK,
+                                    LedgerHandle.this,
+<span class="nc" id="L1091">                                    IteratorUtils.asEnumeration(</span>
+<span class="nc" id="L1092">                                            Iterators.transform(entries.iterator(), le -&gt; {</span>
+<span class="nc" id="L1093">                                                LedgerEntry entry = new LedgerEntry((LedgerEntryImpl) le);</span>
+<span class="nc" id="L1094">                                                le.close();</span>
+<span class="nc" id="L1095">                                                return entry;</span>
+                                            })),
+                                    ctx);
+<span class="nc" id="L1098">                        }</span>
+
+                        @Override
+                        public void onFailure(Throwable cause) {
+<span class="nc bnc" id="L1102" title="All 2 branches missed.">                            if (cause instanceof BKException) {</span>
+<span class="nc" id="L1103">                                BKException bke = (BKException) cause;</span>
+<span class="nc" id="L1104">                                cb.readComplete(bke.getCode(), LedgerHandle.this, null, ctx);</span>
+<span class="nc" id="L1105">                            } else {</span>
+<span class="nc" id="L1106">                                cb.readComplete(Code.UnexpectedConditionException, LedgerHandle.this, null, ctx);</span>
+                            }
+<span class="nc" id="L1108">                        }</span>
+<span class="nc" id="L1109">                    }, clientCtx.getMainWorkerPool().chooseThread(ledgerId));</span>
+        } else {
+<span class="nc" id="L1111">            cb.readComplete(Code.ClientClosedException, LedgerHandle.this, null, ctx);</span>
+        }
+<span class="nc" id="L1113">    }</span>
+
+    /*
+     * Read the last entry in the ledger
+     *
+     * @param cb
+     *            object implementing read callback interface
+     * @param ctx
+     *            control object
+     */
+    public void asyncReadLastEntry(ReadCallback cb, Object ctx) {
+<span class="nc" id="L1124">        long lastEntryId = getLastAddConfirmed();</span>
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">        if (lastEntryId &lt; 0) {</span>
+            // Ledger was empty, so there is no last entry to read
+<span class="nc" id="L1127">            cb.readComplete(BKException.Code.NoSuchEntryException, this, null, ctx);</span>
+        } else {
+<span class="nc" id="L1129">            asyncReadEntriesInternal(lastEntryId, lastEntryId, cb, ctx, false);</span>
+        }
+<span class="nc" id="L1131">    }</span>
+
+    public LedgerEntry readLastEntry()
+        throws InterruptedException, BKException {
+<span class="nc" id="L1135">        long lastEntryId = getLastAddConfirmed();</span>
+<span class="nc bnc" id="L1136" title="All 2 branches missed.">        if (lastEntryId &lt; 0) {</span>
+            // Ledger was empty, so there is no last entry to read
+<span class="nc" id="L1138">            throw new BKException.BKNoSuchEntryException();</span>
+        } else {
+<span class="nc" id="L1140">            CompletableFuture&lt;Enumeration&lt;LedgerEntry&gt;&gt; result = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1141">            asyncReadEntries(lastEntryId, lastEntryId, new SyncReadCallback(result), null);</span>
+
+<span class="nc" id="L1143">            return SyncCallbackUtils.waitForResult(result).nextElement();</span>
+        }
+    }
+
+    CompletableFuture&lt;LedgerEntries&gt; readEntriesInternalAsync(long firstEntry,
+                                                              long lastEntry,
+                                                              boolean isRecoveryRead) {
+<span class="nc" id="L1150">        PendingReadOp op = new PendingReadOp(this, clientCtx,</span>
+                                             firstEntry, lastEntry, isRecoveryRead);
+<span class="nc bnc" id="L1152" title="All 2 branches missed.">        if (!clientCtx.isClientClosed()) {</span>
+            // Waiting on the first one.
+            // This is not very helpful if there are multiple ensembles or if bookie goes into unresponsive
+            // state later after N requests sent.
+            // Unfortunately it seems that alternatives are:
+            // - send reads one-by-one (up to the app)
+            // - rework LedgerHandle to send requests one-by-one (maybe later, potential perf impact)
+            // - block worker pool (not good)
+            // Even with this implementation one should be more concerned about OOME when all read responses arrive
+            // or about overloading bookies with these requests then about submission of many small requests.
+            // Naturally one of the solutions would be to submit smaller batches and in this case
+            // current implementation will prevent next batch from starting when bookie is
+            // unresponsive thus helpful enough.
+<span class="nc bnc" id="L1165" title="All 2 branches missed.">            if (clientCtx.getConf().waitForWriteSetMs &gt;= 0) {</span>
+<span class="nc" id="L1166">                WriteSet ws = distributionSchedule.getWriteSet(firstEntry);</span>
+                try {
+<span class="nc bnc" id="L1168" title="All 2 branches missed.">                    if (!waitForWritable(ws, ws.size() - 1, clientCtx.getConf().waitForWriteSetMs)) {</span>
+<span class="nc" id="L1169">                        op.allowFailFastOnUnwritableChannel();</span>
+                    }
+                } finally {
+<span class="nc" id="L1172">                    ws.recycle();</span>
+                }
+            }
+
+<span class="nc bnc" id="L1176" title="All 2 branches missed.">            if (isHandleWritable()) {</span>
+                // Ledger handle in read/write mode: submit to OSE for ordered execution.
+<span class="nc" id="L1178">                executeOrdered(op);</span>
+            } else {
+                // Read-only ledger handle: bypass OSE and execute read directly in client thread.
+                // This avoids a context-switch to OSE thread and thus reduces latency.
+<span class="nc" id="L1182">                op.run();</span>
+            }
+        } else {
+<span class="nc" id="L1185">            op.future().completeExceptionally(BKException.create(ClientClosedException));</span>
+        }
+<span class="nc" id="L1187">        return op.future();</span>
+    }
+
+    /**
+     * Add entry synchronously to an open ledger.
+     *
+     * @param data
+     *         array of bytes to be written to the ledger
+     *         do not reuse the buffer, bk-client will release it appropriately
+     * @return the entryId of the new inserted entry
+     */
+    public long addEntry(byte[] data) throws InterruptedException, BKException {
+<span class="nc" id="L1199">        return addEntry(data, 0, data.length);</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CompletableFuture&lt;Long&gt; appendAsync(ByteBuf data) {
+<span class="nc" id="L1207">        SyncAddCallback callback = new SyncAddCallback();</span>
+<span class="nc" id="L1208">        asyncAddEntry(data, callback, null);</span>
+<span class="nc" id="L1209">        return callback;</span>
+    }
+
+    /**
+     * Add entry synchronously to an open ledger. This can be used only with
+     * {@link LedgerHandleAdv} returned through ledgers created with {@link
+     * BookKeeper#createLedgerAdv(int, int, int, BookKeeper.DigestType, byte[])}.
+     *
+     *
+     * @param entryId
+     *            entryId to be added
+     * @param data
+     *            array of bytes to be written to the ledger
+     *            do not reuse the buffer, bk-client will release it appropriately
+     * @return the entryId of the new inserted entry
+     */
+    public long addEntry(final long entryId, byte[] data) throws InterruptedException, BKException {
+<span class="nc" id="L1226">        LOG.error(&quot;To use this feature Ledger must be created with createLedgerAdv interface.&quot;);</span>
+<span class="nc" id="L1227">        throw BKException.create(BKException.Code.IllegalOpException);</span>
+    }
+
+    /**
+     * Add entry synchronously to an open ledger.
+     *
+     * @param data
+     *         array of bytes to be written to the ledger
+     *         do not reuse the buffer, bk-client will release it appropriately
+     * @param offset
+     *          offset from which to take bytes from data
+     * @param length
+     *          number of bytes to take from data
+     * @return the entryId of the new inserted entry
+     */
+    public long addEntry(byte[] data, int offset, int length)
+            throws InterruptedException, BKException {
+<span class="nc bnc" id="L1244" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1245">            LOG.debug(&quot;Adding entry {}&quot;, data);</span>
+        }
+
+<span class="nc" id="L1248">        SyncAddCallback callback = new SyncAddCallback();</span>
+<span class="nc" id="L1249">        asyncAddEntry(data, offset, length, callback, null);</span>
+
+<span class="nc" id="L1251">        return SyncCallbackUtils.waitForResult(callback);</span>
+    }
+
+    /**
+     * Add entry synchronously to an open ledger. This can be used only with
+     * {@link LedgerHandleAdv} returned through ledgers created with {@link
+     * BookKeeper#createLedgerAdv(int, int, int, BookKeeper.DigestType, byte[])}.
+     *
+     * @param entryId
+     *            entryId to be added.
+     * @param data
+     *            array of bytes to be written to the ledger
+     *            do not reuse the buffer, bk-client will release it appropriately
+     * @param offset
+     *            offset from which to take bytes from data
+     * @param length
+     *            number of bytes to take from data
+     * @return entryId
+     */
+    public long addEntry(final long entryId, byte[] data, int offset, int length) throws InterruptedException,
+            BKException {
+<span class="nc" id="L1272">        LOG.error(&quot;To use this feature Ledger must be created with createLedgerAdv() interface.&quot;);</span>
+<span class="nc" id="L1273">        throw BKException.create(BKException.Code.IllegalOpException);</span>
+    }
+
+    /**
+     * Add entry asynchronously to an open ledger.
+     *
+     * @param data
+     *          array of bytes to be written
+     *          do not reuse the buffer, bk-client will release it appropriately
+     * @param cb
+     *          object implementing callbackinterface
+     * @param ctx
+     *          some control object
+     */
+    public void asyncAddEntry(final byte[] data, final AddCallback cb,
+                              final Object ctx) {
+<span class="nc" id="L1289">        asyncAddEntry(data, 0, data.length, cb, ctx);</span>
+<span class="nc" id="L1290">    }</span>
+
+    /**
+     * Add entry asynchronously to an open ledger. This can be used only with
+     * {@link LedgerHandleAdv} returned through ledgers created with {@link
+     * BookKeeper#createLedgerAdv(int, int, int, BookKeeper.DigestType, byte[])}.
+     *
+     * @param entryId
+     *            entryId to be added
+     * @param data
+     *            array of bytes to be written
+     *            do not reuse the buffer, bk-client will release it appropriately
+     * @param cb
+     *            object implementing callbackinterface
+     * @param ctx
+     *            some control object
+     */
+    public void asyncAddEntry(final long entryId, final byte[] data, final AddCallback cb, final Object ctx) {
+<span class="nc" id="L1308">        LOG.error(&quot;To use this feature Ledger must be created with createLedgerAdv() interface.&quot;);</span>
+<span class="nc" id="L1309">        cb.addCompleteWithLatency(BKException.Code.IllegalOpException, LedgerHandle.this, entryId, 0, ctx);</span>
+<span class="nc" id="L1310">    }</span>
+
+    /**
+     * Add entry asynchronously to an open ledger, using an offset and range.
+     *
+     * @param data
+     *          array of bytes to be written
+     *          do not reuse the buffer, bk-client will release it appropriately
+     * @param offset
+     *          offset from which to take bytes from data
+     * @param length
+     *          number of bytes to take from data
+     * @param cb
+     *          object implementing callbackinterface
+     * @param ctx
+     *          some control object
+     * @throws ArrayIndexOutOfBoundsException if offset or length is negative or
+     *          offset and length sum to a value higher than the length of data.
+     */
+    public void asyncAddEntry(final byte[] data, final int offset, final int length,
+                              final AddCallback cb, final Object ctx) {
+<span class="nc bnc" id="L1331" title="All 6 branches missed.">        if (offset &lt; 0 || length &lt; 0 || (offset + length) &gt; data.length) {</span>
+<span class="nc" id="L1332">            throw new ArrayIndexOutOfBoundsException(</span>
+                    &quot;Invalid values for offset(&quot; + offset
+                    + &quot;) or length(&quot; + length + &quot;)&quot;);
+        }
+
+<span class="nc" id="L1337">        asyncAddEntry(Unpooled.wrappedBuffer(data, offset, length), cb, ctx);</span>
+<span class="nc" id="L1338">    }</span>
+
+    public void asyncAddEntry(ByteBuf data, final AddCallback cb, final Object ctx) {
+<span class="nc" id="L1341">        PendingAddOp op = PendingAddOp.create(this, clientCtx, getCurrentEnsemble(), data, writeFlags, cb, ctx);</span>
+<span class="nc" id="L1342">        doAsyncAddEntry(op);</span>
+<span class="nc" id="L1343">    }</span>
+
+    /**
+     * Add entry asynchronously to an open ledger, using an offset and range.
+     * This can be used only with {@link LedgerHandleAdv} returned through
+     * ledgers created with
+     * {@link BookKeeper#createLedgerAdv(int, int, int, BookKeeper.DigestType, byte[])}.
+     *
+     * @param entryId
+     *            entryId of the entry to add.
+     * @param data
+     *            array of bytes to be written
+     *            do not reuse the buffer, bk-client will release it appropriately
+     * @param offset
+     *            offset from which to take bytes from data
+     * @param length
+     *            number of bytes to take from data
+     * @param cb
+     *            object implementing callbackinterface
+     * @param ctx
+     *            some control object
+     * @throws ArrayIndexOutOfBoundsException
+     *             if offset or length is negative or offset and length sum to a
+     *             value higher than the length of data.
+     */
+    public void asyncAddEntry(final long entryId, final byte[] data, final int offset, final int length,
+            final AddCallback cb, final Object ctx) {
+<span class="nc" id="L1370">        LOG.error(&quot;To use this feature Ledger must be created with createLedgerAdv() interface.&quot;);</span>
+<span class="nc" id="L1371">        cb.addCompleteWithLatency(BKException.Code.IllegalOpException, LedgerHandle.this, entryId, 0, ctx);</span>
+<span class="nc" id="L1372">    }</span>
+
+    /**
+     * Add entry asynchronously to an open ledger, using an offset and range.
+     *
+     * @param entryId
+     *            entryId of the entry to add
+     * @param data
+     *            array of bytes to be written
+     *            do not reuse the buffer, bk-client will release it appropriately
+     * @param offset
+     *            offset from which to take bytes from data
+     * @param length
+     *            number of bytes to take from data
+     * @param cb
+     *            object implementing callbackinterface
+     * @param ctx
+     *            some control object
+     * @throws ArrayIndexOutOfBoundsException
+     *             if offset or length is negative or offset and length sum to a
+     *             value higher than the length of data.
+     */
+    public void asyncAddEntry(final long entryId, final byte[] data, final int offset, final int length,
+                              final AddCallbackWithLatency cb, final Object ctx) {
+<span class="nc" id="L1396">        LOG.error(&quot;To use this feature Ledger must be created with createLedgerAdv() interface.&quot;);</span>
+<span class="nc" id="L1397">        cb.addCompleteWithLatency(BKException.Code.IllegalOpException, LedgerHandle.this, entryId, 0, ctx);</span>
+<span class="nc" id="L1398">    }</span>
+
+    /**
+     * Add entry asynchronously to an open ledger, using an offset and range.
+     * This can be used only with {@link LedgerHandleAdv} returned through
+     * ledgers created with {@link BookKeeper#createLedgerAdv(int, int, int, BookKeeper.DigestType, byte[])}.
+     *
+     * @param entryId
+     *            entryId of the entry to add.
+     * @param data
+     *            io.netty.buffer.ByteBuf of bytes to be written
+     *            do not reuse the buffer, bk-client will release it appropriately
+     * @param cb
+     *            object implementing callbackinterface
+     * @param ctx
+     *            some control object
+     */
+    public void asyncAddEntry(final long entryId, ByteBuf data,
+                              final AddCallbackWithLatency cb, final Object ctx) {
+<span class="nc" id="L1417">        LOG.error(&quot;To use this feature Ledger must be created with createLedgerAdv() interface.&quot;);</span>
+<span class="nc" id="L1418">        cb.addCompleteWithLatency(BKException.Code.IllegalOpException, LedgerHandle.this, entryId, 0, ctx);</span>
+<span class="nc" id="L1419">    }</span>
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CompletableFuture&lt;Void&gt; force() {
+<span class="nc" id="L1426">        CompletableFuture&lt;Void&gt; result = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1427">        ForceLedgerOp op = new ForceLedgerOp(this, clientCtx.getBookieClient(), getCurrentEnsemble(), result);</span>
+<span class="nc" id="L1428">        boolean wasClosed = false;</span>
+<span class="nc" id="L1429">        synchronized (this) {</span>
+            // synchronized on this to ensure that
+            // the ledger isn't closed between checking and
+            // updating lastAddPushed
+<span class="nc bnc" id="L1433" title="All 2 branches missed.">            if (!isHandleWritable()) {</span>
+<span class="nc" id="L1434">                wasClosed = true;</span>
+            }
+<span class="nc" id="L1436">        }</span>
+
+<span class="nc bnc" id="L1438" title="All 2 branches missed.">        if (wasClosed) {</span>
+            // make sure the callback is triggered in main worker pool
+            try {
+<span class="nc" id="L1441">                executeOrdered(new Runnable() {</span>
+                    @Override
+                    public void run() {
+<span class="nc" id="L1444">                        LOG.warn(&quot;Force() attempted on a closed ledger: {}&quot;, ledgerId);</span>
+<span class="nc" id="L1445">                        result.completeExceptionally(new BKException.BKLedgerClosedException());</span>
+<span class="nc" id="L1446">                    }</span>
+
+                    @Override
+                    public String toString() {
+<span class="nc" id="L1450">                        return String.format(&quot;force(lid=%d)&quot;, ledgerId);</span>
+                    }
+                });
+<span class="nc" id="L1453">            } catch (RejectedExecutionException e) {</span>
+<span class="nc" id="L1454">                result.completeExceptionally(new BKException.BKInterruptedException());</span>
+<span class="nc" id="L1455">            }</span>
+<span class="nc" id="L1456">            return result;</span>
+        }
+
+        // early exit: no write has been issued yet
+<span class="nc bnc" id="L1460" title="All 2 branches missed.">        if (pendingAddsSequenceHead == INVALID_ENTRY_ID) {</span>
+<span class="nc" id="L1461">            executeOrdered(new Runnable() {</span>
+                    @Override
+                    public void run() {
+<span class="nc" id="L1464">                        FutureUtils.complete(result, null);</span>
+<span class="nc" id="L1465">                    }</span>
+
+                    @Override
+                    public String toString() {
+<span class="nc" id="L1469">                        return String.format(&quot;force(lid=%d)&quot;, ledgerId);</span>
+                    }
+                });
+<span class="nc" id="L1472">            return result;</span>
+        }
+
+        try {
+<span class="nc" id="L1476">            executeOrdered(op);</span>
+<span class="nc" id="L1477">        } catch (RejectedExecutionException e) {</span>
+<span class="nc" id="L1478">            result.completeExceptionally(new BKException.BKInterruptedException());</span>
+<span class="nc" id="L1479">        }</span>
+<span class="nc" id="L1480">        return result;</span>
+    }
+
+    /**
+     * Make a recovery add entry request. Recovery adds can add to a ledger even
+     * if it has been fenced.
+     *
+     * &lt;p&gt;This is only valid for bookie and ledger recovery, which may need to replicate
+     * entries to a quorum of bookies to ensure data safety.
+     *
+     * &lt;p&gt;Normal client should never call this method.
+     */
+    void asyncRecoveryAddEntry(final byte[] data, final int offset, final int length,
+                               final AddCallback cb, final Object ctx) {
+<span class="nc" id="L1494">        PendingAddOp op = PendingAddOp.create(this, clientCtx, getCurrentEnsemble(),</span>
+<span class="nc" id="L1495">                                              Unpooled.wrappedBuffer(data, offset, length),</span>
+                                              writeFlags, cb, ctx)
+<span class="nc" id="L1497">                .enableRecoveryAdd();</span>
+<span class="nc" id="L1498">        doAsyncAddEntry(op);</span>
+<span class="nc" id="L1499">    }</span>
+
+    private boolean isWriteSetWritable(WriteSet writeSet,
+                                       int allowedNonWritableCount) {
+<span class="nc bnc" id="L1503" title="All 2 branches missed.">        if (allowedNonWritableCount &lt; 0) {</span>
+<span class="nc" id="L1504">            allowedNonWritableCount = 0;</span>
+        }
+
+<span class="nc" id="L1507">        final int sz = writeSet.size();</span>
+<span class="nc" id="L1508">        final int requiredWritable = sz - allowedNonWritableCount;</span>
+
+<span class="nc" id="L1510">        int nonWritableCount = 0;</span>
+<span class="nc" id="L1511">        List&lt;BookieId&gt; currentEnsemble = getCurrentEnsemble();</span>
+<span class="nc bnc" id="L1512" title="All 2 branches missed.">        for (int i = 0; i &lt; sz; i++) {</span>
+<span class="nc" id="L1513">            int writeBookieIndex = writeSet.get(i);</span>
+<span class="nc bnc" id="L1514" title="All 2 branches missed.">            if (writeBookieIndex &lt; currentEnsemble.size()</span>
+<span class="nc bnc" id="L1515" title="All 2 branches missed.">                &amp;&amp; !clientCtx.getBookieClient().isWritable(currentEnsemble.get(writeBookieIndex), ledgerId)) {</span>
+<span class="nc" id="L1516">                nonWritableCount++;</span>
+<span class="nc bnc" id="L1517" title="All 2 branches missed.">                if (nonWritableCount &gt;= allowedNonWritableCount) {</span>
+<span class="nc" id="L1518">                    return false;</span>
+                }
+            } else {
+<span class="nc" id="L1521">                final int knownWritable = i - nonWritableCount;</span>
+<span class="nc bnc" id="L1522" title="All 2 branches missed.">                if (knownWritable &gt;= requiredWritable) {</span>
+<span class="nc" id="L1523">                    return true;</span>
+                }
+            }
+        }
+<span class="nc" id="L1527">        return true;</span>
+    }
+
+    @VisibleForTesting
+    protected boolean waitForWritable(WriteSet writeSet,
+                                      int allowedNonWritableCount, long durationMs) {
+<span class="nc bnc" id="L1533" title="All 2 branches missed.">        if (durationMs &lt; 0) {</span>
+<span class="nc" id="L1534">            return true;</span>
+        }
+
+<span class="nc" id="L1537">        final long startTime = MathUtils.nowInNano();</span>
+<span class="nc" id="L1538">        boolean writableResult = isWriteSetWritable(writeSet, allowedNonWritableCount);</span>
+
+<span class="nc bnc" id="L1540" title="All 4 branches missed.">        if (!writableResult &amp;&amp; durationMs &gt; 0) {</span>
+<span class="nc" id="L1541">            int backoff = 1;</span>
+<span class="nc" id="L1542">            final int maxBackoff = 4;</span>
+<span class="nc" id="L1543">            final long deadline = startTime + TimeUnit.MILLISECONDS.toNanos(durationMs);</span>
+
+<span class="nc bnc" id="L1545" title="All 2 branches missed.">            while (!(writableResult = isWriteSetWritable(writeSet, allowedNonWritableCount))) {</span>
+<span class="nc bnc" id="L1546" title="All 2 branches missed.">                if (MathUtils.nowInNano() &lt; deadline) {</span>
+<span class="nc" id="L1547">                    long maxSleep = MathUtils.elapsedMSec(startTime);</span>
+<span class="nc bnc" id="L1548" title="All 2 branches missed.">                    if (maxSleep &lt; 0) {</span>
+<span class="nc" id="L1549">                        maxSleep = 1;</span>
+                    }
+<span class="nc" id="L1551">                    long sleepMs = Math.min(backoff, maxSleep);</span>
+
+                    try {
+<span class="nc" id="L1554">                        TimeUnit.MILLISECONDS.sleep(sleepMs);</span>
+<span class="nc" id="L1555">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L1556">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1557">                        writableResult = isWriteSetWritable(writeSet, allowedNonWritableCount);</span>
+<span class="nc" id="L1558">                        break;</span>
+<span class="nc" id="L1559">                    }</span>
+<span class="nc bnc" id="L1560" title="All 2 branches missed.">                    if (backoff &lt;= maxBackoff) {</span>
+<span class="nc" id="L1561">                        backoff++;</span>
+                    }
+<span class="nc" id="L1563">                } else {</span>
+<span class="nc" id="L1564">                    writableResult = false;</span>
+<span class="nc" id="L1565">                    break;</span>
+                }
+            }
+<span class="nc bnc" id="L1568" title="All 2 branches missed.">            if (backoff &gt; 1) {</span>
+<span class="nc" id="L1569">                LOG.info(&quot;Spent {} ms waiting for {} writable channels, writable result {}&quot;,</span>
+<span class="nc" id="L1570">                        MathUtils.elapsedMSec(startTime),</span>
+<span class="nc" id="L1571">                        writeSet.size() - allowedNonWritableCount,</span>
+<span class="nc" id="L1572">                        writableResult);</span>
+            }
+        }
+
+<span class="nc bnc" id="L1576" title="All 2 branches missed.">        if (writableResult) {</span>
+<span class="nc" id="L1577">            clientChannelWriteWaitStats.registerSuccessfulEvent(</span>
+<span class="nc" id="L1578">                    MathUtils.elapsedNanos(startTime), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L1580">            clientChannelWriteWaitStats.registerFailedEvent(</span>
+<span class="nc" id="L1581">                    MathUtils.elapsedNanos(startTime), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc" id="L1583">        return writableResult;</span>
+    }
+
+    protected void doAsyncAddEntry(final PendingAddOp op) {
+<span class="nc bnc" id="L1587" title="All 2 branches missed.">        if (throttler != null) {</span>
+<span class="nc" id="L1588">            throttler.acquire();</span>
+        }
+
+<span class="nc" id="L1591">        boolean wasClosed = false;</span>
+<span class="nc" id="L1592">        synchronized (this) {</span>
+            // synchronized on this to ensure that
+            // the ledger isn't closed between checking and
+            // updating lastAddPushed
+<span class="nc bnc" id="L1596" title="All 2 branches missed.">            if (isHandleWritable()) {</span>
+<span class="nc" id="L1597">                long entryId = ++lastAddPushed;</span>
+<span class="nc" id="L1598">                long currentLedgerLength = addToLength(op.payload.readableBytes());</span>
+<span class="nc" id="L1599">                op.setEntryId(entryId);</span>
+<span class="nc" id="L1600">                op.setLedgerLength(currentLedgerLength);</span>
+<span class="nc" id="L1601">                pendingAddOps.add(op);</span>
+<span class="nc" id="L1602">            } else {</span>
+<span class="nc" id="L1603">                wasClosed = true;</span>
+            }
+<span class="nc" id="L1605">        }</span>
+
+<span class="nc bnc" id="L1607" title="All 2 branches missed.">        if (wasClosed) {</span>
+            // make sure the callback is triggered in main worker pool
+            try {
+<span class="nc" id="L1610">                executeOrdered(new Runnable() {</span>
+                    @Override
+                    public void run() {
+<span class="nc" id="L1613">                        LOG.warn(&quot;Attempt to add to closed ledger: {}&quot;, ledgerId);</span>
+<span class="nc" id="L1614">                        op.cb.addCompleteWithLatency(BKException.Code.LedgerClosedException,</span>
+                                LedgerHandle.this, INVALID_ENTRY_ID, 0, op.ctx);
+<span class="nc" id="L1616">                        op.recyclePendAddOpObject();</span>
+<span class="nc" id="L1617">                    }</span>
+
+                    @Override
+                    public String toString() {
+<span class="nc" id="L1621">                        return String.format(&quot;AsyncAddEntryToClosedLedger(lid=%d)&quot;, ledgerId);</span>
+                    }
+                });
+<span class="nc" id="L1624">            } catch (RejectedExecutionException e) {</span>
+<span class="nc" id="L1625">                op.cb.addCompleteWithLatency(BookKeeper.getReturnRc(clientCtx.getBookieClient(),</span>
+                                BKException.Code.InterruptedException),
+                        LedgerHandle.this, INVALID_ENTRY_ID, 0, op.ctx);
+<span class="nc" id="L1628">                op.recyclePendAddOpObject();</span>
+<span class="nc" id="L1629">            }</span>
+<span class="nc" id="L1630">            return;</span>
+        }
+
+<span class="nc bnc" id="L1633" title="All 2 branches missed.">        if (clientCtx.getConf().waitForWriteSetMs &gt;= 0) {</span>
+<span class="nc" id="L1634">            WriteSet ws = distributionSchedule.getWriteSet(op.getEntryId());</span>
+            try {
+<span class="nc bnc" id="L1636" title="All 2 branches missed.">                if (!waitForWritable(ws, 0, clientCtx.getConf().waitForWriteSetMs)) {</span>
+<span class="nc" id="L1637">                    op.allowFailFastOnUnwritableChannel();</span>
+                }
+            } finally {
+<span class="nc" id="L1640">                ws.recycle();</span>
+            }
+        }
+
+<span class="nc" id="L1644">        op.initiate();</span>
+
+<span class="nc" id="L1646">    }</span>
+
+    synchronized void updateLastConfirmed(long lac, long len) {
+<span class="nc bnc" id="L1649" title="All 2 branches missed.">        if (lac &gt; lastAddConfirmed) {</span>
+<span class="nc" id="L1650">            lastAddConfirmed = lac;</span>
+<span class="nc" id="L1651">            lacUpdateHitsCounter.inc();</span>
+        } else {
+<span class="nc" id="L1653">            lacUpdateMissesCounter.inc();</span>
+        }
+<span class="nc" id="L1655">        lastAddPushed = Math.max(lastAddPushed, lac);</span>
+<span class="nc" id="L1656">        length.accumulateAndGet(len, (current, value) -&gt; Math.max(current, value));</span>
+<span class="nc" id="L1657">    }</span>
+
+    /**
+     * Obtains asynchronously the last confirmed write from a quorum of bookies. This
+     * call obtains the last add confirmed each bookie has received for this ledger
+     * and returns the maximum. If the ledger has been closed, the value returned by this
+     * call may not correspond to the id of the last entry of the ledger, since it reads
+     * the hint of bookies. Consequently, in the case the ledger has been closed, it may
+     * return a different value than getLastAddConfirmed, which returns the local value
+     * of the ledger handle.
+     *
+     * @see #getLastAddConfirmed()
+     *
+     * @param cb
+     * @param ctx
+     */
+
+    public void asyncReadLastConfirmed(final ReadLastConfirmedCallback cb, final Object ctx) {
+<span class="nc bnc" id="L1675" title="All 2 branches missed.">        if (clientCtx.getConf().useV2WireProtocol) {</span>
+            // in v2 protocol we don't support readLAC RPC
+<span class="nc" id="L1677">            asyncReadPiggybackLastConfirmed(cb, ctx);</span>
+        } else {
+<span class="nc" id="L1679">            asyncReadExplicitLastConfirmed(cb, ctx);</span>
+        }
+<span class="nc" id="L1681">    }</span>
+
+    private void asyncReadPiggybackLastConfirmed(final ReadLastConfirmedCallback cb, final Object ctx) {
+        boolean isClosed;
+        long lastEntryId;
+<span class="nc" id="L1686">        synchronized (this) {</span>
+<span class="nc" id="L1687">            LedgerMetadata metadata = getLedgerMetadata();</span>
+<span class="nc" id="L1688">            isClosed = metadata.isClosed();</span>
+<span class="nc" id="L1689">            lastEntryId = metadata.getLastEntryId();</span>
+<span class="nc" id="L1690">        }</span>
+<span class="nc bnc" id="L1691" title="All 2 branches missed.">        if (isClosed) {</span>
+<span class="nc" id="L1692">            cb.readLastConfirmedComplete(BKException.Code.OK, lastEntryId, ctx);</span>
+<span class="nc" id="L1693">            return;</span>
+        }
+
+<span class="nc" id="L1696">        ReadLastConfirmedOp.LastConfirmedDataCallback innercb = new ReadLastConfirmedOp.LastConfirmedDataCallback() {</span>
+                @Override
+                public void readLastConfirmedDataComplete(int rc, DigestManager.RecoveryData data) {
+<span class="nc bnc" id="L1699" title="All 2 branches missed.">                    if (rc == BKException.Code.OK) {</span>
+<span class="nc" id="L1700">                        updateLastConfirmed(data.getLastAddConfirmed(), data.getLength());</span>
+<span class="nc" id="L1701">                        cb.readLastConfirmedComplete(rc, data.getLastAddConfirmed(), ctx);</span>
+                    } else {
+<span class="nc" id="L1703">                        cb.readLastConfirmedComplete(rc, INVALID_ENTRY_ID, ctx);</span>
+                    }
+<span class="nc" id="L1705">                }</span>
+            };
+
+<span class="nc" id="L1708">        new ReadLastConfirmedOp(clientCtx.getBookieClient(),</span>
+                                distributionSchedule,
+                                macManager,
+                                ledgerId,
+<span class="nc" id="L1712">                                getCurrentEnsemble(),</span>
+                                ledgerKey,
+<span class="nc" id="L1714">                                innercb).initiate();</span>
+<span class="nc" id="L1715">    }</span>
+
+    /**
+     * Obtains asynchronously the last confirmed write from a quorum of bookies.
+     * It is similar as
+     * {@link #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)},
+     * but it doesn't wait all the responses from the quorum. It would callback
+     * immediately if it received a LAC which is larger than current LAC.
+     *
+     * @see #asyncTryReadLastConfirmed(ReadLastConfirmedCallback, Object)
+     *
+     * @param cb
+     *          callback to return read last confirmed
+     * @param ctx
+     *          callback context
+     */
+    public void asyncTryReadLastConfirmed(final ReadLastConfirmedCallback cb, final Object ctx) {
+        boolean isClosed;
+        long lastEntryId;
+<span class="nc" id="L1734">        synchronized (this) {</span>
+<span class="nc" id="L1735">            LedgerMetadata metadata = getLedgerMetadata();</span>
+<span class="nc" id="L1736">            isClosed = metadata.isClosed();</span>
+<span class="nc" id="L1737">            lastEntryId = metadata.getLastEntryId();</span>
+<span class="nc" id="L1738">        }</span>
+<span class="nc bnc" id="L1739" title="All 2 branches missed.">        if (isClosed) {</span>
+<span class="nc" id="L1740">            cb.readLastConfirmedComplete(BKException.Code.OK, lastEntryId, ctx);</span>
+<span class="nc" id="L1741">            return;</span>
+        }
+<span class="nc" id="L1743">        ReadLastConfirmedOp.LastConfirmedDataCallback innercb = new ReadLastConfirmedOp.LastConfirmedDataCallback() {</span>
+<span class="nc" id="L1744">            AtomicBoolean completed = new AtomicBoolean(false);</span>
+
+            @Override
+            public void readLastConfirmedDataComplete(int rc, DigestManager.RecoveryData data) {
+<span class="nc bnc" id="L1748" title="All 2 branches missed.">                if (rc == BKException.Code.OK) {</span>
+<span class="nc" id="L1749">                    updateLastConfirmed(data.getLastAddConfirmed(), data.getLength());</span>
+<span class="nc bnc" id="L1750" title="All 2 branches missed.">                    if (completed.compareAndSet(false, true)) {</span>
+<span class="nc" id="L1751">                        cb.readLastConfirmedComplete(rc, data.getLastAddConfirmed(), ctx);</span>
+                    }
+                } else {
+<span class="nc bnc" id="L1754" title="All 2 branches missed.">                    if (completed.compareAndSet(false, true)) {</span>
+<span class="nc" id="L1755">                        cb.readLastConfirmedComplete(rc, INVALID_ENTRY_ID, ctx);</span>
+                    }
+                }
+<span class="nc" id="L1758">            }</span>
+        };
+<span class="nc" id="L1760">        new TryReadLastConfirmedOp(this, clientCtx.getBookieClient(), getCurrentEnsemble(),</span>
+<span class="nc" id="L1761">                                   innercb, getLastAddConfirmed()).initiate();</span>
+<span class="nc" id="L1762">    }</span>
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CompletableFuture&lt;Long&gt; tryReadLastAddConfirmedAsync() {
+<span class="nc" id="L1769">        FutureReadLastConfirmed result = new FutureReadLastConfirmed();</span>
+<span class="nc" id="L1770">        asyncTryReadLastConfirmed(result, null);</span>
+<span class="nc" id="L1771">        return result;</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CompletableFuture&lt;Long&gt; readLastAddConfirmedAsync() {
+<span class="nc" id="L1779">        FutureReadLastConfirmed result = new FutureReadLastConfirmed();</span>
+<span class="nc" id="L1780">        asyncReadLastConfirmed(result, null);</span>
+<span class="nc" id="L1781">        return result;</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CompletableFuture&lt;LastConfirmedAndEntry&gt; readLastAddConfirmedAndEntryAsync(long entryId,
+                                                                                      long timeOutInMillis,
+                                                                                      boolean parallel) {
+<span class="nc" id="L1791">        FutureReadLastConfirmedAndEntry result = new FutureReadLastConfirmedAndEntry();</span>
+<span class="nc" id="L1792">        asyncReadLastConfirmedAndEntry(entryId, timeOutInMillis, parallel, result, null);</span>
+<span class="nc" id="L1793">        return result;</span>
+    }
+
+    /**
+     * Asynchronous read next entry and the latest last add confirmed.
+     * If the next entryId is less than known last add confirmed, the call will read next entry directly.
+     * If the next entryId is ahead of known last add confirmed, the call will issue a long poll read
+     * to wait for the next entry &lt;i&gt;entryId&lt;/i&gt;.
+     *
+     * &lt;p&gt;The callback will return the latest last add confirmed and next entry if it is available within timeout
+     * period &lt;i&gt;timeOutInMillis&lt;/i&gt;.
+     *
+     * @param entryId
+     *          next entry id to read
+     * @param timeOutInMillis
+     *          timeout period to wait for the entry id to be available (for long poll only)
+     * @param parallel
+     *          whether to issue the long poll reads in parallel
+     * @param cb
+     *          callback to return the result
+     * @param ctx
+     *          callback context
+     */
+    public void asyncReadLastConfirmedAndEntry(final long entryId,
+                                               final long timeOutInMillis,
+                                               final boolean parallel,
+                                               final AsyncCallback.ReadLastConfirmedAndEntryCallback cb,
+                                               final Object ctx) {
+        boolean isClosed;
+        long lac;
+<span class="nc" id="L1823">        synchronized (this) {</span>
+<span class="nc" id="L1824">            LedgerMetadata metadata = getLedgerMetadata();</span>
+<span class="nc" id="L1825">            isClosed = metadata.isClosed();</span>
+<span class="nc" id="L1826">            lac = metadata.getLastEntryId();</span>
+<span class="nc" id="L1827">        }</span>
+<span class="nc bnc" id="L1828" title="All 2 branches missed.">        if (isClosed) {</span>
+<span class="nc bnc" id="L1829" title="All 2 branches missed.">            if (entryId &gt; lac) {</span>
+<span class="nc" id="L1830">                cb.readLastConfirmedAndEntryComplete(BKException.Code.OK, lac, null, ctx);</span>
+<span class="nc" id="L1831">                return;</span>
+            }
+        } else {
+<span class="nc" id="L1834">            lac = getLastAddConfirmed();</span>
+        }
+<span class="nc bnc" id="L1836" title="All 2 branches missed.">        if (entryId &lt;= lac) {</span>
+<span class="nc" id="L1837">            asyncReadEntries(entryId, entryId, new ReadCallback() {</span>
+                @Override
+                public void readComplete(int rc, LedgerHandle lh, Enumeration&lt;LedgerEntry&gt; seq, Object ctx) {
+<span class="nc bnc" id="L1840" title="All 2 branches missed.">                    if (BKException.Code.OK == rc) {</span>
+<span class="nc bnc" id="L1841" title="All 2 branches missed.">                        if (seq.hasMoreElements()) {</span>
+<span class="nc" id="L1842">                            cb.readLastConfirmedAndEntryComplete(rc, getLastAddConfirmed(), seq.nextElement(), ctx);</span>
+                        } else {
+<span class="nc" id="L1844">                            cb.readLastConfirmedAndEntryComplete(rc, getLastAddConfirmed(), null, ctx);</span>
+                        }
+                    } else {
+<span class="nc" id="L1847">                        cb.readLastConfirmedAndEntryComplete(rc, INVALID_ENTRY_ID, null, ctx);</span>
+                    }
+<span class="nc" id="L1849">                }</span>
+            }, ctx);
+<span class="nc" id="L1851">            return;</span>
+        }
+        // wait for entry &lt;i&gt;entryId&lt;/i&gt;
+<span class="nc" id="L1854">        ReadLastConfirmedAndEntryOp.LastConfirmedAndEntryCallback innercb =</span>
+<span class="nc" id="L1855">            new ReadLastConfirmedAndEntryOp.LastConfirmedAndEntryCallback() {</span>
+<span class="nc" id="L1856">            AtomicBoolean completed = new AtomicBoolean(false);</span>
+            @Override
+            public void readLastConfirmedAndEntryComplete(int rc, long lastAddConfirmed, LedgerEntry entry) {
+<span class="nc bnc" id="L1859" title="All 2 branches missed.">                if (rc == BKException.Code.OK) {</span>
+<span class="nc bnc" id="L1860" title="All 2 branches missed.">                    if (completed.compareAndSet(false, true)) {</span>
+<span class="nc" id="L1861">                        cb.readLastConfirmedAndEntryComplete(rc, lastAddConfirmed, entry, ctx);</span>
+                    }
+                } else {
+<span class="nc bnc" id="L1864" title="All 2 branches missed.">                    if (completed.compareAndSet(false, true)) {</span>
+<span class="nc" id="L1865">                        cb.readLastConfirmedAndEntryComplete(rc, INVALID_ENTRY_ID, null, ctx);</span>
+                    }
+                }
+<span class="nc" id="L1868">            }</span>
+        };
+<span class="nc" id="L1870">        new ReadLastConfirmedAndEntryOp(this, clientCtx, getCurrentEnsemble(), innercb, entryId - 1, timeOutInMillis)</span>
+<span class="nc" id="L1871">            .parallelRead(parallel)</span>
+<span class="nc" id="L1872">            .initiate();</span>
+<span class="nc" id="L1873">    }</span>
+
+    /**
+     * Context objects for synchronous call to read last confirmed.
+     */
+    static class LastConfirmedCtx {
+        static final long ENTRY_ID_PENDING = -10;
+        long response;
+        int rc;
+
+<span class="nc" id="L1883">        LastConfirmedCtx() {</span>
+<span class="nc" id="L1884">            this.response = ENTRY_ID_PENDING;</span>
+<span class="nc" id="L1885">        }</span>
+
+        void setLastConfirmed(long lastConfirmed) {
+<span class="nc" id="L1888">            this.response = lastConfirmed;</span>
+<span class="nc" id="L1889">        }</span>
+
+        long getlastConfirmed() {
+<span class="nc" id="L1892">            return this.response;</span>
+        }
+
+        void setRC(int rc) {
+<span class="nc" id="L1896">            this.rc = rc;</span>
+<span class="nc" id="L1897">        }</span>
+
+        int getRC() {
+<span class="nc" id="L1900">            return this.rc;</span>
+        }
+
+        boolean ready() {
+<span class="nc bnc" id="L1904" title="All 2 branches missed.">            return (this.response != ENTRY_ID_PENDING);</span>
+        }
+    }
+
+    /**
+     * Obtains synchronously the last confirmed write from a quorum of bookies. This call
+     * obtains the last add confirmed each bookie has received for this ledger
+     * and returns the maximum. If the ledger has been closed, the value returned by this
+     * call may not correspond to the id of the last entry of the ledger, since it reads
+     * the hint of bookies. Consequently, in the case the ledger has been closed, it may
+     * return a different value than getLastAddConfirmed, which returns the local value
+     * of the ledger handle.
+     *
+     * @see #getLastAddConfirmed()
+     *
+     * @return The entry id of the last confirmed write or {@link #INVALID_ENTRY_ID INVALID_ENTRY_ID}
+     *         if no entry has been confirmed
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public long readLastConfirmed()
+            throws InterruptedException, BKException {
+<span class="nc" id="L1926">        LastConfirmedCtx ctx = new LastConfirmedCtx();</span>
+<span class="nc" id="L1927">        asyncReadLastConfirmed(new SyncReadLastConfirmedCallback(), ctx);</span>
+<span class="nc" id="L1928">        synchronized (ctx) {</span>
+<span class="nc bnc" id="L1929" title="All 2 branches missed.">            while (!ctx.ready()) {</span>
+<span class="nc" id="L1930">                ctx.wait();</span>
+            }
+<span class="nc" id="L1932">        }</span>
+
+<span class="nc bnc" id="L1934" title="All 2 branches missed.">        if (ctx.getRC() != BKException.Code.OK) {</span>
+<span class="nc" id="L1935">            throw BKException.create(ctx.getRC());</span>
+        }
+<span class="nc" id="L1937">        return ctx.getlastConfirmed();</span>
+    }
+
+    /**
+     * Obtains synchronously the last confirmed write from a quorum of bookies.
+     * It is similar as {@link #readLastConfirmed()}, but it doesn't wait all the responses
+     * from the quorum. It would callback immediately if it received a LAC which is larger
+     * than current LAC.
+     *
+     * @see #readLastConfirmed()
+     *
+     * @return The entry id of the last confirmed write or {@link #INVALID_ENTRY_ID INVALID_ENTRY_ID}
+     *         if no entry has been confirmed
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public long tryReadLastConfirmed() throws InterruptedException, BKException {
+<span class="nc" id="L1954">        LastConfirmedCtx ctx = new LastConfirmedCtx();</span>
+<span class="nc" id="L1955">        asyncTryReadLastConfirmed(new SyncReadLastConfirmedCallback(), ctx);</span>
+<span class="nc" id="L1956">        synchronized (ctx) {</span>
+<span class="nc bnc" id="L1957" title="All 2 branches missed.">            while (!ctx.ready()) {</span>
+<span class="nc" id="L1958">                ctx.wait();</span>
+            }
+<span class="nc" id="L1960">        }</span>
+<span class="nc bnc" id="L1961" title="All 2 branches missed.">        if (ctx.getRC() != BKException.Code.OK) {</span>
+<span class="nc" id="L1962">            throw BKException.create(ctx.getRC());</span>
+        }
+<span class="nc" id="L1964">        return ctx.getlastConfirmed();</span>
+    }
+
+    /**
+     * Obtains asynchronously the explicit last add confirmed from a quorum of
+     * bookies. This call obtains Explicit LAC value and piggy-backed LAC value (just like
+     * {@link #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)}) from each
+     * bookie in the ensemble and returns the maximum.
+     * If in the write LedgerHandle, explicitLAC feature is not enabled then this call behavior
+     * will be similar to {@link #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)}.
+     * If the read explicit lastaddconfirmed is greater than getLastAddConfirmed, then it updates the
+     * lastAddConfirmed of this ledgerhandle. If the ledger has been closed, it
+     * returns the value of the last add confirmed from the metadata.
+     *
+     * @see #getLastAddConfirmed()
+     *
+     * @param cb
+     *          callback to return read explicit last confirmed
+     * @param ctx
+     *          callback context
+     */
+    public void asyncReadExplicitLastConfirmed(final ReadLastConfirmedCallback cb, final Object ctx) {
+        boolean isClosed;
+<span class="nc" id="L1987">        synchronized (this) {</span>
+<span class="nc" id="L1988">            LedgerMetadata metadata = getLedgerMetadata();</span>
+<span class="nc" id="L1989">            isClosed = metadata.isClosed();</span>
+<span class="nc bnc" id="L1990" title="All 2 branches missed.">            if (isClosed) {</span>
+<span class="nc" id="L1991">                lastAddConfirmed = metadata.getLastEntryId();</span>
+<span class="nc" id="L1992">                length.set(metadata.getLength());</span>
+            }
+<span class="nc" id="L1994">        }</span>
+<span class="nc bnc" id="L1995" title="All 2 branches missed.">        if (isClosed) {</span>
+<span class="nc" id="L1996">            cb.readLastConfirmedComplete(BKException.Code.OK, lastAddConfirmed, ctx);</span>
+<span class="nc" id="L1997">            return;</span>
+        }
+
+<span class="nc" id="L2000">        PendingReadLacOp.LacCallback innercb = new PendingReadLacOp.LacCallback() {</span>
+
+            @Override
+            public void getLacComplete(int rc, long lac) {
+<span class="nc bnc" id="L2004" title="All 2 branches missed.">                if (rc == BKException.Code.OK) {</span>
+                    // here we are trying to update lac only but not length
+<span class="nc" id="L2006">                    updateLastConfirmed(lac, 0);</span>
+<span class="nc" id="L2007">                    cb.readLastConfirmedComplete(rc, lac, ctx);</span>
+                } else {
+<span class="nc" id="L2009">                    cb.readLastConfirmedComplete(rc, INVALID_ENTRY_ID, ctx);</span>
+                }
+<span class="nc" id="L2011">            }</span>
+        };
+<span class="nc" id="L2013">        new PendingReadLacOp(this, clientCtx.getBookieClient(), getCurrentEnsemble(), innercb).initiate();</span>
+<span class="nc" id="L2014">    }</span>
+
+    /*
+     * Obtains synchronously the explicit last add confirmed from a quorum of
+     * bookies. This call obtains Explicit LAC value and piggy-backed LAC value (just like
+     * {@Link #readLastAddConfirmed()) from each bookie in the ensemble and returns the maximum.
+     * If in the write LedgerHandle, explicitLAC feature is not enabled then this call behavior
+     * will be similar to {@Link #readLastAddConfirmed()}.
+     * If the read explicit lastaddconfirmed is greater than getLastAddConfirmed, then it updates the
+     * lastAddConfirmed of this ledgerhandle. If the ledger has been closed, it
+     * returns the value of the last add confirmed from the metadata.
+     *
+     * @see #getLastAddConfirmed()
+     *
+     * @return The entry id of the explicit last confirmed write or
+     *         {@link #INVALID_ENTRY_ID INVALID_ENTRY_ID} if no entry has been
+     *         confirmed.
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public long readExplicitLastConfirmed() throws InterruptedException, BKException {
+<span class="nc" id="L2035">        LastConfirmedCtx ctx = new LastConfirmedCtx();</span>
+<span class="nc" id="L2036">        asyncReadExplicitLastConfirmed(new SyncReadLastConfirmedCallback(), ctx);</span>
+<span class="nc" id="L2037">        synchronized (ctx) {</span>
+<span class="nc bnc" id="L2038" title="All 2 branches missed.">            while (!ctx.ready()) {</span>
+<span class="nc" id="L2039">                ctx.wait();</span>
+            }
+<span class="nc" id="L2041">        }</span>
+<span class="nc bnc" id="L2042" title="All 2 branches missed.">        if (ctx.getRC() != BKException.Code.OK) {</span>
+<span class="nc" id="L2043">            throw BKException.create(ctx.getRC());</span>
+        }
+<span class="nc" id="L2045">        return ctx.getlastConfirmed();</span>
+    }
+
+    // close the ledger and send fails to all the adds in the pipeline
+    void handleUnrecoverableErrorDuringAdd(int rc) {
+<span class="nc bnc" id="L2050" title="All 2 branches missed.">        if (getLedgerMetadata().getState() == LedgerMetadata.State.IN_RECOVERY) {</span>
+            // we should not close ledger if ledger is recovery mode
+            // otherwise we may lose entry.
+<span class="nc" id="L2053">            errorOutPendingAdds(rc);</span>
+<span class="nc" id="L2054">            return;</span>
+        }
+<span class="nc" id="L2056">        LOG.error(&quot;Closing ledger {} due to {}&quot;, ledgerId, BKException.codeLogger(rc));</span>
+<span class="nc" id="L2057">        asyncCloseInternal(NoopCloseCallback.instance, null, rc);</span>
+<span class="nc" id="L2058">    }</span>
+
+    private void monitorPendingAddOps() {
+<span class="nc" id="L2061">        int timedOut = 0;</span>
+<span class="nc bnc" id="L2062" title="All 2 branches missed.">        for (PendingAddOp op : pendingAddOps) {</span>
+<span class="nc bnc" id="L2063" title="All 2 branches missed.">            if (op.maybeTimeout()) {</span>
+<span class="nc" id="L2064">                timedOut++;</span>
+            }
+<span class="nc" id="L2066">        }</span>
+<span class="nc bnc" id="L2067" title="All 2 branches missed.">        if (timedOut &gt; 0) {</span>
+<span class="nc" id="L2068">            LOG.info(&quot;Timed out {} add ops&quot;, timedOut);</span>
+        }
+<span class="nc" id="L2070">    }</span>
+
+    void errorOutPendingAdds(int rc) {
+<span class="nc" id="L2073">        errorOutPendingAdds(rc, drainPendingAddsAndAdjustLength());</span>
+<span class="nc" id="L2074">    }</span>
+
+    synchronized List&lt;PendingAddOp&gt; drainPendingAddsAndAdjustLength() {
+        PendingAddOp pendingAddOp;
+<span class="nc" id="L2078">        List&lt;PendingAddOp&gt; opsDrained = new ArrayList&lt;PendingAddOp&gt;(pendingAddOps.size());</span>
+<span class="nc bnc" id="L2079" title="All 2 branches missed.">        while ((pendingAddOp = pendingAddOps.poll()) != null) {</span>
+<span class="nc" id="L2080">            addToLength(-pendingAddOp.entryLength);</span>
+<span class="nc" id="L2081">            opsDrained.add(pendingAddOp);</span>
+        }
+<span class="nc" id="L2083">        return opsDrained;</span>
+    }
+
+    void errorOutPendingAdds(int rc, List&lt;PendingAddOp&gt; ops) {
+<span class="nc bnc" id="L2087" title="All 2 branches missed.">        for (PendingAddOp op : ops) {</span>
+<span class="nc" id="L2088">            op.submitCallback(rc);</span>
+<span class="nc" id="L2089">        }</span>
+<span class="nc" id="L2090">    }</span>
+
+    void sendAddSuccessCallbacks() {
+        // Start from the head of the queue and proceed while there are
+        // entries that have had all their responses come back
+        PendingAddOp pendingAddOp;
+
+<span class="nc bnc" id="L2097" title="All 4 branches missed.">        while ((pendingAddOp = pendingAddOps.peek()) != null</span>
+               &amp;&amp; !changingEnsemble) {
+<span class="nc bnc" id="L2099" title="All 2 branches missed.">            if (!pendingAddOp.completed) {</span>
+<span class="nc bnc" id="L2100" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2101">                    LOG.debug(&quot;pending add not completed: {}&quot;, pendingAddOp);</span>
+                }
+<span class="nc" id="L2103">                return;</span>
+            }
+            // Check if it is the next entry in the sequence.
+<span class="nc bnc" id="L2106" title="All 4 branches missed.">            if (pendingAddOp.entryId != 0 &amp;&amp; pendingAddOp.entryId != pendingAddsSequenceHead + 1) {</span>
+<span class="nc bnc" id="L2107" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2108">                    LOG.debug(&quot;Head of the queue entryId: {} is not the expected value: {}&quot;, pendingAddOp.entryId,</span>
+<span class="nc" id="L2109">                               pendingAddsSequenceHead + 1);</span>
+                }
+<span class="nc" id="L2111">                return;</span>
+            }
+
+<span class="nc" id="L2114">            pendingAddOps.remove();</span>
+<span class="nc" id="L2115">            explicitLacFlushPolicy.updatePiggyBackedLac(lastAddConfirmed);</span>
+<span class="nc" id="L2116">            pendingAddsSequenceHead = pendingAddOp.entryId;</span>
+<span class="nc bnc" id="L2117" title="All 2 branches missed.">            if (!writeFlags.contains(WriteFlag.DEFERRED_SYNC)) {</span>
+<span class="nc" id="L2118">                this.lastAddConfirmed = pendingAddsSequenceHead;</span>
+            }
+
+<span class="nc" id="L2121">            pendingAddOp.submitCallback(BKException.Code.OK);</span>
+        }
+
+<span class="nc" id="L2124">    }</span>
+
+    @VisibleForTesting
+    boolean hasDelayedWriteFailedBookies() {
+<span class="nc bnc" id="L2128" title="All 2 branches missed.">        return !delayedWriteFailedBookies.isEmpty();</span>
+    }
+
+    void notifyWriteFailed(int index, BookieId addr) {
+<span class="nc" id="L2132">        synchronized (metadataLock) {</span>
+<span class="nc" id="L2133">            delayedWriteFailedBookies.put(index, addr);</span>
+<span class="nc" id="L2134">        }</span>
+<span class="nc" id="L2135">    }</span>
+
+    void maybeHandleDelayedWriteBookieFailure() {
+<span class="nc" id="L2138">        Map&lt;Integer, BookieId&gt; toReplace = null;</span>
+<span class="nc" id="L2139">        synchronized (metadataLock) {</span>
+<span class="nc bnc" id="L2140" title="All 2 branches missed.">            if (delayedWriteFailedBookies.isEmpty()) {</span>
+<span class="nc" id="L2141">                return;</span>
+            }
+<span class="nc" id="L2143">            toReplace = new HashMap&lt;&gt;(delayedWriteFailedBookies);</span>
+<span class="nc" id="L2144">            delayedWriteFailedBookies.clear();</span>
+<span class="nc" id="L2145">        }</span>
+
+<span class="nc bnc" id="L2147" title="All 2 branches missed.">        if (toReplace.isEmpty()) {</span>
+<span class="nc" id="L2148">            return;</span>
+        }
+
+        // Original intent of this change is to do a best-effort ensemble change.
+        // But this is not possible until the local metadata is completely immutable.
+        // Until the feature &quot;Make LedgerMetadata Immutable #610&quot; Is complete we will use
+        // handleBookieFailure() to handle delayed writes as regular bookie failures.
+<span class="nc" id="L2155">        handleBookieFailure(toReplace);</span>
+<span class="nc" id="L2156">    }</span>
+
+    void handleBookieFailure(final Map&lt;Integer, BookieId&gt; failedBookies) {
+<span class="nc bnc" id="L2159" title="All 2 branches missed.">        if (clientCtx.getConf().disableEnsembleChangeFeature.isAvailable()) {</span>
+<span class="nc bnc" id="L2160" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2161">                LOG.debug(&quot;Ensemble change is disabled. Retry sending to failed bookies {} for ledger {}.&quot;,</span>
+<span class="nc" id="L2162">                    failedBookies, ledgerId);</span>
+            }
+<span class="nc" id="L2164">            executeOrdered(() -&gt;</span>
+<span class="nc" id="L2165">                    unsetSuccessAndSendWriteRequest(getCurrentEnsemble(), failedBookies.keySet()));</span>
+<span class="nc" id="L2166">            return;</span>
+        }
+
+<span class="nc bnc" id="L2169" title="All 2 branches missed.">        if (writeFlags.contains(WriteFlag.DEFERRED_SYNC)) {</span>
+<span class="nc bnc" id="L2170" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2171">                LOG.debug(&quot;Cannot perform ensemble change with write flags {}. &quot;</span>
+                        + &quot;Failed bookies {} for ledger {}.&quot;,
+<span class="nc" id="L2173">                    writeFlags, failedBookies, ledgerId);</span>
+            }
+<span class="nc" id="L2175">            handleUnrecoverableErrorDuringAdd(WriteException);</span>
+<span class="nc" id="L2176">            return;</span>
+        }
+
+
+<span class="nc" id="L2180">        boolean triggerLoop = false;</span>
+<span class="nc" id="L2181">        Map&lt;Integer, BookieId&gt; toReplace = null;</span>
+<span class="nc" id="L2182">        List&lt;BookieId&gt; origEnsemble = null;</span>
+<span class="nc" id="L2183">        synchronized (metadataLock) {</span>
+<span class="nc bnc" id="L2184" title="All 2 branches missed.">            if (changingEnsemble) {</span>
+<span class="nc" id="L2185">                delayedWriteFailedBookies.putAll(failedBookies);</span>
+            } else {
+<span class="nc" id="L2187">                changingEnsemble = true;</span>
+<span class="nc" id="L2188">                triggerLoop = true;</span>
+
+<span class="nc" id="L2190">                toReplace = new HashMap&lt;&gt;(delayedWriteFailedBookies);</span>
+<span class="nc" id="L2191">                delayedWriteFailedBookies.clear();</span>
+<span class="nc" id="L2192">                toReplace.putAll(failedBookies);</span>
+
+<span class="nc" id="L2194">                origEnsemble = getCurrentEnsemble();</span>
+            }
+<span class="nc" id="L2196">        }</span>
+<span class="nc bnc" id="L2197" title="All 2 branches missed.">        if (triggerLoop) {</span>
+<span class="nc" id="L2198">            ensembleChangeLoop(origEnsemble, toReplace);</span>
+        }
+<span class="nc" id="L2200">    }</span>
+
+    void ensembleChangeLoop(List&lt;BookieId&gt; origEnsemble, Map&lt;Integer, BookieId&gt; failedBookies) {
+<span class="nc" id="L2203">        int ensembleChangeId = numEnsembleChanges.incrementAndGet();</span>
+<span class="nc" id="L2204">        ensembleChangeCounter.inc();</span>
+<span class="nc" id="L2205">        String logContext = String.format(&quot;[EnsembleChange(ledger:%d, change-id:%010d)]&quot;, ledgerId, ensembleChangeId);</span>
+
+        // when the ensemble changes are too frequent, close handle
+<span class="nc bnc" id="L2208" title="All 2 branches missed.">        if (ensembleChangeId &gt; clientCtx.getConf().maxAllowedEnsembleChanges) {</span>
+<span class="nc" id="L2209">            LOG.info(&quot;{} reaches max allowed ensemble change number {}&quot;,</span>
+<span class="nc" id="L2210">                     logContext, clientCtx.getConf().maxAllowedEnsembleChanges);</span>
+<span class="nc" id="L2211">            handleUnrecoverableErrorDuringAdd(WriteException);</span>
+<span class="nc" id="L2212">            return;</span>
+        }
+
+<span class="nc bnc" id="L2215" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2216">            LOG.debug(&quot;{} Replacing {} in {}&quot;, logContext, failedBookies, origEnsemble);</span>
+        }
+
+<span class="nc" id="L2219">        AtomicInteger attempts = new AtomicInteger(0);</span>
+<span class="nc" id="L2220">        new MetadataUpdateLoop(</span>
+<span class="nc" id="L2221">                clientCtx.getLedgerManager(), getId(),</span>
+                this::getVersionedLedgerMetadata,
+<span class="nc bnc" id="L2223" title="All 2 branches missed.">                (metadata) -&gt; metadata.getState() == LedgerMetadata.State.OPEN</span>
+<span class="nc bnc" id="L2224" title="All 2 branches missed.">                        &amp;&amp; failedBookies.entrySet().stream().anyMatch(</span>
+<span class="nc" id="L2225">                                e -&gt; LedgerMetadataUtils.getLastEnsembleValue(metadata)</span>
+<span class="nc" id="L2226">                                             .get(e.getKey()).equals(e.getValue())),</span>
+                (metadata) -&gt; {
+<span class="nc" id="L2228">                    attempts.incrementAndGet();</span>
+
+<span class="nc" id="L2230">                    List&lt;BookieId&gt; currentEnsemble = getCurrentEnsemble();</span>
+<span class="nc" id="L2231">                    List&lt;BookieId&gt; newEnsemble = EnsembleUtils.replaceBookiesInEnsemble(</span>
+<span class="nc" id="L2232">                            clientCtx.getBookieWatcher(), metadata, currentEnsemble, failedBookies, logContext);</span>
+<span class="nc" id="L2233">                    Long lastEnsembleKey = LedgerMetadataUtils.getLastEnsembleKey(metadata);</span>
+<span class="nc" id="L2234">                    LedgerMetadataBuilder builder = LedgerMetadataBuilder.from(metadata);</span>
+<span class="nc" id="L2235">                    long newEnsembleStartEntry = getLastAddConfirmed() + 1;</span>
+<span class="nc bnc" id="L2236" title="All 2 branches missed.">                    checkState(lastEnsembleKey &lt;= newEnsembleStartEntry,</span>
+                               &quot;New ensemble must either replace the last ensemble, or add a new one&quot;);
+<span class="nc bnc" id="L2238" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2239">                        LOG.debug(&quot;{}[attempt:{}] changing ensemble from: {} to: {} starting at entry: {}&quot;,</span>
+<span class="nc" id="L2240">                                  logContext, attempts.get(), currentEnsemble, newEnsemble, newEnsembleStartEntry);</span>
+                    }
+
+<span class="nc bnc" id="L2243" title="All 2 branches missed.">                    if (lastEnsembleKey.equals(newEnsembleStartEntry)) {</span>
+<span class="nc" id="L2244">                        return builder.replaceEnsembleEntry(newEnsembleStartEntry, newEnsemble).build();</span>
+                    } else {
+<span class="nc" id="L2246">                        return builder.newEnsembleEntry(newEnsembleStartEntry, newEnsemble).build();</span>
+                    }
+                },
+                this::setLedgerMetadata)
+<span class="nc" id="L2250">            .run().whenCompleteAsync((metadata, ex) -&gt; {</span>
+<span class="nc bnc" id="L2251" title="All 2 branches missed.">                    if (ex != null) {</span>
+<span class="nc" id="L2252">                        LOG.warn(&quot;{}[attempt:{}] Exception changing ensemble&quot;, logContext, attempts.get(), ex);</span>
+<span class="nc" id="L2253">                        handleUnrecoverableErrorDuringAdd(BKException.getExceptionCode(ex, WriteException));</span>
+<span class="nc bnc" id="L2254" title="All 2 branches missed.">                    } else if (metadata.getValue().isClosed()) {</span>
+<span class="nc bnc" id="L2255" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2256">                            LOG.debug(&quot;{}[attempt:{}] Metadata closed during attempt to replace bookie.&quot;</span>
+<span class="nc" id="L2257">                                      + &quot; Another client must have recovered the ledger.&quot;, logContext, attempts.get());</span>
+                        }
+<span class="nc" id="L2259">                        handleUnrecoverableErrorDuringAdd(BKException.Code.LedgerClosedException);</span>
+<span class="nc bnc" id="L2260" title="All 2 branches missed.">                    } else if (metadata.getValue().getState() == LedgerMetadata.State.IN_RECOVERY) {</span>
+<span class="nc bnc" id="L2261" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2262">                            LOG.debug(&quot;{}[attempt:{}] Metadata marked as in-recovery during attempt to replace bookie.&quot;</span>
+<span class="nc" id="L2263">                                      + &quot; Another client must be recovering the ledger.&quot;, logContext, attempts.get());</span>
+                        }
+
+<span class="nc" id="L2266">                        handleUnrecoverableErrorDuringAdd(BKException.Code.LedgerFencedException);</span>
+                    } else {
+<span class="nc bnc" id="L2268" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L2269">                            LOG.debug(&quot;{}[attempt:{}] Success updating metadata.&quot;, logContext, attempts.get());</span>
+                        }
+
+<span class="nc" id="L2272">                        List&lt;BookieId&gt; newEnsemble = null;</span>
+<span class="nc" id="L2273">                        Set&lt;Integer&gt; replaced = null;</span>
+
+<span class="nc" id="L2275">                        Map&lt;Integer, BookieId&gt; toReplace = null;</span>
+<span class="nc" id="L2276">                        synchronized (metadataLock) {</span>
+<span class="nc bnc" id="L2277" title="All 2 branches missed.">                            if (!delayedWriteFailedBookies.isEmpty()) {</span>
+<span class="nc" id="L2278">                                toReplace = new HashMap&lt;&gt;(delayedWriteFailedBookies);</span>
+<span class="nc" id="L2279">                                delayedWriteFailedBookies.clear();</span>
+                            } else {
+<span class="nc" id="L2281">                                newEnsemble = getCurrentEnsemble();</span>
+<span class="nc" id="L2282">                                replaced = EnsembleUtils.diffEnsemble(origEnsemble, newEnsemble);</span>
+<span class="nc" id="L2283">                                LOG.info(&quot;New Ensemble: {} for ledger: {}&quot;, newEnsemble, ledgerId);</span>
+
+<span class="nc" id="L2285">                                changingEnsemble = false;</span>
+                            }
+<span class="nc" id="L2287">                        }</span>
+
+<span class="nc bnc" id="L2289" title="All 4 branches missed.">                        if (toReplace != null &amp;&amp; !toReplace.isEmpty()) {</span>
+<span class="nc" id="L2290">                            ensembleChangeLoop(origEnsemble, toReplace);</span>
+                        }
+
+<span class="nc bnc" id="L2293" title="All 2 branches missed.">                        if (newEnsemble != null) { // unsetSuccess outside of lock</span>
+<span class="nc" id="L2294">                            unsetSuccessAndSendWriteRequest(newEnsemble, replaced);</span>
+                        }
+                    }
+<span class="nc" id="L2297">            }, clientCtx.getMainWorkerPool().chooseThread(ledgerId));</span>
+<span class="nc" id="L2298">    }</span>
+
+    void unsetSuccessAndSendWriteRequest(List&lt;BookieId&gt; ensemble, final Set&lt;Integer&gt; bookies) {
+<span class="nc bnc" id="L2301" title="All 2 branches missed.">        for (PendingAddOp pendingAddOp : pendingAddOps) {</span>
+<span class="nc bnc" id="L2302" title="All 2 branches missed.">            for (Integer bookieIndex: bookies) {</span>
+<span class="nc" id="L2303">                pendingAddOp.unsetSuccessAndSendWriteRequest(ensemble, bookieIndex);</span>
+<span class="nc" id="L2304">            }</span>
+<span class="nc" id="L2305">        }</span>
+<span class="nc" id="L2306">    }</span>
+
+    void registerOperationFailureOnBookie(BookieId bookie, long entryId) {
+<span class="nc bnc" id="L2309" title="All 2 branches missed.">        if (clientCtx.getConf().enableBookieFailureTracking) {</span>
+<span class="nc" id="L2310">            bookieFailureHistory.put(bookie, entryId);</span>
+        }
+<span class="nc" id="L2312">    }</span>
+
+<span class="nc" id="L2314">    static class NoopCloseCallback implements CloseCallback {</span>
+<span class="nc" id="L2315">        static NoopCloseCallback instance = new NoopCloseCallback();</span>
+
+        @Override
+        public void closeComplete(int rc, LedgerHandle lh, Object ctx) {
+<span class="nc bnc" id="L2319" title="All 2 branches missed.">            if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L2320">                LOG.warn(&quot;Close failed: {}&quot;, BKException.codeLogger(rc));</span>
+            }
+            // noop
+<span class="nc" id="L2323">        }</span>
+    }
+
+    /**
+     * Get the current ensemble from the ensemble list. The current ensemble
+     * is the last ensemble in the list. The ledger handle uses this ensemble when
+     * triggering operations which work on the end of the ledger, such as adding new
+     * entries or reading the last add confirmed.
+     *
+     * &lt;p&gt;This method is also used by ReadOnlyLedgerHandle during recovery, and when
+     * tailing a ledger.
+     *
+     * &lt;p&gt;Generally, this method should only be called by LedgerHandle and not by the
+     * operations themselves, to avoid adding more dependencies between the classes.
+     * There are too many already.
+     */
+    List&lt;BookieId&gt; getCurrentEnsemble() {
+        // Getting current ensemble from the metadata is only a temporary
+        // thing until metadata is immutable. At that point, current ensemble
+        // becomes a property of the LedgerHandle itself.
+<span class="nc" id="L2343">        return LedgerMetadataUtils.getCurrentEnsemble(versionedMetadata.getValue());</span>
+    }
+
+    /**
+     * Return a {@link WriteSet} suitable for reading a particular entry.
+     * This will include all bookies that are part of the ensemble for the entry.
+     */
+    WriteSet getWriteSetForReadOperation(long entryId) {
+<span class="nc bnc" id="L2351" title="All 2 branches missed.">        if (stickyBookieIndex != STICKY_READ_BOOKIE_INDEX_UNSET) {</span>
+            // When sticky reads are enabled we want to make sure to take
+            // advantage of read-ahead (or, anyway, from efficiencies in
+            // reading sequential data from disk through the page cache).
+            // For this, all the entries that a given bookie prefetches,
+            // should read from that bookie.
+            // For example, with e=2, w=2, a=2 we would have
+            // B-1 B-2
+            // e-0 X X
+            // e-1 X X
+            // e-2 X X
+            //
+            // In this case we want all the requests to be issued to B-1 (by
+            // preference), so that cache hits will be maximized.
+            //
+            // We can only enable sticky reads if the ensemble==writeQuorum
+            // otherwise the same bookie will not have all the entries
+            // stored
+<span class="nc" id="L2369">            return distributionSchedule.getWriteSet(stickyBookieIndex);</span>
+        } else {
+<span class="nc" id="L2371">            return distributionSchedule.getWriteSet(entryId);</span>
+        }
+    }
+
+    /**
+     * Execute the callback in the thread pinned to the ledger.
+     * @param runnable
+     * @throws RejectedExecutionException
+     */
+    void executeOrdered(Runnable runnable) throws RejectedExecutionException {
+<span class="nc" id="L2381">        executor.execute(runnable);</span>
+<span class="nc" id="L2382">    }</span>
+
+    @VisibleForTesting
+    public Queue&lt;PendingAddOp&gt; getPendingAddOps() {
+<span class="nc" id="L2386">        return pendingAddOps;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

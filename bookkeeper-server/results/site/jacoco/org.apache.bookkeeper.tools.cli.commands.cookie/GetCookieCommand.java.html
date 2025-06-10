@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GetCookieCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.cookie</a> &gt; <span class="el_source">GetCookieCommand.java</span></div><h1>GetCookieCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.tools.cli.commands.cookie;
+
+import java.io.PrintStream;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.BookieException.CookieNotFoundException;
+import org.apache.bookkeeper.bookie.Cookie;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.tools.cli.commands.cookie.GetCookieCommand.Flags;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.apache.bookkeeper.versioning.Versioned;
+
+/**
+ * A command that deletes cookie.
+ */
+<span class="nc" id="L39">@Slf4j</span>
+public class GetCookieCommand extends CookieCommand&lt;Flags&gt; {
+
+    private static final String NAME = &quot;get&quot;;
+    private static final String DESC = &quot;Retrieve a cookie for a given bookie&quot;;
+
+    private static final String USAGE = &quot;cookie_get      Retrieve a cookie for a given bookie\n&quot;
+            + &quot;             Usage:  cookie_get [options]\n&quot;
+            + &quot;             Options:\n&quot;
+            + &quot;             * &lt;bookie-id&gt;\n&quot;
+            + &quot;              The bookie-id to get (param format: `address:port`)&quot;;
+
+    /**
+     * Flags to delete a cookie for a given bookie.
+     */
+    @Accessors(fluent = true)
+    @Setter
+<span class="nc" id="L56">    public static class Flags extends CliFlags {</span>
+    }
+
+    public GetCookieCommand() {
+<span class="nc" id="L60">        this(new Flags());</span>
+<span class="nc" id="L61">    }</span>
+
+    GetCookieCommand(PrintStream console) {
+<span class="nc" id="L64">        this(new Flags(), console);</span>
+<span class="nc" id="L65">    }</span>
+
+    public GetCookieCommand(Flags flags) {
+<span class="nc" id="L68">        this(flags, System.out);</span>
+<span class="nc" id="L69">    }</span>
+
+    private GetCookieCommand(Flags flags, PrintStream console) {
+<span class="nc" id="L72">        super(CliSpec.&lt;Flags&gt;newBuilder()</span>
+<span class="nc" id="L73">            .withName(NAME)</span>
+<span class="nc" id="L74">            .withUsage(USAGE)</span>
+<span class="nc" id="L75">            .withDescription(DESC)</span>
+<span class="nc" id="L76">            .withFlags(flags)</span>
+<span class="nc" id="L77">            .withConsole(console)</span>
+<span class="nc" id="L78">            .withArgumentsUsage(&quot;&lt;bookie-id&gt;&quot;)</span>
+<span class="nc" id="L79">            .build());</span>
+<span class="nc" id="L80">    }</span>
+
+    @Override
+    protected void apply(RegistrationManager rm, Flags cmdFlags) throws Exception {
+<span class="nc" id="L84">        BookieId bookieId = getBookieId(cmdFlags);</span>
+
+        try {
+<span class="nc" id="L87">            Versioned&lt;Cookie&gt; cookie = Cookie.readFromRegistrationManager(rm, bookieId);</span>
+<span class="nc" id="L88">            spec.console().println(&quot;Cookie for bookie '&quot; + bookieId + &quot;' is:&quot;);</span>
+<span class="nc" id="L89">            spec.console().println(&quot;---&quot;);</span>
+<span class="nc" id="L90">            spec.console().println(</span>
+<span class="nc" id="L91">                cookie.getValue()</span>
+            );
+<span class="nc" id="L93">            spec.console().println(&quot;---&quot;);</span>
+<span class="nc" id="L94">        } catch (CookieNotFoundException cee) {</span>
+<span class="nc" id="L95">            spec.console()</span>
+<span class="nc" id="L96">                .println(&quot;Cookie not found for bookie '&quot; + bookieId + &quot;'&quot;);</span>
+<span class="nc" id="L97">            throw cee;</span>
+<span class="nc" id="L98">        } catch (BookieException be) {</span>
+<span class="nc" id="L99">            spec.console()</span>
+<span class="nc" id="L100">                .println(&quot;Exception on getting cookie for bookie '&quot; + bookieId + &quot;'&quot;);</span>
+<span class="nc" id="L101">            be.printStackTrace(spec.console());</span>
+<span class="nc" id="L102">            throw be;</span>
+<span class="nc" id="L103">        }</span>
+<span class="nc" id="L104">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

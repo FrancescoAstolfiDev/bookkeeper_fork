@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RegistrationClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.discover</a> &gt; <span class="el_source">RegistrationClient.java</span></div><h1>RegistrationClient.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.discover;
+
+import java.net.UnknownHostException;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import org.apache.bookkeeper.common.annotation.InterfaceAudience.LimitedPrivate;
+import org.apache.bookkeeper.common.annotation.InterfaceStability.Evolving;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Versioned;
+
+/**
+ * A registration client, which the bookkeeper client will use to interact with registration service.
+ */
+
+@LimitedPrivate
+@Evolving
+public interface RegistrationClient extends AutoCloseable {
+
+    /**
+     * Listener to receive changes from the registration service.
+     */
+    interface RegistrationListener {
+
+        void onBookiesChanged(Versioned&lt;Set&lt;BookieId&gt;&gt; bookies);
+
+    }
+
+    @Override
+    void close();
+
+    /**
+     * Get the list of writable bookie identifiers.
+     *
+     * @return a future represents the list of writable bookies.
+     */
+    CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; getWritableBookies();
+
+    /**
+     * Get the list of all bookies identifiers.
+     *
+     * @return a future represents the list of all bookies.
+     */
+    CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; getAllBookies();
+
+    /**
+     * Get the list of readonly bookie identifiers.
+     *
+     * @return a future represents the list of readonly bookies.
+     */
+    CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; getReadOnlyBookies();
+
+    /**
+     * Get detailed information about the services exposed by a Bookie.
+     * For old bookies it is expected to return an empty BookieServiceInfo structure.
+     *
+     * @param bookieId this is the id of the bookie, it can be computed from a {@link BookieId}
+     * @return a future represents the available information.
+     *
+     * @since 4.11
+     */
+    default CompletableFuture&lt;Versioned&lt;BookieServiceInfo&gt;&gt; getBookieServiceInfo(BookieId bookieId) {
+        try {
+<span class="nc" id="L83">            BookieServiceInfo bookieServiceInfo = BookieServiceInfoUtils</span>
+<span class="nc" id="L84">                    .buildLegacyBookieServiceInfo(bookieId.toString());</span>
+<span class="nc" id="L85">            return FutureUtils.value(new Versioned&lt;&gt;(bookieServiceInfo, new LongVersion(-1)));</span>
+<span class="nc" id="L86">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L87">            return FutureUtils.exception(e);</span>
+        }
+    }
+
+    /**
+     * Watch the changes of bookies.
+     *
+     * &lt;p&gt;The topology changes of bookies will be propagated to the provided &lt;i&gt;listener&lt;/i&gt;.
+     *
+     * @param listener listener to receive the topology changes of bookies.
+     * @return a future which completes when the bookies have been read for
+     *         the first time
+     */
+    CompletableFuture&lt;Void&gt; watchWritableBookies(RegistrationListener listener);
+
+    /**
+     * Unwatch the changes of bookies.
+     *
+     * @param listener listener to receive the topology changes of bookies.
+     */
+    void unwatchWritableBookies(RegistrationListener listener);
+
+    /**
+     * Watch the changes of bookies.
+     *
+     * &lt;p&gt;The topology changes of bookies will be propagated to the provided &lt;i&gt;listener&lt;/i&gt;.
+     *
+     * @param listener listener to receive the topology changes of bookies.
+     * @return a future which completes when the bookies have been read for
+     *         the first time
+     */
+    CompletableFuture&lt;Void&gt; watchReadOnlyBookies(RegistrationListener listener);
+
+    /**
+     * Unwatch the changes of bookies.
+     *
+     * @param listener listener to receive the topology changes of bookies.
+     */
+    void unwatchReadOnlyBookies(RegistrationListener listener);
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

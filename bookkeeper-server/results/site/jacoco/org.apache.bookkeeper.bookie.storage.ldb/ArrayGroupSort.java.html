@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ArrayGroupSort.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">ArrayGroupSort.java</span></div><h1>ArrayGroupSort.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import static com.google.common.base.Preconditions.checkArgument;
+
+import lombok.experimental.UtilityClass;
+
+/**
+ * Sort an array of longs, grouping the items in tuples.
+ *
+ * &lt;p&gt;Group size decides how many longs are included in the tuples and key size controls how many items to use for
+ * comparison.
+ */
+@UtilityClass
+<span class="nc" id="L34">public class ArrayGroupSort {</span>
+
+    private static final int INSERTION_SORT_THRESHOLD = 100;
+
+    private static final int GROUP_SIZE = 4;
+
+    public void sort(long[] array) {
+<span class="nc" id="L41">        sort(array, 0, array.length);</span>
+<span class="nc" id="L42">    }</span>
+
+    public static void sort(long[] array, int offset, int length) {
+<span class="nc bnc" id="L45" title="All 2 branches missed.">        checkArgument(length % GROUP_SIZE == 0, &quot;Array length must be multiple of 4&quot;);</span>
+<span class="nc" id="L46">        quickSort(array, offset, (length + offset - GROUP_SIZE));</span>
+<span class="nc" id="L47">    }</span>
+
+    ////// Private
+
+    private static void quickSort(long[] array, int low, int high) {
+<span class="nc bnc" id="L52" title="All 2 branches missed.">        if (low &gt;= high) {</span>
+<span class="nc" id="L53">            return;</span>
+        }
+
+<span class="nc bnc" id="L56" title="All 2 branches missed.">        if (high - low &lt; INSERTION_SORT_THRESHOLD) {</span>
+<span class="nc" id="L57">            insertionSort(array, low, high);</span>
+<span class="nc" id="L58">            return;</span>
+        }
+
+<span class="nc" id="L61">        int pivotIdx = partition(array, low, high);</span>
+<span class="nc" id="L62">        quickSort(array, low, pivotIdx - GROUP_SIZE);</span>
+<span class="nc" id="L63">        quickSort(array, pivotIdx + GROUP_SIZE, high);</span>
+<span class="nc" id="L64">    }</span>
+
+    private static int alignGroup(int count) {
+<span class="nc" id="L67">        return count - (count % GROUP_SIZE);</span>
+    }
+
+    private static int partition(long[] array, int low, int high) {
+<span class="nc" id="L71">        int mid = low + alignGroup((high - low) / 2);</span>
+<span class="nc" id="L72">        swap(array, mid, high);</span>
+
+<span class="nc" id="L74">        int i = low;</span>
+
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        for (int j = low; j &lt; high; j += GROUP_SIZE) {</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">            if (isLess(array, j, high)) {</span>
+<span class="nc" id="L78">                swap(array, j, i);</span>
+<span class="nc" id="L79">                i += GROUP_SIZE;</span>
+            }
+        }
+
+<span class="nc" id="L83">        swap(array, i, high);</span>
+<span class="nc" id="L84">        return i;</span>
+    }
+
+    private static void swap(long[] array, int a, int b) {
+<span class="nc" id="L88">        long tmp0 = array[a];</span>
+<span class="nc" id="L89">        long tmp1 = array[a + 1];</span>
+<span class="nc" id="L90">        long tmp2 = array[a + 2];</span>
+<span class="nc" id="L91">        long tmp3 = array[a + 3];</span>
+
+<span class="nc" id="L93">        array[a] = array[b];</span>
+<span class="nc" id="L94">        array[a + 1] = array[b + 1];</span>
+<span class="nc" id="L95">        array[a + 2] = array[b + 2];</span>
+<span class="nc" id="L96">        array[a + 3] = array[b + 3];</span>
+
+<span class="nc" id="L98">        array[b] = tmp0;</span>
+<span class="nc" id="L99">        array[b + 1] = tmp1;</span>
+<span class="nc" id="L100">        array[b + 2] = tmp2;</span>
+<span class="nc" id="L101">        array[b + 3] = tmp3;</span>
+<span class="nc" id="L102">    }</span>
+
+    private static boolean isLess(long[] array, int a, int b) {
+<span class="nc" id="L105">        long a0 = array[a];</span>
+<span class="nc" id="L106">        long b0 = array[b];</span>
+
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (a0 &lt; b0) {</span>
+<span class="nc" id="L109">            return true;</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        } else if (a0 &gt; b0) {</span>
+<span class="nc" id="L111">            return false;</span>
+        }
+
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        return array[a + 1] &lt; array[b + 1];</span>
+    }
+
+    private static void insertionSort(long[] a, int low, int high) {
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        for (int i = low + GROUP_SIZE; i &lt;= high; i += GROUP_SIZE) {</span>
+<span class="nc" id="L119">            int j = i;</span>
+<span class="nc bnc" id="L120" title="All 4 branches missed.">            while (j &gt; 0 &amp;&amp; isLess(a, j, j - GROUP_SIZE)) {</span>
+<span class="nc" id="L121">                swap(a, j, j - GROUP_SIZE);</span>
+<span class="nc" id="L122">                j -= GROUP_SIZE;</span>
+            }
+        }
+<span class="nc" id="L125">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

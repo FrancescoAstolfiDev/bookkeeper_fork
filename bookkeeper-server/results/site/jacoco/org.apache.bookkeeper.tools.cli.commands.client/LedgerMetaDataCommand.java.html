@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerMetaDataCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.client</a> &gt; <span class="el_source">LedgerMetaDataCommand.java</span></div><h1>LedgerMetaDataCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.client;
+
+import static org.apache.bookkeeper.meta.MetadataDrivers.runFunctionWithLedgerManagerFactory;
+
+import com.beust.jcommander.Parameter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.client.BKException.BKLedgerExistException;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
+import org.apache.bookkeeper.meta.exceptions.MetadataException;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.apache.bookkeeper.util.LedgerIdFormatter;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Print the metadata for a ledger.
+ */
+@SuppressFBWarnings(&quot;RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE&quot;)
+public class LedgerMetaDataCommand extends BookieCommand&lt;LedgerMetaDataCommand.LedgerMetadataFlag&gt; {
+
+    private static final String NAME = &quot;show&quot;;
+    private static final String DESC = &quot;Print the metadata for a ledger, or optionally dump to a file.&quot;;
+    private static final String DEFAULT = &quot;&quot;;
+    private static final long DEFAULT_ID = -1L;
+<span class="nc" id="L57">    private static final Logger LOG = LoggerFactory.getLogger(LedgerMetaDataCommand.class);</span>
+
+<span class="nc" id="L59">    private LedgerMetadataSerDe serDe = new LedgerMetadataSerDe();</span>
+    private LedgerIdFormatter ledgerIdFormatter;
+
+    public LedgerMetaDataCommand() {
+<span class="nc" id="L63">        this(new LedgerMetadataFlag());</span>
+<span class="nc" id="L64">    }</span>
+
+    public LedgerMetaDataCommand(LedgerIdFormatter ledgerIdFormatter) {
+<span class="nc" id="L67">        this();</span>
+<span class="nc" id="L68">        this.ledgerIdFormatter = ledgerIdFormatter;</span>
+<span class="nc" id="L69">    }</span>
+
+    public LedgerMetaDataCommand(LedgerMetadataFlag flag) {
+<span class="nc" id="L72">        super(CliSpec.&lt;LedgerMetadataFlag&gt;newBuilder()</span>
+<span class="nc" id="L73">                  .withName(NAME)</span>
+<span class="nc" id="L74">                  .withDescription(DESC)</span>
+<span class="nc" id="L75">                  .withFlags(flag)</span>
+<span class="nc" id="L76">                  .build());</span>
+<span class="nc" id="L77">    }</span>
+
+    /**
+     * Flags for ledger metadata command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L83">    @Setter</span>
+<span class="nc" id="L84">    public static class LedgerMetadataFlag extends CliFlags {</span>
+
+<span class="nc" id="L86">        @Parameter(names = { &quot;-l&quot;, &quot;--ledgerid&quot; }, description = &quot;Ledger ID&quot;, required = true)</span>
+        private long ledgerId = DEFAULT_ID;
+
+<span class="nc" id="L89">        @Parameter(names = { &quot;-d&quot;, &quot;--dumptofile&quot; }, description = &quot;Dump metadata for ledger, to a file&quot;)</span>
+        private String dumpToFile = DEFAULT;
+
+<span class="nc" id="L92">        @Parameter(names = { &quot;-r&quot;, &quot;--restorefromfile&quot; }, description = &quot;Restore metadata for ledger, from a file&quot;)</span>
+        private String restoreFromFile = DEFAULT;
+
+<span class="nc" id="L95">        @Parameter(names =  {&quot;-lf&quot;, &quot;--ledgeridformatter&quot;}, description = &quot;Set ledger id formatter&quot;)</span>
+        private String ledgerIdFormatter = DEFAULT;
+
+<span class="nc" id="L98">        @Parameter(names = { &quot;-u&quot;,</span>
+                &quot;--update&quot; }, description = &quot;Update metadata if already exist while restoring metadata&quot;)
+        private boolean update = false;
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, LedgerMetadataFlag cmdFlags) {
+<span class="nc bnc" id="L105" title="All 4 branches missed.">        if (!cmdFlags.ledgerIdFormatter.equals(DEFAULT) &amp;&amp; ledgerIdFormatter == null) {</span>
+<span class="nc" id="L106">            this.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(cmdFlags.ledgerIdFormatter, conf);</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        } else if (ledgerIdFormatter == null) {</span>
+<span class="nc" id="L108">            this.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(conf);</span>
+        }
+        try {
+<span class="nc" id="L111">            return handler(conf, cmdFlags);</span>
+<span class="nc" id="L112">        } catch (Exception e) {</span>
+<span class="nc" id="L113">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    private boolean handler(ServerConfiguration conf, LedgerMetadataFlag flag)
+        throws MetadataException, ExecutionException {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (flag.ledgerId == DEFAULT_ID) {</span>
+<span class="nc" id="L120">            LOG.error(&quot;Must specific a ledger id&quot;);</span>
+<span class="nc" id="L121">            return false;</span>
+        }
+<span class="nc" id="L123">        runFunctionWithLedgerManagerFactory(conf, mFactory -&gt; {</span>
+<span class="nc" id="L124">            try (LedgerManager m = mFactory.newLedgerManager()) {</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                if (!flag.dumpToFile.equals(DEFAULT)) {</span>
+<span class="nc" id="L126">                    Versioned&lt;LedgerMetadata&gt; md = m.readLedgerMetadata(flag.ledgerId).join();</span>
+<span class="nc" id="L127">                    Files.write(FileSystems.getDefault().getPath(flag.dumpToFile),</span>
+<span class="nc" id="L128">                                serDe.serialize(md.getValue()));</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">                } else if (!flag.restoreFromFile.equals(DEFAULT)) {</span>
+<span class="nc" id="L130">                    byte[] serialized = Files.readAllBytes(</span>
+<span class="nc" id="L131">                        FileSystems.getDefault().getPath(flag.restoreFromFile));</span>
+<span class="nc" id="L132">                    LedgerMetadata md = serDe.parseConfig(serialized, flag.ledgerId, Optional.empty());</span>
+                    try {
+<span class="nc" id="L134">                        m.createLedgerMetadata(flag.ledgerId, md).join();</span>
+<span class="nc" id="L135">                    } catch (Exception be) {</span>
+<span class="nc bnc" id="L136" title="All 4 branches missed.">                        if (!flag.update || !(be.getCause() instanceof BKLedgerExistException)) {</span>
+<span class="nc" id="L137">                            throw be;</span>
+                        }
+<span class="nc" id="L139">                        m.writeLedgerMetadata(flag.ledgerId, md, new LongVersion(-1L)).join();</span>
+<span class="nc" id="L140">                        LOG.info(&quot;successfully updated ledger metadata {}&quot;, flag.ledgerId);</span>
+<span class="nc" id="L141">                    }</span>
+<span class="nc" id="L142">                } else {</span>
+<span class="nc" id="L143">                    printLedgerMetadata(flag.ledgerId, m.readLedgerMetadata(flag.ledgerId).get().getValue(), true);</span>
+                }
+<span class="nc" id="L145">            } catch (Exception e) {</span>
+<span class="nc" id="L146">                throw new UncheckedExecutionException(e);</span>
+<span class="nc" id="L147">            }</span>
+<span class="nc" id="L148">            return null;</span>
+        });
+<span class="nc" id="L150">        return true;</span>
+    }
+
+    private void printLedgerMetadata(long ledgerId, LedgerMetadata md, boolean printMeta) {
+<span class="nc" id="L154">        LOG.info(&quot;ledgerID: {}&quot;, ledgerIdFormatter.formatLedgerId(ledgerId));</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (printMeta) {</span>
+<span class="nc" id="L156">            LOG.info(&quot;{}&quot;, md.toString());</span>
+        }
+<span class="nc" id="L158">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

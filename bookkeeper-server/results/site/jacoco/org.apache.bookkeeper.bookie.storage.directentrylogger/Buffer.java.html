@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Buffer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.directentrylogger</a> &gt; <span class="el_source">Buffer.java</span></div><h1>Buffer.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.directentrylogger;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.bookkeeper.common.util.ExceptionMessageHelper.exMsg;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.util.ReferenceCountUtil;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Arrays;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
+
+/**
+ * A utility buffer class to be used with native calls.
+ * &lt;p/&gt;
+ * Buffers are page aligned (4k pages).
+ * &lt;p/&gt;
+ * The wrapper mostly handles writes between ByteBuffers and
+ * ByteBufs. It also provides a method for padding the buffer to the next
+ * alignment, so writes can have an aligned size also (as required by
+ * direct I/O). The padding is done with 0xF0, so that if it is read as
+ * an integer, or long, the value will be negative (assuming the read is
+ * a java read, and thus a signed int).
+ */
+class Buffer {
+    /* Padding byte must have MSB set, so if read at the start
+     * of an integer or long, the returned value is negative. */
+    public static final byte PADDING_BYTE = (byte) 0xF0;
+
+    /* Some machines can live with 512 alignment, but others
+     * appear to require 4096, so go with 4096, which is page
+     * alignment */
+    public static final int ALIGNMENT = 4096;
+    private static final int MAX_ALIGNMENT = Integer.MAX_VALUE &amp; ~(ALIGNMENT - 1);
+<span class="nc" id="L57">    static final byte[] PADDING = generatePadding();</span>
+
+    final NativeIO nativeIO;
+    final int bufferSize;
+    ByteBuf buffer;
+    ByteBuffer byteBuffer;
+    ByteBufAllocator allocator;
+<span class="nc" id="L64">    long pointer = 0;</span>
+
+<span class="nc" id="L66">    Buffer(NativeIO nativeIO, ByteBufAllocator allocator, int bufferSize) throws IOException {</span>
+<span class="nc" id="L67">        checkArgument(isAligned(bufferSize),</span>
+                      &quot;Buffer size not aligned %d&quot;, bufferSize);
+
+<span class="nc" id="L70">        this.allocator = allocator;</span>
+<span class="nc" id="L71">        this.buffer = allocateAligned(ALIGNMENT, bufferSize);</span>
+<span class="nc" id="L72">        this.nativeIO = nativeIO;</span>
+<span class="nc" id="L73">        this.bufferSize = bufferSize;</span>
+<span class="nc" id="L74">        byteBuffer = buffer.nioBuffer(0, bufferSize);</span>
+<span class="nc" id="L75">        byteBuffer.order(ByteOrder.BIG_ENDIAN);</span>
+<span class="nc" id="L76">    }</span>
+
+    private ByteBuf allocateAligned(int alignment, int bufferSize) {
+<span class="nc" id="L79">        ByteBuf buf = allocator.directBuffer(bufferSize + alignment);</span>
+<span class="nc" id="L80">        long addr = buf.memoryAddress();</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if ((addr &amp; (alignment - 1)) == 0) {</span>
+            // The address is already aligned
+<span class="nc" id="L83">            pointer = addr;</span>
+<span class="nc" id="L84">            return buf.slice(0, bufferSize);</span>
+        } else {
+<span class="nc" id="L86">            int alignOffset = (int) (alignment - (addr &amp; (alignment - 1)));</span>
+<span class="nc" id="L87">            pointer = addr + alignOffset;</span>
+<span class="nc" id="L88">            return buf.slice(alignOffset, bufferSize);</span>
+        }
+    }
+
+    /**
+     * @return whether there is space in the buffer for size bytes.
+     */
+    boolean hasSpace(int size) throws IOException {
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (size &gt; bufferSize) {</span>
+<span class="nc" id="L97">            throw new IOException(exMsg(&quot;Write too large&quot;).kv(&quot;writeSize&quot;, size)</span>
+<span class="nc" id="L98">                                  .kv(&quot;maxSize&quot;, bufferSize).toString());</span>
+        }
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        return byteBuffer.remaining() &gt;= size;</span>
+    }
+
+    /**
+     * @return whether the buffer can honour a read of size at offset.
+     */
+    boolean hasData(int offset, int size) {
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        return offset + size &lt;= bufferSize;</span>
+    }
+
+    /**
+     * Write an integer to buffer. Progresses the position of the buffer by 4 bytes.
+     */
+    void writeInt(int value) throws IOException {
+<span class="nc" id="L114">        byteBuffer.putInt(value);</span>
+<span class="nc" id="L115">    }</span>
+
+    /**
+     * Write a btebuf to this buffer. Progresses the position of the buffer by the
+     * number of readable bytes of the bytebuf. Progresses the readerIndex of the passed
+     * bytebuf by the number of bytes read (i.e. to the end).
+     */
+    void writeByteBuf(ByteBuf bytebuf) throws IOException {
+<span class="nc" id="L123">        int bytesWritten = bytebuf.readableBytes();</span>
+<span class="nc" id="L124">        ByteBuffer bytesToPut = bytebuf.nioBuffer();</span>
+<span class="nc" id="L125">        byteBuffer.put(bytesToPut);</span>
+<span class="nc" id="L126">        bytebuf.skipBytes(bytesWritten);</span>
+<span class="nc" id="L127">    }</span>
+
+    /**
+     * Read an integer from the buffer at the given offset. The offset is in bytes.
+     */
+    int readInt(int offset) throws IOException {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (!hasData(offset, Integer.BYTES)) {</span>
+<span class="nc" id="L134">            throw new IOException(exMsg(&quot;Buffer cannot satisfy int read&quot;)</span>
+<span class="nc" id="L135">                                  .kv(&quot;offset&quot;, offset)</span>
+<span class="nc" id="L136">                                  .kv(&quot;bufferSize&quot;, bufferSize).toString());</span>
+        }
+        try {
+<span class="nc" id="L139">            return byteBuffer.getInt(offset);</span>
+<span class="nc" id="L140">        } catch (Exception e) {</span>
+<span class="nc" id="L141">            throw new IOException(exMsg(&quot;Error reading int&quot;)</span>
+<span class="nc" id="L142">                                  .kv(&quot;byteBuffer&quot;, byteBuffer.toString())</span>
+<span class="nc" id="L143">                                  .kv(&quot;offset&quot;, offset)</span>
+<span class="nc" id="L144">                                  .kv(&quot;bufferSize&quot;, bufferSize).toString(), e);</span>
+        }
+    }
+
+    /**
+     * Read a long from the buffer at the given offset. The offset is in bytes.
+     */
+    long readLong(int offset) throws IOException {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (!hasData(offset, Long.BYTES)) {</span>
+<span class="nc" id="L153">            throw new IOException(exMsg(&quot;Buffer cannot satisfy long read&quot;)</span>
+<span class="nc" id="L154">                                  .kv(&quot;offset&quot;, offset)</span>
+<span class="nc" id="L155">                                  .kv(&quot;bufferSize&quot;, bufferSize).toString());</span>
+        }
+        try {
+<span class="nc" id="L158">            return byteBuffer.getLong(offset);</span>
+<span class="nc" id="L159">        } catch (Exception e) {</span>
+<span class="nc" id="L160">            throw new IOException(exMsg(&quot;Error reading long&quot;)</span>
+<span class="nc" id="L161">                                  .kv(&quot;byteBuffer&quot;, byteBuffer.toString())</span>
+<span class="nc" id="L162">                                  .kv(&quot;offset&quot;, offset)</span>
+<span class="nc" id="L163">                                  .kv(&quot;bufferSize&quot;, bufferSize).toString(), e);</span>
+        }
+    }
+
+    /**
+     * Read a bytebuf of size from the buffer at the given offset.
+     * If there are not enough bytes in the buffer to satisfy the read, some of the bytes are read
+     * into the byte buffer and the number of bytes read is returned.
+     */
+    int readByteBuf(ByteBuf buffer, int offset, int size) throws IOException {
+<span class="nc" id="L173">        int originalLimit = byteBuffer.limit();</span>
+<span class="nc" id="L174">        byteBuffer.position(offset);</span>
+<span class="nc" id="L175">        int bytesToRead = Math.min(size, byteBuffer.capacity() - offset);</span>
+<span class="nc" id="L176">        byteBuffer.limit(offset + bytesToRead);</span>
+        try {
+<span class="nc" id="L178">            buffer.writeBytes(byteBuffer);</span>
+<span class="nc" id="L179">        } catch (Exception e) {</span>
+<span class="nc" id="L180">            throw new IOException(exMsg(&quot;Error reading buffer&quot;)</span>
+<span class="nc" id="L181">                                  .kv(&quot;byteBuffer&quot;, byteBuffer.toString())</span>
+<span class="nc" id="L182">                                  .kv(&quot;offset&quot;, offset).kv(&quot;size&quot;, size)</span>
+<span class="nc" id="L183">                                  .kv(&quot;bufferSize&quot;, bufferSize).toString(), e);</span>
+        } finally {
+<span class="nc" id="L185">            byteBuffer.limit(originalLimit);</span>
+        }
+<span class="nc" id="L187">        return bytesToRead;</span>
+    }
+
+    /**
+     * The data pointer object for the native buffer. This can be used
+     * by JNI method which take a char* or void*.
+     */
+    long pointer() {
+<span class="nc" id="L195">        return pointer;</span>
+    }
+
+    long pointer(long offset, long expectedWrite) {
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        if (offset == 0) {</span>
+<span class="nc" id="L200">            return pointer;</span>
+        } else {
+<span class="nc bnc" id="L202" title="All 2 branches missed.">            if (offset + expectedWrite &gt; byteBuffer.capacity()) {</span>
+<span class="nc" id="L203">                throw new IllegalArgumentException(</span>
+<span class="nc" id="L204">                        exMsg(&quot;Buffer overflow&quot;).kv(&quot;offset&quot;, offset).kv(&quot;expectedWrite&quot;, expectedWrite)</span>
+<span class="nc" id="L205">                        .kv(&quot;capacity&quot;, byteBuffer.capacity()).toString());</span>
+            }
+
+<span class="nc" id="L208">            return pointer + offset;</span>
+        }
+    }
+    /**
+     * @return the number of bytes which have been written to this buffer.
+     */
+    int position() {
+<span class="nc" id="L215">        return byteBuffer.position();</span>
+    }
+
+    /**
+     * @return the size of the buffer (i.e. the max number of bytes writable, or the max offset readable)
+     */
+    int size() {
+<span class="nc" id="L222">        return bufferSize;</span>
+    }
+
+    /**
+     * Pad the buffer to the next alignment position.
+     * @return the position of the next alignment. This should be used as the size argument to make aligned writes.
+     */
+    int padToAlignment() {
+<span class="nc" id="L230">        int bufferPos = byteBuffer.position();</span>
+<span class="nc" id="L231">        int nextAlignment = nextAlignment(bufferPos);</span>
+<span class="nc" id="L232">        byteBuffer.put(PADDING, 0, nextAlignment - bufferPos);</span>
+<span class="nc" id="L233">        return nextAlignment;</span>
+    }
+
+    /**
+     * Clear the bytes written. This doesn't actually destroy the data, but moves the position back to the start of
+     * the buffer.
+     */
+    void reset() {
+<span class="nc" id="L241">        byteBuffer.clear();</span>
+<span class="nc" id="L242">    }</span>
+
+    /**
+     * Free the memory that backs this buffer.
+     */
+    void free() {
+<span class="nc" id="L248">        ReferenceCountUtil.release(buffer);</span>
+<span class="nc" id="L249">        buffer = null;</span>
+<span class="nc" id="L250">        byteBuffer = null;</span>
+<span class="nc" id="L251">    }</span>
+    private static byte[] generatePadding() {
+<span class="nc" id="L253">        byte[] padding = new byte[ALIGNMENT];</span>
+<span class="nc" id="L254">        Arrays.fill(padding, (byte) PADDING_BYTE);</span>
+<span class="nc" id="L255">        return padding;</span>
+    }
+
+    static boolean isAligned(long size) {
+<span class="nc bnc" id="L259" title="All 4 branches missed.">        return size &gt;= 0 &amp;&amp; ((ALIGNMENT - 1) &amp; size) == 0;</span>
+    }
+
+    static int nextAlignment(int pos) {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        checkArgument(pos &lt;= MAX_ALIGNMENT,</span>
+                      &quot;position (0x%x) must be lower or equal to max alignment (0x%x)&quot;,
+                       pos, MAX_ALIGNMENT);
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        checkArgument(pos &gt;= 0, &quot;position (0x%x) must be positive&quot;, pos);</span>
+<span class="nc" id="L267">        return (pos + (ALIGNMENT - 1)) &amp; ~(ALIGNMENT - 1);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

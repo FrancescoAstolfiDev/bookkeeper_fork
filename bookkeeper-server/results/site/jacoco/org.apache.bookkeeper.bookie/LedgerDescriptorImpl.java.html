@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerDescriptorImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">LedgerDescriptorImpl.java</span></div><h1>LedgerDescriptorImpl.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import io.netty.buffer.ByteBuf;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.PrimitiveIterator.OfLong;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.bookkeeper.client.api.BKException;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.common.util.Watcher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Implements a ledger inside a bookie. In particular, it implements operations
+ * to write entries to a ledger and read entries from a ledger.
+ */
+public class LedgerDescriptorImpl extends LedgerDescriptor {
+<span class="fc" id="L41">    private static final Logger LOG = LoggerFactory.getLogger(LedgerDescriptorImpl.class);</span>
+    final LedgerStorage ledgerStorage;
+    private final long ledgerId;
+    final byte[] masterKey;
+
+<span class="fc" id="L46">    private final AtomicBoolean fenceEntryPersisted = new AtomicBoolean();</span>
+<span class="fc" id="L47">    private CompletableFuture&lt;Boolean&gt; logFenceResult = null;</span>
+
+    LedgerDescriptorImpl(byte[] masterKey,
+                         long ledgerId,
+<span class="fc" id="L51">                         LedgerStorage ledgerStorage) {</span>
+<span class="fc" id="L52">        this.masterKey = masterKey;</span>
+<span class="fc" id="L53">        this.ledgerId = ledgerId;</span>
+<span class="fc" id="L54">        this.ledgerStorage = ledgerStorage;</span>
+<span class="fc" id="L55">    }</span>
+
+    @Override
+    void checkAccess(byte[] masterKey) throws BookieException, IOException {
+<span class="fc bfc" id="L59" title="All 2 branches covered.">        if (!Arrays.equals(this.masterKey, masterKey)) {</span>
+<span class="fc" id="L60">            LOG.error(&quot;[{}] Requested master key {} does not match the cached master key {}&quot;,</span>
+<span class="fc" id="L61">                    this.ledgerId, Arrays.toString(masterKey), Arrays.toString(this.masterKey));</span>
+<span class="fc" id="L62">            throw BookieException.create(BookieException.Code.UnauthorizedAccessException);</span>
+        }
+<span class="fc" id="L64">    }</span>
+
+    @Override
+    public long getLedgerId() {
+<span class="fc" id="L68">        return ledgerId;</span>
+    }
+
+    @Override
+    boolean setFenced() throws IOException {
+<span class="fc" id="L73">        return  ledgerStorage.setFenced(ledgerId);</span>
+    }
+
+    @Override
+    boolean isFenced() throws IOException, BookieException {
+<span class="fc" id="L78">        return ledgerStorage.isFenced(ledgerId);</span>
+    }
+
+    @Override
+    void setExplicitLac(ByteBuf lac) throws IOException {
+<span class="fc" id="L83">        ledgerStorage.setExplicitLac(ledgerId, lac);</span>
+<span class="fc" id="L84">    }</span>
+
+    @Override
+    ByteBuf getExplicitLac() throws IOException, BookieException {
+<span class="fc" id="L88">        return ledgerStorage.getExplicitLac(ledgerId);</span>
+    }
+
+    @Override
+    synchronized CompletableFuture&lt;Boolean&gt; fenceAndLogInJournal(Journal journal) throws IOException {
+<span class="fc" id="L93">        boolean success = this.setFenced();</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">        if (success) {</span>
+            // fenced for first time, we should add the key to journal ensure we can rebuild.
+<span class="fc" id="L96">            return logFenceEntryInJournal(journal);</span>
+        } else {
+            // If we reach here, it means the fence state in FileInfo has been set (may not be persisted yet).
+            // However, writing the fence log entry to the journal might still be in progress. This can happen
+            // when a bookie receives two fence requests almost at the same time. The subsequent logic is used
+            // to check the fencing progress.
+<span class="pc bpc" id="L102" title="2 of 4 branches missed.">            if (logFenceResult == null || fenceEntryPersisted.get()){</span>
+                // Either ledger's fenced state is recovered from Journal
+                // Or Log fence entry in Journal succeed
+<span class="nc" id="L105">                CompletableFuture&lt;Boolean&gt; result = FutureUtils.createFuture();</span>
+<span class="nc" id="L106">                result.complete(true);</span>
+<span class="nc" id="L107">                return result;</span>
+<span class="fc bfc" id="L108" title="All 2 branches covered.">            } else if (logFenceResult.isDone()) {</span>
+                // We failed to log fence entry in Journal, try again.
+<span class="fc" id="L110">                return logFenceEntryInJournal(journal);</span>
+            }
+            // Fencing is in progress
+<span class="fc" id="L113">            return logFenceResult;</span>
+        }
+    }
+
+    /**
+     * Log the fence ledger entry in Journal so that we can rebuild the state.
+     * @param journal log the fence entry in the Journal
+     * @return A future which will be satisfied when add entry to journal complete
+     */
+    private CompletableFuture&lt;Boolean&gt; logFenceEntryInJournal(Journal journal) {
+        CompletableFuture&lt;Boolean&gt; result;
+<span class="fc" id="L124">        synchronized (this) {</span>
+<span class="fc" id="L125">            result = logFenceResult = FutureUtils.createFuture();</span>
+<span class="fc" id="L126">        }</span>
+<span class="fc" id="L127">        ByteBuf entry = createLedgerFenceEntry(ledgerId);</span>
+        try {
+<span class="fc" id="L129">            journal.logAddEntry(entry, false /* ackBeforeSync */, (rc, ledgerId, entryId, addr, ctx) -&gt; {</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L131">                    LOG.debug(&quot;Record fenced state for ledger {} in journal with rc {}&quot;,</span>
+<span class="nc" id="L132">                            ledgerId, BKException.codeLogger(rc));</span>
+                }
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                if (rc == 0) {</span>
+<span class="nc" id="L135">                    fenceEntryPersisted.compareAndSet(false, true);</span>
+<span class="nc" id="L136">                    result.complete(true);</span>
+                } else {
+<span class="nc" id="L138">                    result.complete(false);</span>
+                }
+<span class="nc" id="L140">            }, null);</span>
+<span class="fc" id="L141">        } catch (InterruptedException e) {</span>
+<span class="fc" id="L142">            Thread.currentThread().interrupt();</span>
+<span class="fc" id="L143">            result.completeExceptionally(e);</span>
+<span class="fc" id="L144">        }</span>
+<span class="fc" id="L145">        return result;</span>
+    }
+
+    @Override
+    long addEntry(ByteBuf entry) throws IOException, BookieException {
+<span class="fc" id="L150">        long ledgerId = entry.getLong(entry.readerIndex());</span>
+
+<span class="fc bfc" id="L152" title="All 2 branches covered.">        if (ledgerId != this.ledgerId) {</span>
+<span class="fc" id="L153">            throw new IOException(&quot;Entry for ledger &quot; + ledgerId + &quot; was sent to &quot; + this.ledgerId);</span>
+        }
+
+<span class="fc" id="L156">        return ledgerStorage.addEntry(entry);</span>
+    }
+
+    @Override
+    ByteBuf readEntry(long entryId) throws IOException, BookieException {
+<span class="fc" id="L161">        return ledgerStorage.getEntry(ledgerId, entryId);</span>
+    }
+
+    @Override
+    long getLastAddConfirmed() throws IOException, BookieException {
+<span class="fc" id="L166">        return ledgerStorage.getLastAddConfirmed(ledgerId);</span>
+    }
+
+    @Override
+    boolean waitForLastAddConfirmedUpdate(long previousLAC,
+                                          Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher) throws IOException {
+<span class="fc" id="L172">        return ledgerStorage.waitForLastAddConfirmedUpdate(ledgerId, previousLAC, watcher);</span>
+    }
+
+    @Override
+    void cancelWaitForLastAddConfirmedUpdate(Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher) throws IOException {
+<span class="fc" id="L177">        ledgerStorage.cancelWaitForLastAddConfirmedUpdate(ledgerId, watcher);</span>
+<span class="fc" id="L178">    }</span>
+
+    @Override
+    OfLong getListOfEntriesOfLedger(long ledgerId) throws IOException {
+<span class="fc" id="L182">        return ledgerStorage.getListOfEntriesOfLedger(ledgerId);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

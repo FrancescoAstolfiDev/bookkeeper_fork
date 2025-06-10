@@ -1,0 +1,509 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EntryMemTable.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">EntryMemTable.java</span></div><h1>EntryMemTable.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Iterator;
+import java.util.PrimitiveIterator;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.apache.bookkeeper.bookie.Bookie.NoLedgerException;
+import org.apache.bookkeeper.bookie.CheckpointSource.Checkpoint;
+import org.apache.bookkeeper.bookie.stats.EntryMemTableStats;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.IteratorUtility;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The EntryMemTable holds in-memory representation to the entries not-yet flushed.
+ * When asked to flush, current EntrySkipList is moved to snapshot and is cleared.
+ * We continue to serve edits out of new EntrySkipList and backing snapshot until
+ * flusher reports in that the flush succeeded. At that point we let the snapshot go.
+ */
+public class EntryMemTable implements AutoCloseable{
+<span class="nc" id="L49">    private static Logger logger = LoggerFactory.getLogger(EntryMemTable.class);</span>
+    /**
+     * Entry skip list.
+     */
+    static class EntrySkipList extends ConcurrentSkipListMap&lt;EntryKey, EntryKeyValue&gt; {
+        final Checkpoint cp;
+<span class="nc" id="L55">        static final EntrySkipList EMPTY_VALUE = new EntrySkipList(Checkpoint.MAX) {</span>
+            @Override
+            public boolean isEmpty() {
+<span class="nc" id="L58">                return true;</span>
+            }
+        };
+
+        EntrySkipList(final Checkpoint cp) {
+<span class="nc" id="L63">            super(EntryKey.COMPARATOR);</span>
+<span class="nc" id="L64">            this.cp = cp;</span>
+<span class="nc" id="L65">        }</span>
+
+        int compareTo(final Checkpoint cp) {
+<span class="nc" id="L68">            return this.cp.compareTo(cp);</span>
+        }
+
+        @Override
+        public EntryKeyValue put(EntryKey k, EntryKeyValue v) {
+<span class="nc" id="L73">            return putIfAbsent(k, v);</span>
+        }
+
+        @Override
+        public EntryKeyValue putIfAbsent(EntryKey k, EntryKeyValue v) {
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            assert k.equals(v);</span>
+<span class="nc" id="L79">            return super.putIfAbsent(v, v);</span>
+        }
+
+        @Override
+        public boolean equals(Object o) {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            return this == o;</span>
+        }
+    }
+
+    volatile EntrySkipList kvmap;
+
+    // Snapshot of EntryMemTable.  Made for flusher.
+    volatile EntrySkipList snapshot;
+
+    final ServerConfiguration conf;
+    final CheckpointSource checkpointSource;
+
+<span class="nc" id="L96">    final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();</span>
+
+    // Used to track own data size
+    final AtomicLong size;
+
+    final long skipListSizeLimit;
+    final Semaphore skipListSemaphore;
+
+    SkipListArena allocator;
+
+    // flag indicating the status of the previous flush call
+    private final AtomicBoolean previousFlushSucceeded;
+
+    private EntrySkipList newSkipList() {
+<span class="nc" id="L110">        return new EntrySkipList(checkpointSource.newCheckpoint());</span>
+    }
+
+    // Stats
+    protected final EntryMemTableStats memTableStats;
+
+    /**
+    * Constructor.
+    * @param conf Server configuration
+    */
+    public EntryMemTable(final ServerConfiguration conf, final CheckpointSource source,
+<span class="nc" id="L121">                         final StatsLogger statsLogger) {</span>
+<span class="nc" id="L122">        this.checkpointSource = source;</span>
+<span class="nc" id="L123">        this.kvmap = newSkipList();</span>
+<span class="nc" id="L124">        this.snapshot = EntrySkipList.EMPTY_VALUE;</span>
+<span class="nc" id="L125">        this.conf = conf;</span>
+<span class="nc" id="L126">        this.size = new AtomicLong(0);</span>
+<span class="nc" id="L127">        this.allocator = new SkipListArena(conf);</span>
+<span class="nc" id="L128">        this.previousFlushSucceeded = new AtomicBoolean(true);</span>
+        // skip list size limit
+<span class="nc" id="L130">        this.skipListSizeLimit = conf.getSkipListSizeLimit();</span>
+
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (skipListSizeLimit &gt; (Integer.MAX_VALUE - 1) / 2) {</span>
+            // gives 2*1023MB for mem table.
+            // consider a way to create semaphore with long num of permits
+            // until that 1023MB should be enough for everything (tm)
+<span class="nc" id="L136">            throw new IllegalArgumentException(&quot;skiplist size over &quot; + ((Integer.MAX_VALUE - 1) / 2));</span>
+        }
+        // double the size for snapshot in progress + incoming data
+<span class="nc" id="L139">        this.skipListSemaphore = new Semaphore((int) skipListSizeLimit * 2);</span>
+
+        // Stats
+<span class="nc" id="L142">        this.memTableStats = new EntryMemTableStats(statsLogger);</span>
+<span class="nc" id="L143">    }</span>
+
+    void dump() {
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        for (EntryKey key: this.kvmap.keySet()) {</span>
+<span class="nc" id="L147">            logger.info(key.toString());</span>
+<span class="nc" id="L148">        }</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        for (EntryKey key: this.snapshot.keySet()) {</span>
+<span class="nc" id="L150">            logger.info(key.toString());</span>
+<span class="nc" id="L151">        }</span>
+<span class="nc" id="L152">    }</span>
+
+    Checkpoint snapshot() throws IOException {
+<span class="nc" id="L155">        return snapshot(Checkpoint.MAX);</span>
+    }
+
+    /**
+     * Snapshot current EntryMemTable. if given &lt;i&gt;oldCp&lt;/i&gt; is older than current checkpoint,
+     * we don't do any snapshot. If snapshot happened, we return the checkpoint of the snapshot.
+     *
+     * @param oldCp
+     *          checkpoint
+     * @return checkpoint of the snapshot, null means no snapshot
+     * @throws IOException
+     */
+    Checkpoint snapshot(Checkpoint oldCp) throws IOException {
+<span class="nc" id="L168">        Checkpoint cp = null;</span>
+        // No-op if snapshot currently has entries
+<span class="nc bnc" id="L170" title="All 4 branches missed.">        if (this.snapshot.isEmpty() &amp;&amp; this.kvmap.compareTo(oldCp) &lt; 0) {</span>
+<span class="nc" id="L171">            final long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L172">            this.lock.writeLock().lock();</span>
+            try {
+<span class="nc bnc" id="L174" title="All 4 branches missed.">                if (this.snapshot.isEmpty() &amp;&amp; !this.kvmap.isEmpty()</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                        &amp;&amp; this.kvmap.compareTo(oldCp) &lt; 0) {</span>
+<span class="nc" id="L176">                    this.snapshot = this.kvmap;</span>
+<span class="nc" id="L177">                    this.kvmap = newSkipList();</span>
+                    // get the checkpoint of the memtable.
+<span class="nc" id="L179">                    cp = this.kvmap.cp;</span>
+                    // Reset heap to not include any keys
+<span class="nc" id="L181">                    this.size.set(0);</span>
+                    // Reset allocator so we get a fresh buffer for the new EntryMemTable
+<span class="nc" id="L183">                    this.allocator = new SkipListArena(conf);</span>
+                }
+            } finally {
+<span class="nc" id="L186">                this.lock.writeLock().unlock();</span>
+            }
+
+<span class="nc bnc" id="L189" title="All 2 branches missed.">            if (null != cp) {</span>
+<span class="nc" id="L190">                memTableStats.getSnapshotStats()</span>
+<span class="nc" id="L191">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            } else {
+<span class="nc" id="L193">                memTableStats.getSnapshotStats()</span>
+<span class="nc" id="L194">                    .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            }
+        }
+<span class="nc" id="L197">        return cp;</span>
+    }
+
+    /**
+     * Flush snapshot and clear it.
+     */
+    long flush(final SkipListFlusher flusher) throws IOException {
+        try {
+<span class="nc" id="L205">            long flushSize = flushSnapshot(flusher, Checkpoint.MAX);</span>
+<span class="nc" id="L206">            previousFlushSucceeded.set(true);</span>
+<span class="nc" id="L207">            return flushSize;</span>
+<span class="nc" id="L208">        } catch (IOException ioe) {</span>
+<span class="nc" id="L209">            previousFlushSucceeded.set(false);</span>
+<span class="nc" id="L210">            throw ioe;</span>
+        }
+    }
+
+    /**
+     * Flush memtable until checkpoint.
+     *
+     * @param checkpoint
+     *          all data before this checkpoint need to be flushed.
+     */
+    public long flush(SkipListFlusher flusher, Checkpoint checkpoint) throws IOException {
+        try {
+<span class="nc" id="L222">            long size = flushSnapshot(flusher, checkpoint);</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            if (null != snapshot(checkpoint)) {</span>
+<span class="nc" id="L224">                size += flushSnapshot(flusher, checkpoint);</span>
+            }
+<span class="nc" id="L226">            previousFlushSucceeded.set(true);</span>
+<span class="nc" id="L227">            return size;</span>
+<span class="nc" id="L228">        } catch (IOException ioe) {</span>
+<span class="nc" id="L229">            previousFlushSucceeded.set(false);</span>
+<span class="nc" id="L230">            throw ioe;</span>
+        }
+    }
+
+    /**
+     * Flush snapshot and clear it iff its data is before checkpoint. Only this
+     * function change non-empty this.snapshot.
+     *
+     * &lt;p&gt;EntryMemTableWithParallelFlusher overrides this flushSnapshot method. So
+     * any change in functionality/behavior/characteristic of this method should
+     * also reflect in EntryMemTableWithParallelFlusher's flushSnapshot method.
+     */
+    long flushSnapshot(final SkipListFlusher flusher, Checkpoint checkpoint) throws IOException {
+<span class="nc" id="L243">        long size = 0;</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (this.snapshot.compareTo(checkpoint) &lt; 0) {</span>
+<span class="nc" id="L245">            long ledger, ledgerGC = -1;</span>
+<span class="nc" id="L246">            synchronized (this) {</span>
+<span class="nc" id="L247">                EntrySkipList keyValues = this.snapshot;</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                if (keyValues.compareTo(checkpoint) &lt; 0) {</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">                    for (EntryKey key : keyValues.keySet()) {</span>
+<span class="nc" id="L250">                        EntryKeyValue kv = (EntryKeyValue) key;</span>
+<span class="nc" id="L251">                        size += kv.getLength();</span>
+<span class="nc" id="L252">                        ledger = kv.getLedgerId();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                        if (ledgerGC != ledger) {</span>
+                            try {
+<span class="nc" id="L255">                                flusher.process(ledger, kv.getEntryId(), kv.getValueAsByteBuffer());</span>
+<span class="nc" id="L256">                            } catch (NoLedgerException exception) {</span>
+<span class="nc" id="L257">                                ledgerGC = ledger;</span>
+<span class="nc" id="L258">                            }</span>
+                        }
+<span class="nc" id="L260">                    }</span>
+<span class="nc" id="L261">                    memTableStats.getFlushBytesCounter().addCount(size);</span>
+<span class="nc" id="L262">                    clearSnapshot(keyValues);</span>
+                }
+<span class="nc" id="L264">            }</span>
+        }
+
+<span class="nc" id="L267">        skipListSemaphore.release((int) size);</span>
+<span class="nc" id="L268">        return size;</span>
+    }
+
+    /**
+     * The passed snapshot was successfully persisted; it can be let go.
+     * @param keyValues The snapshot to clean out.
+     * @see {@link #snapshot()}
+     */
+    void clearSnapshot(final EntrySkipList keyValues) {
+        // Caller makes sure that keyValues not empty
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        assert !keyValues.isEmpty();</span>
+<span class="nc" id="L279">        this.lock.writeLock().lock();</span>
+        try {
+            // create a new snapshot and let the old one go.
+<span class="nc bnc" id="L282" title="All 2 branches missed.">            assert this.snapshot == keyValues;</span>
+<span class="nc" id="L283">            this.snapshot = EntrySkipList.EMPTY_VALUE;</span>
+        } finally {
+<span class="nc" id="L285">            this.lock.writeLock().unlock();</span>
+        }
+<span class="nc" id="L287">    }</span>
+
+    /**
+     * Write an update.
+     *
+     * @param entry
+     * @return approximate size of the passed key and value.
+     * @throws IOException
+     */
+    public long addEntry(long ledgerId, long entryId, final ByteBuffer entry, final CacheCallback cb)
+            throws IOException {
+<span class="nc" id="L298">        long size = 0;</span>
+<span class="nc" id="L299">        long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L300">        boolean success = false;</span>
+        try {
+<span class="nc bnc" id="L302" title="All 4 branches missed.">            if (isSizeLimitReached() || (!previousFlushSucceeded.get())) {</span>
+<span class="nc" id="L303">                Checkpoint cp = snapshot();</span>
+<span class="nc bnc" id="L304" title="All 4 branches missed.">                if ((null != cp) || (!previousFlushSucceeded.get())) {</span>
+<span class="nc" id="L305">                    cb.onSizeLimitReached(cp);</span>
+                }
+            }
+
+<span class="nc" id="L309">            final int len = entry.remaining();</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">            if (!skipListSemaphore.tryAcquire(len)) {</span>
+<span class="nc" id="L311">                memTableStats.getThrottlingCounter().inc();</span>
+<span class="nc" id="L312">                final long throttlingStartTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L313">                skipListSemaphore.acquireUninterruptibly(len);</span>
+<span class="nc" id="L314">                memTableStats.getThrottlingStats()</span>
+<span class="nc" id="L315">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(throttlingStartTimeNanos), TimeUnit.NANOSECONDS);</span>
+            }
+
+<span class="nc" id="L318">            this.lock.readLock().lock();</span>
+            try {
+<span class="nc" id="L320">                EntryKeyValue toAdd = cloneWithAllocator(ledgerId, entryId, entry);</span>
+<span class="nc" id="L321">                size = internalAdd(toAdd);</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                if (size == 0) {</span>
+<span class="nc" id="L323">                    skipListSemaphore.release(len);</span>
+                }
+            } finally {
+<span class="nc" id="L326">                this.lock.readLock().unlock();</span>
+            }
+<span class="nc" id="L328">            success = true;</span>
+<span class="nc" id="L329">            return size;</span>
+        } finally {
+<span class="nc bnc" id="L331" title="All 2 branches missed.">            if (success) {</span>
+<span class="nc" id="L332">                memTableStats.getPutEntryStats()</span>
+<span class="nc" id="L333">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            } else {
+<span class="nc" id="L335">                memTableStats.getPutEntryStats()</span>
+<span class="nc" id="L336">                    .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            }
+        }
+    }
+
+    /**
+    * Internal version of add() that doesn't clone KVs with the
+    * allocator, and doesn't take the lock.
+    * Callers should ensure they already have the read lock taken
+    */
+    private long internalAdd(final EntryKeyValue toAdd) throws IOException {
+<span class="nc" id="L347">        long sizeChange = 0;</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        if (kvmap.putIfAbsent(toAdd, toAdd) == null) {</span>
+<span class="nc" id="L349">            sizeChange = toAdd.getLength();</span>
+<span class="nc" id="L350">            size.addAndGet(sizeChange);</span>
+        }
+<span class="nc" id="L352">        return sizeChange;</span>
+    }
+
+    private EntryKeyValue newEntry(long ledgerId, long entryId, final ByteBuffer entry) {
+        byte[] buf;
+<span class="nc" id="L357">        int offset = 0;</span>
+<span class="nc" id="L358">        int length = entry.remaining();</span>
+
+<span class="nc" id="L360">        buf = new byte[length];</span>
+<span class="nc" id="L361">        entry.get(buf);</span>
+<span class="nc" id="L362">        return new EntryKeyValue(ledgerId, entryId, buf, offset, length);</span>
+    }
+
+    private EntryKeyValue cloneWithAllocator(long ledgerId, long entryId, final ByteBuffer entry) {
+<span class="nc" id="L366">        int len = entry.remaining();</span>
+<span class="nc" id="L367">        SkipListArena.MemorySlice alloc = allocator.allocateBytes(len);</span>
+<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (alloc == null) {</span>
+            // The allocation was too large, allocator decided
+            // not to do anything with it.
+<span class="nc" id="L371">            return newEntry(ledgerId, entryId, entry);</span>
+        }
+
+<span class="nc bnc" id="L374" title="All 2 branches missed.">        assert alloc.getData() != null;</span>
+<span class="nc" id="L375">        entry.get(alloc.getData(), alloc.getOffset(), len);</span>
+<span class="nc" id="L376">        return new EntryKeyValue(ledgerId, entryId, alloc.getData(), alloc.getOffset(), len);</span>
+    }
+
+    /**
+     * Find the entry with given key.
+     * @param ledgerId
+     * @param entryId
+     * @return the entry kv or null if none found.
+     */
+    public EntryKeyValue getEntry(long ledgerId, long entryId) throws IOException {
+<span class="nc" id="L386">        EntryKey key = new EntryKey(ledgerId, entryId);</span>
+<span class="nc" id="L387">        EntryKeyValue value = null;</span>
+<span class="nc" id="L388">        long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L389">        boolean success = false;</span>
+<span class="nc" id="L390">        this.lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L392">            value = this.kvmap.get(key);</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">            if (value == null) {</span>
+<span class="nc" id="L394">                value = this.snapshot.get(key);</span>
+            }
+<span class="nc" id="L396">            success = true;</span>
+        } finally {
+<span class="nc" id="L398">            this.lock.readLock().unlock();</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">            if (success) {</span>
+<span class="nc" id="L400">                memTableStats.getGetEntryStats()</span>
+<span class="nc" id="L401">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            } else {
+<span class="nc" id="L403">                memTableStats.getGetEntryStats()</span>
+<span class="nc" id="L404">                    .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            }
+        }
+
+<span class="nc" id="L408">        return value;</span>
+    }
+
+    /**
+     * Find the last entry with the given ledger key.
+     * @param ledgerId
+     * @return the entry kv or null if none found.
+     */
+    public EntryKeyValue getLastEntry(long ledgerId) throws IOException {
+<span class="nc" id="L417">        EntryKey result = null;</span>
+<span class="nc" id="L418">        EntryKey key = new EntryKey(ledgerId, Long.MAX_VALUE);</span>
+<span class="nc" id="L419">        long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L420">        boolean success = false;</span>
+<span class="nc" id="L421">        this.lock.readLock().lock();</span>
+        try {
+<span class="nc" id="L423">            result = this.kvmap.floorKey(key);</span>
+<span class="nc bnc" id="L424" title="All 4 branches missed.">            if (result == null || result.getLedgerId() != ledgerId) {</span>
+<span class="nc" id="L425">                result = this.snapshot.floorKey(key);</span>
+            }
+<span class="nc" id="L427">            success = true;</span>
+        } finally {
+<span class="nc" id="L429">            this.lock.readLock().unlock();</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">            if (success) {</span>
+<span class="nc" id="L431">                memTableStats.getGetEntryStats()</span>
+<span class="nc" id="L432">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            } else {
+<span class="nc" id="L434">                memTableStats.getGetEntryStats()</span>
+<span class="nc" id="L435">                    .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+            }
+        }
+
+<span class="nc bnc" id="L439" title="All 4 branches missed.">        if (result == null || result.getLedgerId() != ledgerId) {</span>
+<span class="nc" id="L440">            return null;</span>
+        }
+<span class="nc" id="L442">        return (EntryKeyValue) result;</span>
+    }
+
+    /**
+     * Check if the entire heap usage for this EntryMemTable exceeds limit.
+     */
+    boolean isSizeLimitReached() {
+<span class="nc bnc" id="L449" title="All 2 branches missed.">        return size.get() &gt;= skipListSizeLimit;</span>
+    }
+
+    /**
+     * Check if there is data in the mem-table.
+     * @return
+     */
+    boolean isEmpty() {
+<span class="nc bnc" id="L457" title="All 4 branches missed.">        return size.get() == 0 &amp;&amp; snapshot.isEmpty();</span>
+    }
+
+    @Override
+    public void close() throws Exception {
+        // no-op
+<span class="nc" id="L463">    }</span>
+
+    /*
+     * returns the primitive long iterator of entries of a ledger available in
+     * this EntryMemTable. It would be in the ascending order and this Iterator
+     * is weakly consistent.
+     */
+    PrimitiveIterator.OfLong getListOfEntriesOfLedger(long ledgerId) {
+<span class="nc" id="L471">        EntryKey thisLedgerFloorEntry = new EntryKey(ledgerId, 0);</span>
+<span class="nc" id="L472">        EntryKey thisLedgerCeilingEntry = new EntryKey(ledgerId, Long.MAX_VALUE);</span>
+        Iterator&lt;EntryKey&gt; thisLedgerEntriesInKVMap;
+        Iterator&lt;EntryKey&gt; thisLedgerEntriesInSnapshot;
+<span class="nc" id="L475">        this.lock.readLock().lock();</span>
+        try {
+            /*
+             * Gets a view of the portion of this map that corresponds to
+             * entries of this ledger.
+             *
+             * Here 'kvmap' is of type 'ConcurrentSkipListMap', so its 'subMap'
+             * call would return a view of the portion of this map whose keys
+             * range from fromKey to toKey and it would be of type
+             * 'ConcurrentNavigableMap'. ConcurrentNavigableMap's 'keySet' would
+             * return NavigableSet view of the keys contained in this map. This
+             * view's iterator would be weakly consistent -
+             * https://docs.oracle.com/javase/8/docs/api/java/util/concurrent/
+             * package-summary.html#Weakly.
+             *
+             * 'weakly consistent' would guarantee 'to traverse elements as they
+             * existed upon construction exactly once, and may (but are not
+             * guaranteed to) reflect any modifications subsequent to
+             * construction.'
+             *
+             */
+<span class="nc" id="L496">            thisLedgerEntriesInKVMap = this.kvmap.subMap(thisLedgerFloorEntry, thisLedgerCeilingEntry).keySet()</span>
+<span class="nc" id="L497">                    .iterator();</span>
+<span class="nc" id="L498">            thisLedgerEntriesInSnapshot = this.snapshot.subMap(thisLedgerFloorEntry, thisLedgerCeilingEntry).keySet()</span>
+<span class="nc" id="L499">                    .iterator();</span>
+        } finally {
+<span class="nc" id="L501">            this.lock.readLock().unlock();</span>
+        }
+<span class="nc" id="L503">        return IteratorUtility.mergeIteratorsForPrimitiveLongIterator(thisLedgerEntriesInKVMap,</span>
+                thisLedgerEntriesInSnapshot, EntryKey.COMPARATOR, (entryKey) -&gt; {
+<span class="nc" id="L505">                    return entryKey.entryId;</span>
+                });
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

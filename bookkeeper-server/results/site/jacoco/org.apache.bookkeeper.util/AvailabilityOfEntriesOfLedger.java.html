@@ -1,0 +1,439 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AvailabilityOfEntriesOfLedger.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.util</a> &gt; <span class="el_source">AvailabilityOfEntriesOfLedger.java</span></div><h1>AvailabilityOfEntriesOfLedger.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.util;
+
+import io.netty.buffer.ByteBuf;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.List;
+import java.util.Map.Entry;
+import java.util.PrimitiveIterator;
+import java.util.TreeMap;
+import org.apache.commons.lang3.mutable.MutableInt;
+import org.apache.commons.lang3.mutable.MutableLong;
+import org.apache.commons.lang3.mutable.MutableObject;
+
+/**
+ * Ordered collection of SequenceGroups will represent entries of the ledger
+ * residing in a bookie.
+ *
+ * &lt;p&gt;In the byte array representation of AvailabilityOfEntriesOfLedger, for the
+ * sake of future extensibility it would be helpful to have reserved space for
+ * header at the beginning. So the first 64 bytes will be used for header, with
+ * the first four bytes specifying the int version number, next four bytes
+ * specifying the number of sequencegroups for now and the rest of the bytes in
+ * the reserved space will be 0's. The encoded format will be represented after
+ * the first 64 bytes. The ordered collection of SequenceGroups will be appended
+ * sequentially to this byte array, with each SequenceGroup taking 24 bytes.
+ */
+public class AvailabilityOfEntriesOfLedger {
+    public static final long INVALID_ENTRYID = -1;
+    public static final AvailabilityOfEntriesOfLedger EMPTY_AVAILABILITYOFENTRIESOFLEDGER;
+    static {
+<span class="nc" id="L50">        long[] tmpArray = {};</span>
+<span class="nc" id="L51">        EMPTY_AVAILABILITYOFENTRIESOFLEDGER = new AvailabilityOfEntriesOfLedger(Arrays.stream(tmpArray).iterator());</span>
+<span class="nc" id="L52">    }</span>
+
+    /*
+     *
+     * Nomenclature:
+     *
+     * - Continuous entries are grouped as a ’Sequence’. - Number of continuous
+     * entries in a ‘Sequence’ is called ‘sequenceSize’. - Gap between
+     * Consecutive sequences is called ‘sequencePeriod’. - Consecutive sequences
+     * with same sequenceSize and same sequencePeriod in between consecutive
+     * sequences are grouped as a SequenceGroup. - ‘firstSequenceStart’ is the
+     * first entry in the first sequence of the SequenceGroup. -
+     * ‘lastSequenceStart’ is the first entry in the last sequence of the
+     * SequenceGroup.
+     *
+     * To represent a SequenceGroup, two long values and two int values are
+     * needed, so each SequenceGroup can be represented with (2 * 8 + 2 * 4 = 24
+     * bytes).
+     */
+    private static class SequenceGroup {
+        private static final int SEQUENCEGROUP_BYTES = 2 * Long.BYTES + 2 * Integer.BYTES;
+        private final long firstSequenceStart;
+        private final int sequenceSize;
+<span class="nc" id="L75">        private long lastSequenceStart = INVALID_ENTRYID;</span>
+        private int sequencePeriod;
+<span class="nc" id="L77">        private boolean isSequenceGroupClosed = false;</span>
+<span class="nc" id="L78">        private long numOfEntriesInSequenceGroup = 0;</span>
+
+<span class="nc" id="L80">        private SequenceGroup(long firstSequenceStart, int sequenceSize) {</span>
+<span class="nc" id="L81">            this.firstSequenceStart = firstSequenceStart;</span>
+<span class="nc" id="L82">            this.lastSequenceStart = firstSequenceStart;</span>
+<span class="nc" id="L83">            this.sequenceSize = sequenceSize;</span>
+<span class="nc" id="L84">            this.sequencePeriod = 0;</span>
+<span class="nc" id="L85">        }</span>
+
+<span class="nc" id="L87">        private SequenceGroup(byte[] serializedSequenceGroup) {</span>
+<span class="nc" id="L88">            ByteBuffer buffer = ByteBuffer.wrap(serializedSequenceGroup);</span>
+<span class="nc" id="L89">            firstSequenceStart = buffer.getLong();</span>
+<span class="nc" id="L90">            lastSequenceStart = buffer.getLong();</span>
+<span class="nc" id="L91">            sequenceSize = buffer.getInt();</span>
+<span class="nc" id="L92">            sequencePeriod = buffer.getInt();</span>
+<span class="nc" id="L93">            setSequenceGroupClosed();</span>
+<span class="nc" id="L94">        }</span>
+
+        private boolean isSequenceGroupClosed() {
+<span class="nc" id="L97">            return isSequenceGroupClosed;</span>
+        }
+
+        private void setSequenceGroupClosed() {
+<span class="nc" id="L101">            this.isSequenceGroupClosed = true;</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">            numOfEntriesInSequenceGroup = (lastSequenceStart - firstSequenceStart) == 0 ? sequenceSize</span>
+<span class="nc" id="L103">                    : (((lastSequenceStart - firstSequenceStart) / sequencePeriod) + 1) * sequenceSize;</span>
+<span class="nc" id="L104">        }</span>
+
+        private long getNumOfEntriesInSequenceGroup() {
+<span class="nc bnc" id="L107" title="All 2 branches missed.">            if (!isSequenceGroupClosed()) {</span>
+<span class="nc" id="L108">                throw new IllegalStateException(</span>
+                        &quot;SequenceGroup is not yet closed, it is illegal to call getNumOfEntriesInSequenceGroup&quot;);
+            }
+<span class="nc" id="L111">            return numOfEntriesInSequenceGroup;</span>
+        }
+
+        private long getLastSequenceStart() {
+<span class="nc" id="L115">            return lastSequenceStart;</span>
+        }
+
+        private long getLastEntryInSequenceGroup() {
+<span class="nc" id="L119">            return lastSequenceStart + sequenceSize;</span>
+        }
+
+        private void setLastSequenceStart(long lastSequenceStart) {
+<span class="nc" id="L123">            this.lastSequenceStart = lastSequenceStart;</span>
+<span class="nc" id="L124">        }</span>
+
+        private int getSequencePeriod() {
+<span class="nc" id="L127">            return sequencePeriod;</span>
+        }
+
+        private void setSequencePeriod(int sequencePeriod) {
+<span class="nc" id="L131">            this.sequencePeriod = sequencePeriod;</span>
+<span class="nc" id="L132">        }</span>
+
+        private long getFirstSequenceStart() {
+<span class="nc" id="L135">            return firstSequenceStart;</span>
+        }
+
+        private void serializeSequenceGroup(byte[] byteArrayForSerialization) {
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            if (!isSequenceGroupClosed()) {</span>
+<span class="nc" id="L140">                throw new IllegalStateException(</span>
+                        &quot;SequenceGroup is not yet closed, it is illegal to call serializeSequenceGroup&quot;);
+            }
+<span class="nc" id="L143">            ByteBuffer buffer = ByteBuffer.wrap(byteArrayForSerialization);</span>
+<span class="nc" id="L144">            buffer.putLong(firstSequenceStart);</span>
+<span class="nc" id="L145">            buffer.putLong(lastSequenceStart);</span>
+<span class="nc" id="L146">            buffer.putInt(sequenceSize);</span>
+<span class="nc" id="L147">            buffer.putInt(sequencePeriod);</span>
+<span class="nc" id="L148">        }</span>
+
+        private boolean isEntryAvailable(long entryId) {
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            if (!isSequenceGroupClosed()) {</span>
+<span class="nc" id="L152">                throw new IllegalStateException(</span>
+                        &quot;SequenceGroup is not yet closed, it is illegal to call isEntryAvailable&quot;);
+            }
+
+<span class="nc bnc" id="L156" title="All 4 branches missed.">            if ((entryId &gt;= firstSequenceStart) &amp;&amp; (entryId &lt;= (lastSequenceStart + sequenceSize))) {</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">                if (sequencePeriod == 0) {</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                    return ((entryId - firstSequenceStart) &lt; sequenceSize);</span>
+                } else {
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                    return (((entryId - firstSequenceStart) % sequencePeriod) &lt; sequenceSize);</span>
+                }
+            } else {
+<span class="nc" id="L163">                return false;</span>
+            }
+        }
+    }
+
+    public static final int HEADER_SIZE = 64;
+    public static final int V0 = 0;
+    // current version of AvailabilityOfEntriesOfLedger header is V0
+    public static final int CURRENT_HEADER_VERSION = V0;
+<span class="nc" id="L172">    private final TreeMap&lt;Long, SequenceGroup&gt; sortedSequenceGroups = new TreeMap&lt;Long, SequenceGroup&gt;();</span>
+<span class="nc" id="L173">    private MutableObject&lt;SequenceGroup&gt; curSequenceGroup = new MutableObject&lt;SequenceGroup&gt;(null);</span>
+<span class="nc" id="L174">    private MutableLong curSequenceStartEntryId = new MutableLong(INVALID_ENTRYID);</span>
+<span class="nc" id="L175">    private MutableInt curSequenceSize = new MutableInt(0);</span>
+<span class="nc" id="L176">    private boolean availabilityOfEntriesOfLedgerClosed = false;</span>
+<span class="nc" id="L177">    private long totalNumOfAvailableEntries = 0;</span>
+
+<span class="nc" id="L179">    public AvailabilityOfEntriesOfLedger(PrimitiveIterator.OfLong entriesOfLedgerItr) {</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        while (entriesOfLedgerItr.hasNext()) {</span>
+<span class="nc" id="L181">            this.addEntryToAvailableEntriesOfLedger(entriesOfLedgerItr.nextLong());</span>
+        }
+<span class="nc" id="L183">        this.closeStateOfEntriesOfALedger();</span>
+<span class="nc" id="L184">    }</span>
+
+<span class="nc" id="L186">    public AvailabilityOfEntriesOfLedger(long[] entriesOfLedger) {</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        for (long entry : entriesOfLedger) {</span>
+<span class="nc" id="L188">            this.addEntryToAvailableEntriesOfLedger(entry);</span>
+        }
+<span class="nc" id="L190">        this.closeStateOfEntriesOfALedger();</span>
+<span class="nc" id="L191">    }</span>
+
+<span class="nc" id="L193">    public AvailabilityOfEntriesOfLedger(byte[] serializeStateOfEntriesOfLedger) {</span>
+<span class="nc" id="L194">        byte[] header = new byte[HEADER_SIZE];</span>
+<span class="nc" id="L195">        byte[] serializedSequenceGroupByteArray = new byte[SequenceGroup.SEQUENCEGROUP_BYTES];</span>
+<span class="nc" id="L196">        System.arraycopy(serializeStateOfEntriesOfLedger, 0, header, 0, HEADER_SIZE);</span>
+
+<span class="nc" id="L198">        ByteBuffer headerByteBuf = ByteBuffer.wrap(header);</span>
+<span class="nc" id="L199">        int headerVersion = headerByteBuf.getInt();</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        if (headerVersion &gt; CURRENT_HEADER_VERSION) {</span>
+<span class="nc" id="L201">            throw new IllegalArgumentException(&quot;Unsupported Header Version: &quot; + headerVersion);</span>
+        }
+<span class="nc" id="L203">        int numOfSequenceGroups = headerByteBuf.getInt();</span>
+        SequenceGroup newSequenceGroup;
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        for (int i = 0; i &lt; numOfSequenceGroups; i++) {</span>
+<span class="nc" id="L206">            Arrays.fill(serializedSequenceGroupByteArray, (byte) 0);</span>
+<span class="nc" id="L207">            System.arraycopy(serializeStateOfEntriesOfLedger, HEADER_SIZE + (i * SequenceGroup.SEQUENCEGROUP_BYTES),</span>
+                    serializedSequenceGroupByteArray, 0, SequenceGroup.SEQUENCEGROUP_BYTES);
+<span class="nc" id="L209">            newSequenceGroup = new SequenceGroup(serializedSequenceGroupByteArray);</span>
+<span class="nc" id="L210">            sortedSequenceGroups.put(newSequenceGroup.getFirstSequenceStart(), newSequenceGroup);</span>
+        }
+<span class="nc" id="L212">        setAvailabilityOfEntriesOfLedgerClosed();</span>
+<span class="nc" id="L213">    }</span>
+
+<span class="nc" id="L215">    public AvailabilityOfEntriesOfLedger(ByteBuf byteBuf) {</span>
+<span class="nc" id="L216">        byte[] header = new byte[HEADER_SIZE];</span>
+<span class="nc" id="L217">        byte[] serializedSequenceGroupByteArray = new byte[SequenceGroup.SEQUENCEGROUP_BYTES];</span>
+<span class="nc" id="L218">        int readerIndex = byteBuf.readerIndex();</span>
+<span class="nc" id="L219">        byteBuf.getBytes(readerIndex, header, 0, HEADER_SIZE);</span>
+
+<span class="nc" id="L221">        ByteBuffer headerByteBuf = ByteBuffer.wrap(header);</span>
+<span class="nc" id="L222">        int headerVersion = headerByteBuf.getInt();</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (headerVersion &gt; CURRENT_HEADER_VERSION) {</span>
+<span class="nc" id="L224">            throw new IllegalArgumentException(&quot;Unsupported Header Version: &quot; + headerVersion);</span>
+        }
+<span class="nc" id="L226">        int numOfSequenceGroups = headerByteBuf.getInt();</span>
+        SequenceGroup newSequenceGroup;
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        for (int i = 0; i &lt; numOfSequenceGroups; i++) {</span>
+<span class="nc" id="L229">            Arrays.fill(serializedSequenceGroupByteArray, (byte) 0);</span>
+<span class="nc" id="L230">            byteBuf.getBytes(readerIndex + HEADER_SIZE + (i * SequenceGroup.SEQUENCEGROUP_BYTES),</span>
+                    serializedSequenceGroupByteArray, 0, SequenceGroup.SEQUENCEGROUP_BYTES);
+<span class="nc" id="L232">            newSequenceGroup = new SequenceGroup(serializedSequenceGroupByteArray);</span>
+<span class="nc" id="L233">            sortedSequenceGroups.put(newSequenceGroup.getFirstSequenceStart(), newSequenceGroup);</span>
+        }
+<span class="nc" id="L235">        setAvailabilityOfEntriesOfLedgerClosed();</span>
+<span class="nc" id="L236">    }</span>
+
+    private void initializeCurSequence(long curSequenceStartEntryIdValue) {
+<span class="nc" id="L239">        curSequenceStartEntryId.setValue(curSequenceStartEntryIdValue);</span>
+<span class="nc" id="L240">        curSequenceSize.setValue(1);</span>
+<span class="nc" id="L241">    }</span>
+
+    private void resetCurSequence() {
+<span class="nc" id="L244">        curSequenceStartEntryId.setValue(INVALID_ENTRYID);</span>
+<span class="nc" id="L245">        curSequenceSize.setValue(0);</span>
+<span class="nc" id="L246">    }</span>
+
+    private boolean isCurSequenceInitialized() {
+<span class="nc bnc" id="L249" title="All 2 branches missed.">        return curSequenceStartEntryId.longValue() != INVALID_ENTRYID;</span>
+    }
+
+    private boolean isEntryExistingInCurSequence(long entryId) {
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        return (curSequenceStartEntryId.longValue() &lt;= entryId)</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">                &amp;&amp; (entryId &lt; (curSequenceStartEntryId.longValue() + curSequenceSize.intValue()));</span>
+    }
+
+    private boolean isEntryAppendableToCurSequence(long entryId) {
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        return ((curSequenceStartEntryId.longValue() + curSequenceSize.intValue()) == entryId);</span>
+    }
+
+    private void incrementCurSequenceSize() {
+<span class="nc" id="L262">        curSequenceSize.increment();</span>
+<span class="nc" id="L263">    }</span>
+
+    private void createNewSequenceGroupWithCurSequence() {
+<span class="nc" id="L266">        SequenceGroup curSequenceGroupValue = curSequenceGroup.getValue();</span>
+<span class="nc" id="L267">        curSequenceGroupValue.setSequenceGroupClosed();</span>
+<span class="nc" id="L268">        sortedSequenceGroups.put(curSequenceGroupValue.getFirstSequenceStart(), curSequenceGroupValue);</span>
+<span class="nc" id="L269">        curSequenceGroup.setValue(new SequenceGroup(curSequenceStartEntryId.longValue(), curSequenceSize.intValue()));</span>
+<span class="nc" id="L270">    }</span>
+
+    private boolean isCurSequenceGroupInitialized() {
+<span class="nc bnc" id="L273" title="All 2 branches missed.">        return curSequenceGroup.getValue() != null;</span>
+    }
+
+    private void initializeCurSequenceGroupWithCurSequence() {
+<span class="nc" id="L277">        curSequenceGroup.setValue(new SequenceGroup(curSequenceStartEntryId.longValue(), curSequenceSize.intValue()));</span>
+<span class="nc" id="L278">    }</span>
+
+    private boolean doesCurSequenceBelongToCurSequenceGroup() {
+<span class="nc" id="L281">        long curSequenceStartEntryIdValue = curSequenceStartEntryId.longValue();</span>
+<span class="nc" id="L282">        int curSequenceSizeValue = curSequenceSize.intValue();</span>
+<span class="nc" id="L283">        boolean belongsToThisSequenceGroup = false;</span>
+<span class="nc" id="L284">        SequenceGroup curSequenceGroupValue = curSequenceGroup.getValue();</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        if ((curSequenceGroupValue.sequenceSize == curSequenceSizeValue)</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                &amp;&amp; ((curSequenceGroupValue.getLastSequenceStart() == INVALID_ENTRYID) || ((curSequenceStartEntryIdValue</span>
+<span class="nc" id="L287">                        - curSequenceGroupValue.getLastSequenceStart()) == curSequenceGroupValue</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">                                .getSequencePeriod()))) {</span>
+<span class="nc" id="L289">            belongsToThisSequenceGroup = true;</span>
+        }
+<span class="nc" id="L291">        return belongsToThisSequenceGroup;</span>
+    }
+
+    private void appendCurSequenceToCurSequenceGroup() {
+<span class="nc" id="L295">        SequenceGroup curSequenceGroupValue = curSequenceGroup.getValue();</span>
+<span class="nc" id="L296">        curSequenceGroupValue.setLastSequenceStart(curSequenceStartEntryId.longValue());</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">        if (curSequenceGroupValue.getSequencePeriod() == 0) {</span>
+<span class="nc" id="L298">            curSequenceGroupValue.setSequencePeriod(</span>
+<span class="nc" id="L299">                    ((int) (curSequenceGroupValue.getLastSequenceStart() - curSequenceGroupValue.firstSequenceStart)));</span>
+        }
+<span class="nc" id="L301">    }</span>
+
+    private void addCurSequenceToSequenceGroup() {
+<span class="nc bnc" id="L304" title="All 2 branches missed.">        if (!isCurSequenceGroupInitialized()) {</span>
+<span class="nc" id="L305">            initializeCurSequenceGroupWithCurSequence();</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        } else if (doesCurSequenceBelongToCurSequenceGroup()) {</span>
+<span class="nc" id="L307">            appendCurSequenceToCurSequenceGroup();</span>
+        } else {
+<span class="nc" id="L309">            createNewSequenceGroupWithCurSequence();</span>
+        }
+<span class="nc" id="L311">    }</span>
+
+    private void addEntryToAvailableEntriesOfLedger(long entryId) {
+<span class="nc bnc" id="L314" title="All 2 branches missed.">        if (!isCurSequenceInitialized()) {</span>
+<span class="nc" id="L315">            initializeCurSequence(entryId);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        } else if (isEntryExistingInCurSequence(entryId)) {</span>
+            /* this entry is already added so do nothing */
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        } else if (isEntryAppendableToCurSequence(entryId)) {</span>
+<span class="nc" id="L319">            incrementCurSequenceSize();</span>
+        } else {
+<span class="nc" id="L321">            addCurSequenceToSequenceGroup();</span>
+<span class="nc" id="L322">            initializeCurSequence(entryId);</span>
+        }
+<span class="nc" id="L324">    }</span>
+
+    private void closeStateOfEntriesOfALedger() {
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (isCurSequenceInitialized()) {</span>
+<span class="nc" id="L328">            addCurSequenceToSequenceGroup();</span>
+<span class="nc" id="L329">            resetCurSequence();</span>
+        }
+<span class="nc" id="L331">        SequenceGroup curSequenceGroupValue = curSequenceGroup.getValue();</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">        if (curSequenceGroupValue != null) {</span>
+<span class="nc" id="L333">            curSequenceGroupValue.setSequenceGroupClosed();</span>
+<span class="nc" id="L334">            sortedSequenceGroups.put(curSequenceGroupValue.getFirstSequenceStart(), curSequenceGroupValue);</span>
+        }
+<span class="nc" id="L336">        setAvailabilityOfEntriesOfLedgerClosed();</span>
+<span class="nc" id="L337">    }</span>
+
+    private boolean isAvailabilityOfEntriesOfLedgerClosed() {
+<span class="nc" id="L340">        return availabilityOfEntriesOfLedgerClosed;</span>
+    }
+
+    private void setAvailabilityOfEntriesOfLedgerClosed() {
+<span class="nc" id="L344">        this.availabilityOfEntriesOfLedgerClosed = true;</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        for (Entry&lt;Long, SequenceGroup&gt; seqGroupEntry : sortedSequenceGroups.entrySet()) {</span>
+<span class="nc" id="L346">            totalNumOfAvailableEntries += seqGroupEntry.getValue().getNumOfEntriesInSequenceGroup();</span>
+<span class="nc" id="L347">        }</span>
+<span class="nc" id="L348">    }</span>
+
+    public byte[] serializeStateOfEntriesOfLedger() {
+<span class="nc bnc" id="L351" title="All 2 branches missed.">        if (!isAvailabilityOfEntriesOfLedgerClosed()) {</span>
+<span class="nc" id="L352">            throw new IllegalStateException(&quot;AvailabilityOfEntriesOfLedger is not yet closed,&quot;</span>
+                    + &quot;it is illegal to call serializeStateOfEntriesOfLedger&quot;);
+        }
+<span class="nc" id="L355">        byte[] header = new byte[HEADER_SIZE];</span>
+<span class="nc" id="L356">        ByteBuffer headerByteBuf = ByteBuffer.wrap(header);</span>
+<span class="nc" id="L357">        byte[] serializedSequenceGroupByteArray = new byte[SequenceGroup.SEQUENCEGROUP_BYTES];</span>
+<span class="nc" id="L358">        byte[] serializedStateByteArray = new byte[HEADER_SIZE</span>
+<span class="nc" id="L359">                + (sortedSequenceGroups.size() * SequenceGroup.SEQUENCEGROUP_BYTES)];</span>
+<span class="nc" id="L360">        final int numOfSequenceGroups = sortedSequenceGroups.size();</span>
+<span class="nc" id="L361">        headerByteBuf.putInt(CURRENT_HEADER_VERSION);</span>
+<span class="nc" id="L362">        headerByteBuf.putInt(numOfSequenceGroups);</span>
+<span class="nc" id="L363">        System.arraycopy(header, 0, serializedStateByteArray, 0, HEADER_SIZE);</span>
+<span class="nc" id="L364">        int seqNum = 0;</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">        for (Entry&lt;Long, SequenceGroup&gt; seqGroupEntry : sortedSequenceGroups.entrySet()) {</span>
+<span class="nc" id="L366">            SequenceGroup seqGroup = seqGroupEntry.getValue();</span>
+<span class="nc" id="L367">            Arrays.fill(serializedSequenceGroupByteArray, (byte) 0);</span>
+<span class="nc" id="L368">            seqGroup.serializeSequenceGroup(serializedSequenceGroupByteArray);</span>
+<span class="nc" id="L369">            System.arraycopy(serializedSequenceGroupByteArray, 0, serializedStateByteArray,</span>
+                    HEADER_SIZE + ((seqNum++) * SequenceGroup.SEQUENCEGROUP_BYTES), SequenceGroup.SEQUENCEGROUP_BYTES);
+<span class="nc" id="L371">        }</span>
+<span class="nc" id="L372">        return serializedStateByteArray;</span>
+    }
+
+    public boolean isEntryAvailable(long entryId) {
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        if (!isAvailabilityOfEntriesOfLedgerClosed()) {</span>
+<span class="nc" id="L377">            throw new IllegalStateException(</span>
+                    &quot;AvailabilityOfEntriesOfLedger is not yet closed, it is illegal to call isEntryAvailable&quot;);
+        }
+<span class="nc" id="L380">        Entry&lt;Long, SequenceGroup&gt; seqGroup = sortedSequenceGroups.floorEntry(entryId);</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        if (seqGroup == null) {</span>
+<span class="nc" id="L382">            return false;</span>
+        }
+<span class="nc" id="L384">        return seqGroup.getValue().isEntryAvailable(entryId);</span>
+    }
+
+    public List&lt;Long&gt; getUnavailableEntries(long startEntryId, long lastEntryId, BitSet availabilityOfEntries) {
+<span class="nc bnc" id="L388" title="All 2 branches missed.">        if (!isAvailabilityOfEntriesOfLedgerClosed()) {</span>
+<span class="nc" id="L389">            throw new IllegalStateException(</span>
+                    &quot;AvailabilityOfEntriesOfLedger is not yet closed, it is illegal to call getUnavailableEntries&quot;);
+        }
+<span class="nc" id="L392">        List&lt;Long&gt; unavailableEntries = new ArrayList&lt;Long&gt;();</span>
+<span class="nc" id="L393">        SequenceGroup curSeqGroup = null;</span>
+<span class="nc" id="L394">        boolean noSeqGroupRemaining = false;</span>
+<span class="nc" id="L395">        int bitSetIndex = 0;</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        for (long entryId = startEntryId; entryId &lt;= lastEntryId; entryId++, bitSetIndex++) {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">            if (noSeqGroupRemaining) {</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">                if (availabilityOfEntries.get(bitSetIndex)) {</span>
+<span class="nc" id="L399">                    unavailableEntries.add(entryId);</span>
+                }
+                continue;
+            }
+<span class="nc bnc" id="L403" title="All 4 branches missed.">            if ((curSeqGroup == null) || (entryId &gt; curSeqGroup.getLastEntryInSequenceGroup())) {</span>
+<span class="nc" id="L404">                Entry&lt;Long, SequenceGroup&gt; curSeqGroupEntry = sortedSequenceGroups.floorEntry(entryId);</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                if (curSeqGroupEntry == null) {</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">                    if (availabilityOfEntries.get(bitSetIndex)) {</span>
+<span class="nc" id="L407">                        unavailableEntries.add(entryId);</span>
+                    }
+<span class="nc bnc" id="L409" title="All 2 branches missed.">                    if (sortedSequenceGroups.ceilingEntry(entryId) == null) {</span>
+<span class="nc" id="L410">                        noSeqGroupRemaining = true;</span>
+                    }
+                    continue;
+                } else {
+<span class="nc" id="L414">                    curSeqGroup = curSeqGroupEntry.getValue();</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">                    if (entryId &gt; curSeqGroup.getLastEntryInSequenceGroup()) {</span>
+<span class="nc bnc" id="L416" title="All 2 branches missed.">                        if (availabilityOfEntries.get(bitSetIndex)) {</span>
+<span class="nc" id="L417">                            unavailableEntries.add(entryId);</span>
+                        }
+<span class="nc" id="L419">                        noSeqGroupRemaining = true;</span>
+<span class="nc" id="L420">                        continue;</span>
+                    }
+                }
+            }
+<span class="nc bnc" id="L424" title="All 4 branches missed.">            if (availabilityOfEntries.get(bitSetIndex) &amp;&amp; (!curSeqGroup.isEntryAvailable(entryId))) {</span>
+<span class="nc" id="L425">                unavailableEntries.add(entryId);</span>
+            }
+        }
+<span class="nc" id="L428">        return unavailableEntries;</span>
+    }
+
+    public long getTotalNumOfAvailableEntries() {
+<span class="nc bnc" id="L432" title="All 2 branches missed.">        if (!isAvailabilityOfEntriesOfLedgerClosed()) {</span>
+<span class="nc" id="L433">            throw new IllegalStateException(&quot;AvailabilityOfEntriesOfLedger is not yet closed,&quot;</span>
+                    + &quot; it is illegal to call getTotalNumOfAvailableEntries&quot;);
+        }
+<span class="nc" id="L436">        return totalNumOfAvailableEntries;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

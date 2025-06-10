@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReadLogCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookie</a> &gt; <span class="el_source">ReadLogCommand.java</span></div><h1>ReadLogCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.bookie;
+
+import com.beust.jcommander.Parameter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import io.netty.buffer.ByteBuf;
+import java.io.File;
+import java.io.IOException;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.bookie.ReadOnlyDefaultEntryLogger;
+import org.apache.bookkeeper.bookie.storage.EntryLogScanner;
+import org.apache.bookkeeper.bookie.storage.EntryLogger;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.apache.bookkeeper.util.EntryFormatter;
+import org.apache.bookkeeper.util.LedgerIdFormatter;
+import org.apache.commons.lang3.mutable.MutableBoolean;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to read entry log files.
+ */
+public class ReadLogCommand extends BookieCommand&lt;ReadLogCommand.ReadLogFlags&gt; {
+
+    private static final String NAME = &quot;readlog&quot;;
+    private static final String DESC = &quot;Scan an entry file and format the entries into readable format.&quot;;
+<span class="nc" id="L48">    private static final Logger LOG = LoggerFactory.getLogger(ReadLogCommand.class);</span>
+
+    private EntryLogger entryLogger;
+    private EntryFormatter entryFormatter;
+    private LedgerIdFormatter ledgerIdFormatter;
+
+    public ReadLogCommand() {
+<span class="nc" id="L55">        this(new ReadLogFlags());</span>
+<span class="nc" id="L56">    }</span>
+
+    public ReadLogCommand(LedgerIdFormatter ledgerIdFormatter, EntryFormatter entryFormatter) {
+<span class="nc" id="L59">        this(new ReadLogFlags());</span>
+<span class="nc" id="L60">        this.ledgerIdFormatter = ledgerIdFormatter;</span>
+<span class="nc" id="L61">        this.entryFormatter = entryFormatter;</span>
+<span class="nc" id="L62">    }</span>
+    private ReadLogCommand(ReadLogFlags flags) {
+<span class="nc" id="L64">        super(CliSpec.&lt;ReadLogFlags&gt;newBuilder().withName(NAME).withDescription(DESC).withFlags(flags).build());</span>
+<span class="nc" id="L65">    }</span>
+
+    /**
+     * Flags for read log command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L71">    @Setter</span>
+<span class="nc" id="L72">    public static class ReadLogFlags extends CliFlags {</span>
+
+        @Parameter(names = { &quot;-m&quot;, &quot;msg&quot; }, description = &quot;Print message body&quot;)
+        private boolean msg;
+
+<span class="nc" id="L77">        @Parameter(names = { &quot;-l&quot;, &quot;--ledgerid&quot; }, description = &quot;Ledger ID&quot;)</span>
+        private long ledgerId = -1;
+
+<span class="nc" id="L80">        @Parameter(names = { &quot;-e&quot;, &quot;--entryid&quot; }, description = &quot;Entry ID&quot;)</span>
+        private long entryId = -1;
+
+<span class="nc" id="L83">        @Parameter(names = { &quot;-sp&quot;, &quot;--startpos&quot; }, description = &quot;Start Position&quot;)</span>
+        private long startPos = -1;
+
+<span class="nc" id="L86">        @Parameter(names = { &quot;-ep&quot;, &quot;--endpos&quot; }, description = &quot;End Position&quot;)</span>
+        private long endPos = -1;
+
+        @Parameter(names = { &quot;-f&quot;, &quot;--filename&quot; }, description = &quot;Entry log filename&quot;)
+        private String filename;
+
+<span class="nc" id="L92">        @Parameter(names = { &quot;-li&quot;, &quot;--entrylogid&quot; }, description = &quot;Entry log id&quot;)</span>
+        private long entryLogId = -1;
+
+        @Parameter(names = {&quot;-lf&quot;, &quot;--ledgerIdFormatter&quot;}, description = &quot;Set ledger id formatter&quot;)
+        private String ledgerIdFormatter;
+
+        @Parameter(names = {&quot;-ef&quot;, &quot;--entryformatter&quot;}, description = &quot;set entry formatter&quot;)
+        private String entryFormatter;
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, ReadLogFlags cmdFlags) {
+
+<span class="nc bnc" id="L105" title="All 4 branches missed.">        if (cmdFlags.ledgerIdFormatter != null &amp;&amp; this.ledgerIdFormatter == null) {</span>
+<span class="nc" id="L106">            this.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(cmdFlags.ledgerIdFormatter, conf);</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        } else if (this.ledgerIdFormatter == null) {</span>
+<span class="nc" id="L108">            this.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(conf);</span>
+        }
+
+<span class="nc bnc" id="L111" title="All 4 branches missed.">        if (cmdFlags.entryFormatter != null &amp;&amp; this.entryFormatter == null) {</span>
+<span class="nc" id="L112">            this.entryFormatter = EntryFormatter.newEntryFormatter(cmdFlags.entryFormatter, conf);</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        } else if (this.entryFormatter == null) {</span>
+<span class="nc" id="L114">            this.entryFormatter = EntryFormatter.newEntryFormatter(conf);</span>
+        }
+
+<span class="nc bnc" id="L117" title="All 4 branches missed.">        if (cmdFlags.entryLogId == -1 &amp;&amp; cmdFlags.filename == null) {</span>
+<span class="nc" id="L118">            LOG.error(&quot;Missing entry log id or entry log file name&quot;);</span>
+<span class="nc" id="L119">            usage();</span>
+<span class="nc" id="L120">            return false;</span>
+        }
+        try {
+<span class="nc" id="L123">            return readLog(conf, cmdFlags);</span>
+<span class="nc" id="L124">        } catch (Exception e) {</span>
+<span class="nc" id="L125">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    private boolean readLog(ServerConfiguration conf, ReadLogFlags flags) throws Exception {
+<span class="nc" id="L130">        long logId = flags.entryLogId;</span>
+<span class="nc bnc" id="L131" title="All 4 branches missed.">        if (logId == -1 &amp;&amp; flags.filename != null) {</span>
+<span class="nc" id="L132">            File f = new File(flags.filename);</span>
+<span class="nc" id="L133">            String name = f.getName();</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            if (!name.endsWith(&quot;.log&quot;)) {</span>
+<span class="nc" id="L135">                LOG.error(&quot;Invalid entry log file name {}&quot;, flags.filename);</span>
+<span class="nc" id="L136">                usage();</span>
+<span class="nc" id="L137">                return false;</span>
+            }
+<span class="nc" id="L139">            String idString = name.split(&quot;\\.&quot;)[0];</span>
+<span class="nc" id="L140">            logId = Long.parseLong(idString, 16);</span>
+        }
+
+<span class="nc" id="L143">        final long lId = flags.ledgerId;</span>
+<span class="nc" id="L144">        final long eId = flags.entryId;</span>
+<span class="nc" id="L145">        final long startpos = flags.startPos;</span>
+<span class="nc" id="L146">        final long endpos = flags.endPos;</span>
+
+        // scan entry log
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (startpos != -1) {</span>
+<span class="nc bnc" id="L150" title="All 4 branches missed.">            if ((endpos != -1) &amp;&amp; (endpos &lt; startpos)) {</span>
+<span class="nc" id="L151">                LOG.error(&quot;ERROR: StartPosition of the range should be lesser than or equal to EndPosition&quot;);</span>
+<span class="nc" id="L152">                return false;</span>
+            }
+<span class="nc" id="L154">            scanEntryLogForPositionRange(conf, logId, startpos, endpos, flags.msg);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        } else if (lId != -1) {</span>
+<span class="nc" id="L156">            scanEntryLogForSpecificEntry(conf, logId, lId, eId, flags.msg);</span>
+        } else {
+<span class="nc" id="L158">            scanEntryLog(conf, logId, flags.msg);</span>
+        }
+<span class="nc" id="L160">        return true;</span>
+    }
+
+    /**
+     * Scan over an entry log file for entries in the given position range.
+     *
+     * @param logId Entry Log File id.
+     * @param rangeStartPos Start position of the entry we are looking for
+     * @param rangeEndPos End position of the entry we are looking for (-1 for till the end of the entrylog)
+     * @param printMsg Whether printing the entry data.
+     * @throws Exception
+     */
+    private void scanEntryLogForPositionRange(ServerConfiguration conf, long logId, final long rangeStartPos,
+                                              final long rangeEndPos,
+                                                final boolean printMsg) throws Exception {
+<span class="nc" id="L175">        LOG.info(&quot;Scan entry log {} ({}.log) for PositionRange: {} - {}&quot;,</span>
+<span class="nc" id="L176">            logId, Long.toHexString(logId), rangeStartPos, rangeEndPos);</span>
+<span class="nc" id="L177">        final MutableBoolean entryFound = new MutableBoolean(false);</span>
+<span class="nc" id="L178">        scanEntryLog(conf, logId, new EntryLogScanner() {</span>
+<span class="nc" id="L179">            private MutableBoolean stopScanning = new MutableBoolean(false);</span>
+
+            @Override
+            public boolean accept(long ledgerId) {
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                return !stopScanning.booleanValue();</span>
+            }
+
+            @Override
+            public void process(long ledgerId, long entryStartPos, ByteBuf entry) throws IOException {
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                if (!stopScanning.booleanValue()) {</span>
+<span class="nc bnc" id="L189" title="All 4 branches missed.">                    if ((rangeEndPos != -1) &amp;&amp; (entryStartPos &gt; rangeEndPos)) {</span>
+<span class="nc" id="L190">                        stopScanning.setValue(true);</span>
+                    } else {
+<span class="nc" id="L192">                        int entrySize = entry.readableBytes();</span>
+                        /**
+                         * entrySize of an entry (inclusive of payload and
+                         * header) value is stored as int value in log file, but
+                         * it is not counted in the entrySize, hence for calculating
+                         * the end position of the entry we need to add additional
+                         * 4 (intsize of entrySize). Please check
+                         * EntryLogger.scanEntryLog.
+                         */
+<span class="nc" id="L201">                        long entryEndPos = entryStartPos + entrySize + 4 - 1;</span>
+<span class="nc bnc" id="L202" title="All 6 branches missed.">                        if (((rangeEndPos == -1) || (entryStartPos &lt;= rangeEndPos)) &amp;&amp; (rangeStartPos &lt;= entryEndPos)) {</span>
+<span class="nc" id="L203">                            FormatUtil.formatEntry(entryStartPos, entry, printMsg, ledgerIdFormatter, entryFormatter);</span>
+<span class="nc" id="L204">                            entryFound.setValue(true);</span>
+                        }
+                    }
+                }
+<span class="nc" id="L208">            }</span>
+        });
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        if (!entryFound.booleanValue()) {</span>
+<span class="nc" id="L211">            LOG.info(&quot;Entry log {} ({}.log) doesn't has any entry in the range {} - {}. &quot;</span>
+                + &quot;Probably the position range, you have provided is lesser than the LOGFILE_HEADER_SIZE (1024) &quot;
+                + &quot;or greater than the current log filesize.&quot;,
+<span class="nc" id="L214">                logId, Long.toHexString(logId), rangeStartPos, rangeEndPos);</span>
+        }
+<span class="nc" id="L216">    }</span>
+
+    /**
+     * Scan over entry log.
+     *
+     * @param logId   Entry Log Id
+     * @param scanner Entry Log Scanner
+     */
+    private void scanEntryLog(ServerConfiguration conf, long logId, EntryLogScanner scanner)
+        throws IOException {
+<span class="nc" id="L226">        initEntryLogger(conf);</span>
+<span class="nc" id="L227">        entryLogger.scanEntryLog(logId, scanner);</span>
+<span class="nc" id="L228">    }</span>
+
+    private synchronized void initEntryLogger(ServerConfiguration conf) throws IOException {
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        if (null == entryLogger) {</span>
+            // provide read only entry logger
+<span class="nc" id="L233">            entryLogger = new ReadOnlyDefaultEntryLogger(conf);</span>
+        }
+<span class="nc" id="L235">    }</span>
+
+    /**
+     * Scan over an entry log file for a particular entry.
+     *
+     * @param logId Entry Log File id.
+     * @param ledgerId id of the ledger
+     * @param entryId entryId of the ledger we are looking for (-1 for all of the entries of the ledger)
+     * @param printMsg Whether printing the entry data.
+     * @throws Exception
+     */
+    private void scanEntryLogForSpecificEntry(ServerConfiguration conf, long logId, final long ledgerId,
+                                                final long entryId,
+                                                final boolean printMsg) throws Exception {
+<span class="nc" id="L249">        LOG.info(&quot;Scan entry log {} ({}.log) for LedgerId {} {}&quot;, logId, Long.toHexString(logId), ledgerId,</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            ((entryId == -1) ? &quot;&quot; : &quot; for EntryId &quot; + entryId));</span>
+<span class="nc" id="L251">        final MutableBoolean entryFound = new MutableBoolean(false);</span>
+<span class="nc" id="L252">        scanEntryLog(conf, logId, new EntryLogScanner() {</span>
+            @Override
+            public boolean accept(long candidateLedgerId) {
+<span class="nc bnc" id="L255" title="All 6 branches missed.">                return ((candidateLedgerId == ledgerId) &amp;&amp; ((!entryFound.booleanValue()) || (entryId == -1)));</span>
+            }
+
+            @Override
+            public void process(long candidateLedgerId, long startPos, ByteBuf entry) {
+<span class="nc" id="L260">                long entrysLedgerId = entry.getLong(entry.readerIndex());</span>
+<span class="nc" id="L261">                long entrysEntryId = entry.getLong(entry.readerIndex() + 8);</span>
+<span class="nc bnc" id="L262" title="All 8 branches missed.">                if ((candidateLedgerId == entrysLedgerId) &amp;&amp; (candidateLedgerId == ledgerId)</span>
+                    &amp;&amp; ((entrysEntryId == entryId) || (entryId == -1))) {
+<span class="nc" id="L264">                    entryFound.setValue(true);</span>
+<span class="nc" id="L265">                    FormatUtil.formatEntry(startPos, entry, printMsg, ledgerIdFormatter, entryFormatter);</span>
+                }
+<span class="nc" id="L267">            }</span>
+        });
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        if (!entryFound.booleanValue()) {</span>
+<span class="nc" id="L270">            LOG.info(&quot;LedgerId {} {} is not available in the entry log {} ({}.log)&quot;,</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                ledgerId, ((entryId == -1) ? &quot;&quot; : &quot; EntryId &quot; + entryId), logId, Long.toHexString(logId));</span>
+        }
+<span class="nc" id="L273">    }</span>
+
+    /**
+     * Scan over an entry log file.
+     *
+     * @param logId
+     *          Entry Log File id.
+     * @param printMsg
+     *          Whether printing the entry data.
+     */
+    private void scanEntryLog(ServerConfiguration conf, long logId, final boolean printMsg) throws Exception {
+<span class="nc" id="L284">        LOG.info(&quot;Scan entry log {} ({}.log)&quot;, logId, Long.toHexString(logId));</span>
+<span class="nc" id="L285">        scanEntryLog(conf, logId, new EntryLogScanner() {</span>
+            @Override
+            public boolean accept(long ledgerId) {
+<span class="nc" id="L288">                return true;</span>
+            }
+
+            @Override
+            public void process(long ledgerId, long startPos, ByteBuf entry) {
+<span class="nc" id="L293">                FormatUtil.formatEntry(startPos, entry, printMsg, ledgerIdFormatter, entryFormatter);</span>
+<span class="nc" id="L294">            }</span>
+        });
+<span class="nc" id="L296">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,521 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerMetadataSerDe.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">LedgerMetadataSerDe.java</span></div><h1>LedgerMetadataSerDe.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import com.google.protobuf.ByteString;
+import com.google.protobuf.TextFormat;
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.UnsupportedEncodingException;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import org.apache.bookkeeper.client.LedgerMetadataBuilder;
+import org.apache.bookkeeper.client.LedgerMetadataUtils;
+import org.apache.bookkeeper.client.api.DigestType;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.client.api.LedgerMetadata.State;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.DataFormats.LedgerMetadataFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Serialization and deserialization for LedgerMetadata.
+ */
+<span class="nc" id="L55">public class LedgerMetadataSerDe {</span>
+<span class="nc" id="L56">    private static final Logger log = LoggerFactory.getLogger(LedgerMetadataSerDe.class);</span>
+
+    /**
+     * Text based manual serialization.
+     * Available from v4.0.x onwards.
+     */
+    public static final int METADATA_FORMAT_VERSION_1 = 1;
+
+    /**
+     * Protobuf based, serialized using TextFormat.
+     * Available from v4.2.x onwards.
+     * Can contain ctime or not, but if it contains ctime it can only be parse by v4.4.x onwards.
+     */
+    public static final int METADATA_FORMAT_VERSION_2 = 2;
+
+    /**
+     * Protobuf based, serialized in binary format.
+     * Available from v4.9.x onwards.
+     */
+    public static final int METADATA_FORMAT_VERSION_3 = 3;
+
+    public static final int MAXIMUM_METADATA_FORMAT_VERSION = METADATA_FORMAT_VERSION_3;
+    public static final int CURRENT_METADATA_FORMAT_VERSION = METADATA_FORMAT_VERSION_3;
+    private static final int LOWEST_COMPAT_METADATA_FORMAT_VERSION = METADATA_FORMAT_VERSION_1;
+
+    // for pulling the version
+    private static final int MAX_VERSION_DIGITS = 10;
+<span class="nc" id="L83">    private static final byte[] VERSION_KEY_BYTES = &quot;BookieMetadataFormatVersion\t&quot;.getBytes(UTF_8);</span>
+    private static final String LINE_SPLITTER = &quot;\n&quot;;
+<span class="nc" id="L85">    private static final byte[] LINE_SPLITTER_BYTES = LINE_SPLITTER.getBytes(UTF_8);</span>
+    private static final String FIELD_SPLITTER = &quot;\t&quot;;
+
+    // old V1 constants
+    private static final String V1_CLOSED_TAG = &quot;CLOSED&quot;;
+    private static final int V1_IN_RECOVERY_ENTRY_ID = -102;
+
+    private static void writeHeader(OutputStream os, int version) throws IOException {
+<span class="nc" id="L93">        os.write(VERSION_KEY_BYTES);</span>
+<span class="nc" id="L94">        os.write(String.valueOf(version).getBytes(UTF_8));</span>
+<span class="nc" id="L95">        os.write(LINE_SPLITTER_BYTES);</span>
+<span class="nc" id="L96">    }</span>
+
+    private static int readHeader(InputStream is) throws IOException {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        checkState(LINE_SPLITTER_BYTES.length == 1, &quot;LINE_SPLITTER must be single byte&quot;);</span>
+
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        for (int i = 0; i &lt; VERSION_KEY_BYTES.length; i++) {</span>
+<span class="nc" id="L102">            int b = is.read();</span>
+<span class="nc bnc" id="L103" title="All 4 branches missed.">            if (b &lt; 0 || ((byte) b) != VERSION_KEY_BYTES[i]) {</span>
+<span class="nc" id="L104">                throw new IOException(&quot;Ledger metadata header corrupt at index &quot; + i);</span>
+            }
+        }
+<span class="nc" id="L107">        byte[] versionBuf = new byte[MAX_VERSION_DIGITS];</span>
+<span class="nc" id="L108">        int i = 0;</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        while (i &lt; MAX_VERSION_DIGITS) {</span>
+<span class="nc" id="L110">            int b = is.read();</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            if (b == LINE_SPLITTER_BYTES[0]) {</span>
+<span class="nc" id="L112">                String versionStr = new String(versionBuf, 0, i, UTF_8);</span>
+                try {
+<span class="nc" id="L114">                    return Integer.parseInt(versionStr);</span>
+<span class="nc" id="L115">                } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L116">                    throw new IOException(&quot;Unable to parse version number from &quot; + versionStr);</span>
+                }
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            } else if (b &lt; 0) {</span>
+<span class="nc" id="L119">                break;</span>
+            } else {
+<span class="nc" id="L121">                versionBuf[i++] = (byte) b;</span>
+            }
+<span class="nc" id="L123">        }</span>
+<span class="nc" id="L124">        throw new IOException(&quot;Unable to find end of version number, metadata appears corrupt&quot;);</span>
+    }
+
+    public byte[] serialize(LedgerMetadata metadata) throws IOException {
+<span class="nc" id="L128">        int formatVersion = metadata.getMetadataFormatVersion();</span>
+        final byte[] serialized;
+<span class="nc bnc" id="L130" title="All 4 branches missed.">        switch (formatVersion) {</span>
+        case METADATA_FORMAT_VERSION_3:
+<span class="nc" id="L132">            serialized = serializeVersion3(metadata);</span>
+<span class="nc" id="L133">            break;</span>
+        case METADATA_FORMAT_VERSION_2:
+<span class="nc" id="L135">            serialized = serializeVersion2(metadata);</span>
+<span class="nc" id="L136">            break;</span>
+        case METADATA_FORMAT_VERSION_1:
+<span class="nc" id="L138">            serialized = serializeVersion1(metadata);</span>
+<span class="nc" id="L139">            break;</span>
+        default:
+<span class="nc" id="L141">            throw new IllegalArgumentException(&quot;Invalid format version &quot; + formatVersion);</span>
+        }
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+            String serializedStr;
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            if (formatVersion &gt; METADATA_FORMAT_VERSION_2) {</span>
+<span class="nc" id="L146">                serializedStr = Base64.getEncoder().encodeToString(serialized);</span>
+            } else {
+<span class="nc" id="L148">                serializedStr = new String(serialized, UTF_8);</span>
+            }
+<span class="nc" id="L150">            log.debug(&quot;Serialized with format {}: {}&quot;, formatVersion, serializedStr);</span>
+        }
+<span class="nc" id="L152">        return serialized;</span>
+    }
+
+    private static byte[] serializeVersion3(LedgerMetadata metadata) throws IOException {
+<span class="nc" id="L156">        try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {</span>
+<span class="nc" id="L157">            writeHeader(os, METADATA_FORMAT_VERSION_3);</span>
+<span class="nc" id="L158">            LedgerMetadataFormat.Builder builder = LedgerMetadataFormat.newBuilder();</span>
+<span class="nc" id="L159">            builder.setQuorumSize(metadata.getWriteQuorumSize())</span>
+<span class="nc" id="L160">                .setAckQuorumSize(metadata.getAckQuorumSize())</span>
+<span class="nc" id="L161">                .setEnsembleSize(metadata.getEnsembleSize())</span>
+<span class="nc" id="L162">                .setLength(metadata.getLength())</span>
+<span class="nc" id="L163">                .setLastEntryId(metadata.getLastEntryId());</span>
+
+<span class="nc bnc" id="L165" title="All 4 branches missed.">            switch (metadata.getState()) {</span>
+            case CLOSED:
+<span class="nc" id="L167">                builder.setState(LedgerMetadataFormat.State.CLOSED);</span>
+<span class="nc" id="L168">                break;</span>
+            case IN_RECOVERY:
+<span class="nc" id="L170">                builder.setState(LedgerMetadataFormat.State.IN_RECOVERY);</span>
+<span class="nc" id="L171">                break;</span>
+            case OPEN:
+<span class="nc" id="L173">                builder.setState(LedgerMetadataFormat.State.OPEN);</span>
+<span class="nc" id="L174">                break;</span>
+            default:
+<span class="nc" id="L176">                checkArgument(false,</span>
+<span class="nc" id="L177">                              String.format(&quot;Unknown state %s for protobuf serialization&quot;, metadata.getState()));</span>
+                break;
+            }
+
+            /** Hack to get around fact that ctime was never versioned correctly */
+<span class="nc bnc" id="L182" title="All 2 branches missed.">            if (LedgerMetadataUtils.shouldStoreCtime(metadata)) {</span>
+<span class="nc" id="L183">                builder.setCtime(metadata.getCtime());</span>
+            }
+
+
+<span class="nc" id="L187">            builder.setDigestType(apiToProtoDigestType(metadata.getDigestType()));</span>
+
+<span class="nc" id="L189">            serializePassword(metadata.getPassword(), builder);</span>
+
+<span class="nc" id="L191">            Map&lt;String, byte[]&gt; customMetadata = metadata.getCustomMetadata();</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            if (customMetadata.size() &gt; 0) {</span>
+                LedgerMetadataFormat.cMetadataMapEntry.Builder cMetadataBuilder =
+<span class="nc" id="L194">                    LedgerMetadataFormat.cMetadataMapEntry.newBuilder();</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                for (Map.Entry&lt;String, byte[]&gt; entry : customMetadata.entrySet()) {</span>
+<span class="nc" id="L196">                    cMetadataBuilder.setKey(entry.getKey()).setValue(ByteString.copyFrom(entry.getValue()));</span>
+<span class="nc" id="L197">                    builder.addCustomMetadata(cMetadataBuilder.build());</span>
+<span class="nc" id="L198">                }</span>
+            }
+
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            for (Map.Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; entry : metadata.getAllEnsembles().entrySet()) {</span>
+<span class="nc" id="L202">                LedgerMetadataFormat.Segment.Builder segmentBuilder = LedgerMetadataFormat.Segment.newBuilder();</span>
+<span class="nc" id="L203">                segmentBuilder.setFirstEntryId(entry.getKey());</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                for (BookieId addr : entry.getValue()) {</span>
+<span class="nc" id="L205">                    segmentBuilder.addEnsembleMember(addr.toString());</span>
+<span class="nc" id="L206">                }</span>
+<span class="nc" id="L207">                builder.addSegment(segmentBuilder.build());</span>
+<span class="nc" id="L208">            }</span>
+
+<span class="nc" id="L210">            builder.setCToken(metadata.getCToken());</span>
+
+<span class="nc" id="L212">            builder.build().writeDelimitedTo(os);</span>
+<span class="nc" id="L213">            return os.toByteArray();</span>
+        }
+    }
+
+    private static byte[] serializeVersion2(LedgerMetadata metadata) throws IOException {
+<span class="nc" id="L218">        try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {</span>
+<span class="nc" id="L219">            writeHeader(os, METADATA_FORMAT_VERSION_2);</span>
+<span class="nc" id="L220">            try (PrintWriter writer = new PrintWriter(new OutputStreamWriter(os, UTF_8.name()))) {</span>
+                /***********************************************************************
+                 * WARNING: Do not modify to add fields.
+                 * This code is purposefully duplicated, as version 2 does not support adding
+                 * fields, and if this code was shared with version 3, it would be easy to
+                 * accidently add new fields and create BC issues.
+                 **********************************************************************/
+<span class="nc" id="L227">                LedgerMetadataFormat.Builder builder = LedgerMetadataFormat.newBuilder();</span>
+<span class="nc" id="L228">                builder.setQuorumSize(metadata.getWriteQuorumSize())</span>
+<span class="nc" id="L229">                    .setAckQuorumSize(metadata.getAckQuorumSize())</span>
+<span class="nc" id="L230">                    .setEnsembleSize(metadata.getEnsembleSize())</span>
+<span class="nc" id="L231">                    .setLength(metadata.getLength())</span>
+<span class="nc" id="L232">                    .setLastEntryId(metadata.getLastEntryId());</span>
+
+<span class="nc bnc" id="L234" title="All 4 branches missed.">                switch (metadata.getState()) {</span>
+                case CLOSED:
+<span class="nc" id="L236">                    builder.setState(LedgerMetadataFormat.State.CLOSED);</span>
+<span class="nc" id="L237">                    break;</span>
+                case IN_RECOVERY:
+<span class="nc" id="L239">                    builder.setState(LedgerMetadataFormat.State.IN_RECOVERY);</span>
+<span class="nc" id="L240">                    break;</span>
+                case OPEN:
+<span class="nc" id="L242">                    builder.setState(LedgerMetadataFormat.State.OPEN);</span>
+<span class="nc" id="L243">                    break;</span>
+                default:
+<span class="nc" id="L245">                    checkArgument(false,</span>
+<span class="nc" id="L246">                                  String.format(&quot;Unknown state %s for protobuf serialization&quot;, metadata.getState()));</span>
+                    break;
+                }
+
+                /** Hack to get around fact that ctime was never versioned correctly */
+<span class="nc bnc" id="L251" title="All 2 branches missed.">                if (LedgerMetadataUtils.shouldStoreCtime(metadata)) {</span>
+<span class="nc" id="L252">                    builder.setCtime(metadata.getCtime());</span>
+                }
+
+<span class="nc" id="L255">                builder.setDigestType(apiToProtoDigestType(metadata.getDigestType()));</span>
+<span class="nc" id="L256">                serializePassword(metadata.getPassword(), builder);</span>
+
+<span class="nc" id="L258">                Map&lt;String, byte[]&gt; customMetadata = metadata.getCustomMetadata();</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">                if (customMetadata.size() &gt; 0) {</span>
+                    LedgerMetadataFormat.cMetadataMapEntry.Builder cMetadataBuilder =
+<span class="nc" id="L261">                        LedgerMetadataFormat.cMetadataMapEntry.newBuilder();</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                    for (Map.Entry&lt;String, byte[]&gt; entry : customMetadata.entrySet()) {</span>
+<span class="nc" id="L263">                        cMetadataBuilder.setKey(entry.getKey()).setValue(ByteString.copyFrom(entry.getValue()));</span>
+<span class="nc" id="L264">                        builder.addCustomMetadata(cMetadataBuilder.build());</span>
+<span class="nc" id="L265">                    }</span>
+                }
+
+                for (Map.Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; entry :
+<span class="nc bnc" id="L269" title="All 2 branches missed.">                         metadata.getAllEnsembles().entrySet()) {</span>
+<span class="nc" id="L270">                    LedgerMetadataFormat.Segment.Builder segmentBuilder = LedgerMetadataFormat.Segment.newBuilder();</span>
+<span class="nc" id="L271">                    segmentBuilder.setFirstEntryId(entry.getKey());</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                    for (BookieId addr : entry.getValue()) {</span>
+<span class="nc" id="L273">                        segmentBuilder.addEnsembleMember(addr.toString());</span>
+<span class="nc" id="L274">                    }</span>
+<span class="nc" id="L275">                    builder.addSegment(segmentBuilder.build());</span>
+<span class="nc" id="L276">                }</span>
+
+<span class="nc" id="L278">                TextFormat.printer().print(builder.build(), writer);</span>
+<span class="nc" id="L279">                writer.flush();</span>
+            }
+<span class="nc" id="L281">            return os.toByteArray();</span>
+        }
+    }
+
+    private static byte[] serializeVersion1(LedgerMetadata metadata) throws IOException {
+<span class="nc" id="L286">        try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {</span>
+<span class="nc" id="L287">            writeHeader(os, METADATA_FORMAT_VERSION_1);</span>
+
+<span class="nc" id="L289">            try (PrintWriter writer = new PrintWriter(new OutputStreamWriter(os, UTF_8.name()))) {</span>
+<span class="nc" id="L290">                writer.append(String.valueOf(metadata.getWriteQuorumSize())).append(LINE_SPLITTER);</span>
+<span class="nc" id="L291">                writer.append(String.valueOf(metadata.getEnsembleSize())).append(LINE_SPLITTER);</span>
+<span class="nc" id="L292">                writer.append(String.valueOf(metadata.getLength())).append(LINE_SPLITTER);</span>
+
+                for (Map.Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; entry :
+<span class="nc bnc" id="L295" title="All 2 branches missed.">                         metadata.getAllEnsembles().entrySet()) {</span>
+<span class="nc" id="L296">                    writer.append(String.valueOf(entry.getKey()));</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">                    for (BookieId addr : entry.getValue()) {</span>
+<span class="nc" id="L298">                        writer.append(FIELD_SPLITTER).append(addr.toString());</span>
+<span class="nc" id="L299">                    }</span>
+<span class="nc" id="L300">                    writer.append(LINE_SPLITTER);</span>
+<span class="nc" id="L301">                }</span>
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">                if (metadata.getState() == State.IN_RECOVERY) {</span>
+<span class="nc" id="L304">                    writer.append(String.valueOf(V1_IN_RECOVERY_ENTRY_ID)).append(FIELD_SPLITTER).append(V1_CLOSED_TAG);</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                } else if (metadata.getState() == State.CLOSED) {</span>
+<span class="nc" id="L306">                    writer.append(String.valueOf(metadata.getLastEntryId()))</span>
+<span class="nc" id="L307">                        .append(FIELD_SPLITTER).append(V1_CLOSED_TAG);</span>
+                } else {
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                    checkArgument(metadata.getState() == State.OPEN,</span>
+<span class="nc" id="L310">                                  String.format(&quot;Unknown state %s for V1 serialization&quot;, metadata.getState()));</span>
+                }
+<span class="nc" id="L312">                writer.flush();</span>
+<span class="nc" id="L313">            } catch (UnsupportedEncodingException uee) {</span>
+<span class="nc" id="L314">                throw new RuntimeException(&quot;UTF_8 should be supported everywhere&quot;);</span>
+<span class="nc" id="L315">            }</span>
+<span class="nc" id="L316">            return os.toByteArray();</span>
+        }
+    }
+
+    private static void serializePassword(byte[] password, LedgerMetadataFormat.Builder builder) {
+<span class="nc bnc" id="L321" title="All 4 branches missed.">        if (password == null || password.length == 0) {</span>
+<span class="nc" id="L322">            builder.setPassword(ByteString.EMPTY);</span>
+        } else {
+<span class="nc" id="L324">            builder.setPassword(ByteString.copyFrom(password));</span>
+        }
+<span class="nc" id="L326">    }</span>
+
+    /**
+     * Parses a given byte array and transforms into a LedgerConfig object.
+     *
+     * @param bytes
+     *            byte array to parse
+     * @param metadataStoreCtime
+     *            metadata store creation time, used for legacy ledgers
+     * @return LedgerConfig
+     * @throws IOException
+     *             if the given byte[] cannot be parsed
+     */
+    public LedgerMetadata parseConfig(byte[] bytes,
+                                      long ledgerId,
+                                      Optional&lt;Long&gt; metadataStoreCtime) throws IOException {
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L343">            log.debug(&quot;Deserializing {}&quot;, Base64.getEncoder().encodeToString(bytes));</span>
+        }
+<span class="nc" id="L345">        try (ByteArrayInputStream is = new ByteArrayInputStream(bytes)) {</span>
+<span class="nc" id="L346">            int metadataFormatVersion = readHeader(is);</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L348">                String contentStr = &quot;&quot;;</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                if (metadataFormatVersion &lt;= METADATA_FORMAT_VERSION_2) {</span>
+<span class="nc" id="L350">                    contentStr = &quot;, content: &quot; + new String(bytes, UTF_8);</span>
+                }
+<span class="nc" id="L352">                log.debug(&quot;Format version {} detected{}&quot;, metadataFormatVersion, contentStr);</span>
+            }
+
+<span class="nc bnc" id="L355" title="All 4 branches missed.">            switch (metadataFormatVersion) {</span>
+            case METADATA_FORMAT_VERSION_3:
+<span class="nc" id="L357">                return parseVersion3Config(ledgerId, is, metadataStoreCtime);</span>
+            case METADATA_FORMAT_VERSION_2:
+<span class="nc" id="L359">                return parseVersion2Config(ledgerId, is, metadataStoreCtime);</span>
+            case METADATA_FORMAT_VERSION_1:
+<span class="nc" id="L361">                return parseVersion1Config(ledgerId, is);</span>
+            default:
+<span class="nc" id="L363">                throw new IOException(</span>
+<span class="nc" id="L364">                        String.format(&quot;Metadata version not compatible. Expected between %d and %d, but got %d&quot;,</span>
+<span class="nc" id="L365">                                      LOWEST_COMPAT_METADATA_FORMAT_VERSION, CURRENT_METADATA_FORMAT_VERSION,</span>
+<span class="nc" id="L366">                                      metadataFormatVersion));</span>
+            }
+<span class="nc" id="L368">        }</span>
+    }
+
+    private static LedgerMetadata parseVersion3Config(long ledgerId, InputStream is, Optional&lt;Long&gt; metadataStoreCtime)
+            throws IOException {
+<span class="nc" id="L373">        LedgerMetadataBuilder builder = LedgerMetadataBuilder.create()</span>
+<span class="nc" id="L374">                .withId(ledgerId)</span>
+<span class="nc" id="L375">                .withMetadataFormatVersion(METADATA_FORMAT_VERSION_3);</span>
+<span class="nc" id="L376">        LedgerMetadataFormat.Builder formatBuilder = LedgerMetadataFormat.newBuilder();</span>
+<span class="nc" id="L377">        formatBuilder.mergeDelimitedFrom(is);</span>
+<span class="nc" id="L378">        LedgerMetadataFormat data = formatBuilder.build();</span>
+<span class="nc" id="L379">        decodeFormat(data, builder);</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">        if (data.hasCtime()) {</span>
+<span class="nc" id="L381">            builder.storingCreationTime(true);</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        } else if (metadataStoreCtime.isPresent()) {</span>
+<span class="nc" id="L383">            builder.withCreationTime(metadataStoreCtime.get()).storingCreationTime(false);</span>
+        }
+<span class="nc" id="L385">        return builder.build();</span>
+    }
+
+    private static LedgerMetadata parseVersion2Config(long ledgerId, InputStream is, Optional&lt;Long&gt; metadataStoreCtime)
+            throws IOException {
+<span class="nc" id="L390">        LedgerMetadataBuilder builder = LedgerMetadataBuilder.create()</span>
+<span class="nc" id="L391">            .withId(ledgerId)</span>
+<span class="nc" id="L392">            .withMetadataFormatVersion(METADATA_FORMAT_VERSION_2);</span>
+
+<span class="nc" id="L394">        LedgerMetadataFormat.Builder formatBuilder = LedgerMetadataFormat.newBuilder();</span>
+<span class="nc" id="L395">        try (InputStreamReader reader = new InputStreamReader(is, UTF_8.name())) {</span>
+<span class="nc" id="L396">            TextFormat.merge(reader, formatBuilder);</span>
+        }
+<span class="nc" id="L398">        LedgerMetadataFormat data = formatBuilder.build();</span>
+<span class="nc" id="L399">        decodeFormat(data, builder);</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">        if (data.hasCtime()) {</span>
+            // 'storingCreationTime' is only ever taken into account for serializing version 2
+<span class="nc" id="L402">            builder.storingCreationTime(true);</span>
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        } else if (metadataStoreCtime.isPresent()) {</span>
+<span class="nc" id="L404">            builder.withCreationTime(metadataStoreCtime.get()).storingCreationTime(false);</span>
+        }
+<span class="nc" id="L406">        return builder.build();</span>
+    }
+
+    private static void decodeFormat(LedgerMetadataFormat data, LedgerMetadataBuilder builder) throws IOException {
+<span class="nc" id="L410">        builder.withEnsembleSize(data.getEnsembleSize());</span>
+<span class="nc" id="L411">        builder.withWriteQuorumSize(data.getQuorumSize());</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">        if (data.hasAckQuorumSize()) {</span>
+<span class="nc" id="L413">            builder.withAckQuorumSize(data.getAckQuorumSize());</span>
+        } else {
+<span class="nc" id="L415">            builder.withAckQuorumSize(data.getQuorumSize());</span>
+        }
+
+<span class="nc bnc" id="L418" title="All 2 branches missed.">        if (data.hasCtime()) {</span>
+<span class="nc" id="L419">            builder.withCreationTime(data.getCtime());</span>
+        }
+
+<span class="nc bnc" id="L422" title="All 2 branches missed.">        if (data.getState() == LedgerMetadataFormat.State.IN_RECOVERY) {</span>
+<span class="nc" id="L423">            builder.withInRecoveryState();</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">        } else if (data.getState() == LedgerMetadataFormat.State.CLOSED) {</span>
+<span class="nc" id="L425">            builder.withClosedState().withLastEntryId(data.getLastEntryId()).withLength(data.getLength());</span>
+        }
+
+<span class="nc bnc" id="L428" title="All 2 branches missed.">        if (data.hasPassword()) {</span>
+<span class="nc" id="L429">            builder.withPassword(data.getPassword().toByteArray())</span>
+<span class="nc" id="L430">                .withDigestType(protoToApiDigestType(data.getDigestType()));</span>
+        }
+
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        for (LedgerMetadataFormat.Segment s : data.getSegmentList()) {</span>
+<span class="nc" id="L434">            List&lt;BookieId&gt; addrs = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">            for (String addr : s.getEnsembleMemberList()) {</span>
+<span class="nc" id="L436">                addrs.add(BookieId.parse(addr));</span>
+<span class="nc" id="L437">            }</span>
+<span class="nc" id="L438">            builder.newEnsembleEntry(s.getFirstEntryId(), addrs);</span>
+<span class="nc" id="L439">        }</span>
+
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        if (data.getCustomMetadataCount() &gt; 0) {</span>
+<span class="nc" id="L442">            builder.withCustomMetadata(data.getCustomMetadataList().stream().collect(</span>
+<span class="nc" id="L443">                                               Collectors.toMap(e -&gt; e.getKey(),</span>
+<span class="nc" id="L444">                                                                e -&gt; e.getValue().toByteArray())));</span>
+        }
+
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (data.hasCToken()) {</span>
+<span class="nc" id="L448">            builder.withCToken(data.getCToken());</span>
+        }
+<span class="nc" id="L450">    }</span>
+
+    private static LedgerMetadata parseVersion1Config(long ledgerId, InputStream is) throws IOException {
+<span class="nc" id="L453">        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, UTF_8.name()))) {</span>
+<span class="nc" id="L454">            LedgerMetadataBuilder builder = LedgerMetadataBuilder.create()</span>
+<span class="nc" id="L455">                    .withId(ledgerId)</span>
+<span class="nc" id="L456">                    .withMetadataFormatVersion(1);</span>
+<span class="nc" id="L457">            int quorumSize = Integer.parseInt(reader.readLine());</span>
+<span class="nc" id="L458">            int ensembleSize = Integer.parseInt(reader.readLine());</span>
+<span class="nc" id="L459">            long length = Long.parseLong(reader.readLine());</span>
+
+<span class="nc" id="L461">            builder.withEnsembleSize(ensembleSize).withWriteQuorumSize(quorumSize).withAckQuorumSize(quorumSize);</span>
+
+<span class="nc" id="L463">            String line = reader.readLine();</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">            while (line != null) {</span>
+<span class="nc" id="L465">                String[] parts = line.split(FIELD_SPLITTER);</span>
+
+<span class="nc bnc" id="L467" title="All 2 branches missed.">                if (parts[1].equals(V1_CLOSED_TAG)) {</span>
+<span class="nc" id="L468">                    Long l = Long.parseLong(parts[0]);</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                    if (l == V1_IN_RECOVERY_ENTRY_ID) {</span>
+<span class="nc" id="L470">                        builder.withInRecoveryState();</span>
+                    } else {
+<span class="nc" id="L472">                        builder.withClosedState().withLastEntryId(l).withLength(length);</span>
+                    }
+<span class="nc" id="L474">                    break;</span>
+                }
+
+<span class="nc" id="L477">                ArrayList&lt;BookieId&gt; addrs = new ArrayList&lt;BookieId&gt;();</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">                for (int j = 1; j &lt; parts.length; j++) {</span>
+<span class="nc" id="L479">                    addrs.add(BookieId.parse(parts[j]));</span>
+                }
+<span class="nc" id="L481">                builder.newEnsembleEntry(Long.parseLong(parts[0]), addrs);</span>
+
+<span class="nc" id="L483">                line = reader.readLine();</span>
+<span class="nc" id="L484">            }</span>
+<span class="nc" id="L485">            return builder.build();</span>
+<span class="nc" id="L486">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L487">            throw new IOException(e);</span>
+        }
+    }
+
+    private static LedgerMetadataFormat.DigestType apiToProtoDigestType(DigestType digestType) {
+<span class="nc bnc" id="L492" title="All 5 branches missed.">        switch (digestType) {</span>
+        case MAC:
+<span class="nc" id="L494">            return LedgerMetadataFormat.DigestType.HMAC;</span>
+        case CRC32:
+<span class="nc" id="L496">            return LedgerMetadataFormat.DigestType.CRC32;</span>
+        case CRC32C:
+<span class="nc" id="L498">            return LedgerMetadataFormat.DigestType.CRC32C;</span>
+        case DUMMY:
+<span class="nc" id="L500">            return LedgerMetadataFormat.DigestType.DUMMY;</span>
+        default:
+<span class="nc" id="L502">            throw new IllegalArgumentException(&quot;Unable to convert digest type &quot; + digestType);</span>
+        }
+    }
+
+    private static DigestType protoToApiDigestType(LedgerMetadataFormat.DigestType digestType) {
+<span class="nc bnc" id="L507" title="All 5 branches missed.">        switch (digestType) {</span>
+        case HMAC:
+<span class="nc" id="L509">            return DigestType.MAC;</span>
+        case CRC32:
+<span class="nc" id="L511">            return DigestType.CRC32;</span>
+        case CRC32C:
+<span class="nc" id="L513">            return DigestType.CRC32C;</span>
+        case DUMMY:
+<span class="nc" id="L515">            return DigestType.DUMMY;</span>
+        default:
+<span class="nc" id="L517">            throw new IllegalArgumentException(&quot;Unable to convert digest type &quot; + digestType);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

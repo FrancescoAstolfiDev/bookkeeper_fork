@@ -1,0 +1,259 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CleanupLedgerManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">CleanupLedgerManager.java</span></div><h1>CleanupLedgerManager.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import com.google.common.annotations.VisibleForTesting;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.LedgerMetadataListener;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.zookeeper.AsyncCallback;
+
+/**
+ * A ledger manager that cleans up resources upon closing.
+ */
+<span class="nc" id="L41">@Slf4j</span>
+public class CleanupLedgerManager implements LedgerManager {
+
+    private class CleanupGenericCallback&lt;T&gt; implements GenericCallback&lt;T&gt; {
+
+        private final GenericCallback&lt;T&gt; cb;
+
+<span class="nc" id="L48">        CleanupGenericCallback(GenericCallback&lt;T&gt; cb) {</span>
+<span class="nc" id="L49">            this.cb = cb;</span>
+<span class="nc" id="L50">            addCallback(cb);</span>
+<span class="nc" id="L51">        }</span>
+
+        @Override
+        public void operationComplete(int rc, T result) {
+<span class="nc" id="L55">            closeLock.readLock().lock();</span>
+            try {
+<span class="nc bnc" id="L57" title="All 4 branches missed.">                if (!closed &amp;&amp; removeCallback(cb)) {</span>
+<span class="nc" id="L58">                    cb.operationComplete(rc, result);</span>
+                }
+            } finally {
+<span class="nc" id="L61">                closeLock.readLock().unlock();</span>
+            }
+<span class="nc" id="L63">        }</span>
+    }
+
+    private static class ClosedLedgerRangeIterator implements LedgerRangeIterator {
+
+        @Override
+        public boolean hasNext() throws IOException {
+<span class="nc" id="L70">            throw new IOException(&quot;Ledger manager is closed.&quot;);</span>
+        }
+
+        @Override
+        public LedgerRange next() throws IOException {
+<span class="nc" id="L75">            throw new IOException(&quot;Ledger manager is closed.&quot;);</span>
+        }
+    }
+
+    private final LedgerManager underlying;
+<span class="nc" id="L80">    private final Set&lt;GenericCallback&gt; callbacks = ConcurrentHashMap.newKeySet();</span>
+<span class="nc" id="L81">    private boolean closed = false;</span>
+<span class="nc" id="L82">    private final ReentrantReadWriteLock closeLock = new ReentrantReadWriteLock();</span>
+<span class="nc" id="L83">    private final Set&lt;CompletableFuture&lt;?&gt;&gt; futures = ConcurrentHashMap.newKeySet();</span>
+
+<span class="nc" id="L85">    public CleanupLedgerManager(LedgerManager lm) {</span>
+<span class="nc" id="L86">        this.underlying = lm;</span>
+<span class="nc" id="L87">    }</span>
+
+    @VisibleForTesting
+    public LedgerManager getUnderlying() {
+<span class="nc" id="L91">        return underlying;</span>
+    }
+
+    private void addCallback(GenericCallback callback) {
+<span class="nc" id="L95">        callbacks.add(callback);</span>
+<span class="nc" id="L96">    }</span>
+
+    @Override
+    public void registerLedgerMetadataListener(long ledgerId, LedgerMetadataListener listener) {
+<span class="nc" id="L100">        underlying.registerLedgerMetadataListener(ledgerId, listener);</span>
+<span class="nc" id="L101">    }</span>
+
+    @Override
+    public void unregisterLedgerMetadataListener(long ledgerId, LedgerMetadataListener listener) {
+<span class="nc" id="L105">        underlying.unregisterLedgerMetadataListener(ledgerId, listener);</span>
+<span class="nc" id="L106">    }</span>
+
+    private boolean removeCallback(GenericCallback callback) {
+<span class="nc" id="L109">        return callbacks.remove(callback);</span>
+    }
+
+    private void recordPromise(CompletableFuture&lt;?&gt; promise) {
+<span class="nc" id="L113">        futures.add(promise);</span>
+<span class="nc" id="L114">        promise.whenComplete((result, exception) -&gt; {</span>
+<span class="nc" id="L115">            futures.remove(promise);</span>
+<span class="nc" id="L116">        });</span>
+<span class="nc" id="L117">    }</span>
+
+    @VisibleForTesting
+    int getCurrentFuturePromiseSize() {
+<span class="nc" id="L121">        return futures.size();</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; createLedgerMetadata(long lid, LedgerMetadata metadata) {
+<span class="nc" id="L126">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L129">                return closedPromise();</span>
+            } else {
+<span class="nc" id="L131">                CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = underlying.createLedgerMetadata(lid, metadata);</span>
+<span class="nc" id="L132">                recordPromise(promise);</span>
+<span class="nc" id="L133">                return promise;</span>
+            }
+        } finally {
+<span class="nc" id="L136">            closeLock.readLock().unlock();</span>
+        }
+    }
+
+    @Override
+    public CompletableFuture&lt;Void&gt; removeLedgerMetadata(long ledgerId, Version version) {
+<span class="nc" id="L142">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L145">                return closedPromise();</span>
+            }
+<span class="nc" id="L147">            CompletableFuture&lt;Void&gt; promise = underlying.removeLedgerMetadata(ledgerId, version);</span>
+<span class="nc" id="L148">            recordPromise(promise);</span>
+<span class="nc" id="L149">            return promise;</span>
+        } finally {
+<span class="nc" id="L151">            closeLock.readLock().unlock();</span>
+        }
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; readLedgerMetadata(long ledgerId) {
+<span class="nc" id="L157">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L160">                return closedPromise();</span>
+            }
+<span class="nc" id="L162">            CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = underlying.readLedgerMetadata(ledgerId);</span>
+<span class="nc" id="L163">            recordPromise(promise);</span>
+<span class="nc" id="L164">            return promise;</span>
+        } finally {
+<span class="nc" id="L166">            closeLock.readLock().unlock();</span>
+        }
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; writeLedgerMetadata(long ledgerId, LedgerMetadata metadata,
+                                                                            Version currentVersion) {
+<span class="nc" id="L173">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L176">                return closedPromise();</span>
+            }
+<span class="nc" id="L178">            CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise =</span>
+<span class="nc" id="L179">                underlying.writeLedgerMetadata(ledgerId, metadata, currentVersion);</span>
+<span class="nc" id="L180">            recordPromise(promise);</span>
+<span class="nc" id="L181">            return promise;</span>
+        } finally {
+<span class="nc" id="L183">            closeLock.readLock().unlock();</span>
+        }
+    }
+
+    @Override
+    public void asyncProcessLedgers(Processor&lt;Long&gt; processor,
+                                    final AsyncCallback.VoidCallback finalCb, final Object context,
+                                    final int successRc, final int failureRc) {
+<span class="nc" id="L191">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L194">                finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L195">                return;</span>
+            }
+<span class="nc" id="L197">            final GenericCallback&lt;Void&gt; stub = new GenericCallback&lt;Void&gt;() {</span>
+                @Override
+                public void operationComplete(int rc, Void result) {
+<span class="nc" id="L200">                    finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L201">                }</span>
+            };
+<span class="nc" id="L203">            addCallback(stub);</span>
+<span class="nc" id="L204">            underlying.asyncProcessLedgers(processor, new AsyncCallback.VoidCallback() {</span>
+                @Override
+                public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                    if (removeCallback(stub)) {</span>
+<span class="nc" id="L208">                        finalCb.processResult(rc, path, ctx);</span>
+                    }
+<span class="nc" id="L210">                }</span>
+            }, context, successRc, failureRc);
+        } finally {
+<span class="nc" id="L213">            closeLock.readLock().unlock();</span>
+        }
+<span class="nc" id="L215">    }</span>
+
+    @Override
+    public LedgerRangeIterator getLedgerRanges(long zkOpTimeoutMs) {
+<span class="nc" id="L219">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L222">                return new ClosedLedgerRangeIterator();</span>
+            }
+<span class="nc" id="L224">            return underlying.getLedgerRanges(zkOpTimeoutMs);</span>
+        } finally {
+<span class="nc" id="L226">            closeLock.readLock().unlock();</span>
+        }
+    }
+
+    @Override
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public void close() throws IOException {
+        Set&lt;GenericCallback&gt; keys;
+<span class="nc" id="L234">        closeLock.writeLock().lock();</span>
+        try {
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L237">                return;</span>
+            }
+<span class="nc" id="L239">            closed = true;</span>
+<span class="nc" id="L240">            keys = new HashSet&lt;&gt;(callbacks);</span>
+        } finally {
+<span class="nc" id="L242">            closeLock.writeLock().unlock();</span>
+        }
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        for (GenericCallback key : keys) {</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">            if (callbacks.remove(key)) {</span>
+<span class="nc" id="L246">                key.operationComplete(BKException.Code.ClientClosedException, null);</span>
+            }
+<span class="nc" id="L248">        }</span>
+<span class="nc" id="L249">        BKException exception = new BKException.BKClientClosedException();</span>
+<span class="nc" id="L250">        futures.forEach((f) -&gt; f.completeExceptionally(exception));</span>
+<span class="nc" id="L251">        futures.clear();</span>
+<span class="nc" id="L252">        underlying.close();</span>
+<span class="nc" id="L253">    }</span>
+
+    private static &lt;T&gt; CompletableFuture&lt;T&gt; closedPromise() {
+<span class="nc" id="L256">        return FutureUtils.exception(new BKException.BKClientClosedException());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

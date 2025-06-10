@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BookKeeper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client.api</a> &gt; <span class="el_source">BookKeeper.java</span></div><h1>BookKeeper.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client.api;
+
+import java.util.concurrent.CompletableFuture;
+import org.apache.bookkeeper.client.impl.BookKeeperBuilderImpl;
+import org.apache.bookkeeper.common.annotation.InterfaceAudience.Public;
+import org.apache.bookkeeper.common.annotation.InterfaceStability.Unstable;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+
+/**
+ * This is the entry point for BookKeeper client side API.
+ *
+ * @since 4.6
+ */
+@Public
+@Unstable
+public interface BookKeeper extends AutoCloseable {
+
+    /**
+     * Create a new builder which can be used to boot a new BookKeeper client.
+     *
+     * @param clientConfiguration the configuration for the client
+     * @return a builder
+     */
+    static BookKeeperBuilder newBuilder(final ClientConfiguration clientConfiguration) {
+<span class="nc" id="L45">        return new BookKeeperBuilderImpl(clientConfiguration);</span>
+    }
+
+    /**
+     * Start the creation of a new ledger.
+     *
+     * @return a builder for the new ledger
+     */
+    CreateBuilder newCreateLedgerOp();
+
+    /**
+     * Open an existing ledger.
+     *
+     * @return a builder useful to create a readable handler for an existing ledger
+     */
+    OpenBuilder newOpenLedgerOp();
+
+    /**
+     * Delete an existing ledger.
+     *
+     * @return a builder useful to delete an existing ledger
+     */
+    DeleteBuilder newDeleteLedgerOp();
+
+    /**
+     * List ledgers.
+     *
+     * @return a builder useful to list ledgers.
+     */
+    ListLedgersResultBuilder newListLedgersOp();
+
+    /**
+     * Get ledger metadata of a given ledger id.
+     *
+     * @param ledgerId id of the ledger.
+     * @return a &lt;code&gt;CompletableFuture&lt;/code&gt; instance containing ledger metadata.
+     */
+    CompletableFuture&lt;LedgerMetadata&gt; getLedgerMetadata(long ledgerId);
+
+    /**
+     * Return driver metadata service is available.
+     *
+     * @return the metadata service is available.
+     */
+    CompletableFuture&lt;Boolean&gt; isDriverMetadataServiceAvailable();
+
+    /**
+     * Close the client and release every resource.
+     *
+     * @throws BKException
+     * @throws InterruptedException
+     */
+    @Override
+    void close() throws BKException, InterruptedException;
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

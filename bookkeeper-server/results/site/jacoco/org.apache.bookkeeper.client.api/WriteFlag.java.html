@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WriteFlag.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client.api</a> &gt; <span class="el_source">WriteFlag.java</span></div><h1>WriteFlag.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client.api;
+
+import java.util.EnumSet;
+import lombok.Getter;
+
+/**
+ * Flags to specify the behaviour of writes.
+ */
+<span class="nc" id="L29">@Getter</span>
+public enum WriteFlag {
+
+    /**
+     * Writes will be acknowledged after writing to the filesystem
+     * but not yet been persisted to disks.
+     *
+     * @see ForceableHandle#force()
+     */
+<span class="nc" id="L38">    DEFERRED_SYNC(0x1 &lt;&lt; 0);</span>
+
+    /**
+     * No flag is set, use default behaviour.
+     */
+<span class="nc" id="L43">    public static final EnumSet&lt;WriteFlag&gt; NONE = EnumSet.noneOf(WriteFlag.class);</span>
+
+<span class="nc" id="L45">    private static final EnumSet&lt;WriteFlag&gt; ONLY_DEFERRED_SYNC = EnumSet.of(DEFERRED_SYNC);</span>
+
+<span class="nc" id="L47">    private final int value;</span>
+
+<span class="nc" id="L49">    WriteFlag(int value) {</span>
+<span class="nc" id="L50">        this.value = value;</span>
+<span class="nc" id="L51">    }</span>
+
+    /**
+     * Converts a set of flags from a binary representation.
+     *
+     * @param flagValue the binary value
+     * @return a set of flags
+     */
+    public static EnumSet&lt;WriteFlag&gt; getWriteFlags(int flagValue) {
+<span class="nc bnc" id="L60" title="All 2 branches missed.">        if ((flagValue &amp; DEFERRED_SYNC.value) == DEFERRED_SYNC.value) {</span>
+<span class="nc" id="L61">            return ONLY_DEFERRED_SYNC;</span>
+        }
+<span class="nc" id="L63">        return WriteFlag.NONE;</span>
+    }
+
+    /**
+     * Converts a set of flags from a binary representation.
+     *
+     * @param flags the flags
+     * @return the binary representation
+     */
+    public static int getWriteFlagsValue(EnumSet&lt;WriteFlag&gt; flags) {
+<span class="nc" id="L73">        int result = 0;</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        for (WriteFlag flag : flags) {</span>
+<span class="nc" id="L75">            result |= flag.value;</span>
+<span class="nc" id="L76">        }</span>
+<span class="nc" id="L77">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

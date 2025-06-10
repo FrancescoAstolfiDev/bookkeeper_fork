@@ -1,0 +1,476 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerCreateOp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">LedgerCreateOp.java</span></div><h1>LedgerCreateOp.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.client;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.security.GeneralSecurityException;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.apache.bookkeeper.client.AsyncCallback.CreateCallback;
+import org.apache.bookkeeper.client.BKException.BKNotEnoughBookiesException;
+import org.apache.bookkeeper.client.BookKeeper.DigestType;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncCreateAdvCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncCreateCallback;
+import org.apache.bookkeeper.client.api.CreateAdvBuilder;
+import org.apache.bookkeeper.client.api.CreateBuilder;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.client.api.WriteAdvHandle;
+import org.apache.bookkeeper.client.api.WriteFlag;
+import org.apache.bookkeeper.client.api.WriteHandle;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.meta.LedgerIdGenerator;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Encapsulates asynchronous ledger create operation.
+ *
+ */
+class LedgerCreateOp {
+
+<span class="nc" id="L59">    static final Logger LOG = LoggerFactory.getLogger(LedgerCreateOp.class);</span>
+
+    final CreateCallback cb;
+    LedgerMetadata metadata;
+    LedgerHandle lh;
+<span class="nc" id="L64">    long ledgerId = -1L;</span>
+    final Object ctx;
+    final int ensembleSize;
+    final int writeQuorumSize;
+    final int ackQuorumSize;
+    final Map&lt;String, byte[]&gt; customMetadata;
+    final int metadataFormatVersion;
+    final byte[] passwd;
+    final BookKeeper bk;
+    final DigestType digestType;
+    final EnumSet&lt;WriteFlag&gt; writeFlags;
+    final long startTime;
+    final OpStatsLogger createOpLogger;
+    final BookKeeperClientStats clientStats;
+<span class="nc" id="L78">    boolean adv = false;</span>
+<span class="nc" id="L79">    boolean generateLedgerId = true;</span>
+
+    /**
+     * Constructor.
+     *
+     * @param bk
+     *       BookKeeper object
+     * @param ensembleSize
+     *       ensemble size
+     * @param writeQuorumSize
+     *       write quorum size
+     * @param ackQuorumSize
+     *       ack quorum size
+     * @param digestType
+     *       digest type, either MAC or CRC32
+     * @param passwd
+     *       password
+     * @param cb
+     *       callback implementation
+     * @param ctx
+     *       optional control object
+     * @param customMetadata
+     *       A map of user specified custom metadata about the ledger to be persisted; will not try to
+     *       preserve the order(e.g. sortedMap) upon later retireval.
+     */
+    LedgerCreateOp(
+            BookKeeper bk, int ensembleSize, int writeQuorumSize, int ackQuorumSize, DigestType digestType,
+            byte[] passwd, CreateCallback cb, Object ctx, final Map&lt;String, byte[]&gt; customMetadata,
+            EnumSet&lt;WriteFlag&gt; writeFlags,
+<span class="nc" id="L108">            BookKeeperClientStats clientStats) {</span>
+<span class="nc" id="L109">        this.bk = bk;</span>
+<span class="nc" id="L110">        this.metadataFormatVersion = bk.getConf().getLedgerMetadataFormatVersion();</span>
+<span class="nc" id="L111">        this.ensembleSize = ensembleSize;</span>
+<span class="nc" id="L112">        this.writeQuorumSize = writeQuorumSize;</span>
+<span class="nc" id="L113">        this.ackQuorumSize = ackQuorumSize;</span>
+<span class="nc" id="L114">        this.digestType = digestType;</span>
+<span class="nc" id="L115">        this.customMetadata = customMetadata;</span>
+<span class="nc" id="L116">        this.writeFlags = writeFlags;</span>
+<span class="nc" id="L117">        this.passwd = passwd;</span>
+<span class="nc" id="L118">        this.cb = cb;</span>
+<span class="nc" id="L119">        this.ctx = ctx;</span>
+<span class="nc" id="L120">        this.startTime = MathUtils.nowInNano();</span>
+<span class="nc" id="L121">        this.createOpLogger = clientStats.getCreateOpLogger();</span>
+<span class="nc" id="L122">        this.clientStats = clientStats;</span>
+<span class="nc" id="L123">    }</span>
+
+    /**
+     * Initiates the operation.
+     */
+    public void initiate() {
+<span class="nc" id="L129">        int actualEnsembleSize = ensembleSize;</span>
+<span class="nc" id="L130">        List&lt;BookieId&gt; ensemble = null;</span>
+        // select bookies for first ensemble
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (bk.getConf().getOpportunisticStriping()) {</span>
+<span class="nc" id="L133">            BKNotEnoughBookiesException lastError = null;</span>
+            // we would like to select ensembleSize bookies, but
+            // we can settle to writeQuorumSize
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            while (actualEnsembleSize &gt;= writeQuorumSize) {</span>
+                try {
+<span class="nc" id="L138">                    ensemble = bk.getBookieWatcher()</span>
+<span class="nc" id="L139">                        .newEnsemble(actualEnsembleSize, writeQuorumSize, ackQuorumSize, customMetadata);</span>
+<span class="nc" id="L140">                    lastError = null;</span>
+<span class="nc" id="L141">                    break;</span>
+<span class="nc" id="L142">                } catch (BKNotEnoughBookiesException e) {</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                    if (actualEnsembleSize &gt;= writeQuorumSize + 1) {</span>
+<span class="nc" id="L144">                        LOG.info(&quot;Not enough bookies to create ledger with ensembleSize={},&quot;</span>
+                                + &quot; writeQuorumSize={} and ackQuorumSize={}, opportusticStriping enabled, try again&quot;,
+<span class="nc" id="L146">                                    actualEnsembleSize, writeQuorumSize, ackQuorumSize);</span>
+                    }
+<span class="nc" id="L148">                    lastError = e;</span>
+<span class="nc" id="L149">                    actualEnsembleSize--;</span>
+<span class="nc" id="L150">                }</span>
+            }
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (lastError != null) {</span>
+<span class="nc" id="L153">                LOG.error(&quot;Not enough bookies to create ledger with ensembleSize={},&quot;</span>
+                        + &quot; writeQuorumSize={} and ackQuorumSize={}&quot;,
+<span class="nc" id="L155">                        actualEnsembleSize, writeQuorumSize, ackQuorumSize);</span>
+<span class="nc" id="L156">                createComplete(lastError.getCode(), null);</span>
+<span class="nc" id="L157">                return;</span>
+            }
+<span class="nc" id="L159">        } else {</span>
+            try {
+<span class="nc" id="L161">                ensemble = bk.getBookieWatcher()</span>
+<span class="nc" id="L162">                        .newEnsemble(actualEnsembleSize, writeQuorumSize, ackQuorumSize, customMetadata);</span>
+<span class="nc" id="L163">            } catch (BKNotEnoughBookiesException e) {</span>
+<span class="nc" id="L164">                LOG.error(&quot;Not enough bookies to create ledger with ensembleSize={},&quot;</span>
+                        + &quot; writeQuorumSize={} and ackQuorumSize={}&quot;,
+<span class="nc" id="L166">                            actualEnsembleSize, writeQuorumSize, ackQuorumSize);</span>
+<span class="nc" id="L167">                createComplete(e.getCode(), null);</span>
+<span class="nc" id="L168">                return;</span>
+<span class="nc" id="L169">            }</span>
+        }
+<span class="nc" id="L171">        LedgerMetadataBuilder metadataBuilder = LedgerMetadataBuilder.create()</span>
+<span class="nc" id="L172">            .withEnsembleSize(actualEnsembleSize).withWriteQuorumSize(writeQuorumSize).withAckQuorumSize(ackQuorumSize)</span>
+<span class="nc" id="L173">            .withDigestType(digestType.toApiDigestType()).withPassword(passwd);</span>
+<span class="nc" id="L174">        metadataBuilder.newEnsembleEntry(0L, ensemble);</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (customMetadata != null) {</span>
+<span class="nc" id="L176">            metadataBuilder.withCustomMetadata(customMetadata);</span>
+        }
+<span class="nc" id="L178">        metadataBuilder.withMetadataFormatVersion(metadataFormatVersion);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (bk.getConf().getStoreSystemtimeAsLedgerCreationTime()) {</span>
+<span class="nc" id="L180">            metadataBuilder.withCreationTime(System.currentTimeMillis()).storingCreationTime(true);</span>
+        }
+
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        if (this.generateLedgerId) {</span>
+<span class="nc" id="L184">            generateLedgerIdAndCreateLedger(metadataBuilder);</span>
+        } else {
+<span class="nc" id="L186">            this.metadata = metadataBuilder.withId(ledgerId).build();</span>
+            // Create ledger with supplied ledgerId
+<span class="nc" id="L188">            bk.getLedgerManager().createLedgerMetadata(ledgerId, metadata)</span>
+<span class="nc" id="L189">                .whenComplete((written, exception) -&gt; metadataCallback(written, exception, metadataBuilder));</span>
+        }
+<span class="nc" id="L191">    }</span>
+
+    void generateLedgerIdAndCreateLedger(LedgerMetadataBuilder metadataBuilder) {
+        // generate a ledgerId
+<span class="nc" id="L195">        final LedgerIdGenerator ledgerIdGenerator = bk.getLedgerIdGenerator();</span>
+<span class="nc" id="L196">        ledgerIdGenerator.generateLedgerId(new GenericCallback&lt;Long&gt;() {</span>
+            @Override
+            public void operationComplete(int rc, Long ledgerId) {
+<span class="nc bnc" id="L199" title="All 2 branches missed.">                if (BKException.Code.OK != rc) {</span>
+<span class="nc" id="L200">                    createComplete(rc, null);</span>
+<span class="nc" id="L201">                    return;</span>
+                }
+<span class="nc" id="L203">                LedgerCreateOp.this.ledgerId = ledgerId;</span>
+<span class="nc" id="L204">                LedgerCreateOp.this.metadata = metadataBuilder.withId(ledgerId).build();</span>
+                // create a ledger with metadata
+<span class="nc" id="L206">                bk.getLedgerManager().createLedgerMetadata(ledgerId, metadata)</span>
+<span class="nc" id="L207">                    .whenComplete((written, exception) -&gt; metadataCallback(written, exception, metadataBuilder));</span>
+<span class="nc" id="L208">            }</span>
+        });
+<span class="nc" id="L210">    }</span>
+
+    /**
+     * Initiates the operation to return LedgerHandleAdv.
+     */
+    public void initiateAdv(final long ledgerId) {
+<span class="nc" id="L216">        this.adv = true;</span>
+<span class="nc" id="L217">        this.ledgerId = ledgerId;</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (this.ledgerId != -1L) {</span>
+<span class="nc" id="L219">            this.generateLedgerId = false;</span>
+        }
+<span class="nc" id="L221">        initiate();</span>
+<span class="nc" id="L222">    }</span>
+
+    /**
+     * Callback when metadata store has responded.
+     */
+    private void metadataCallback(Versioned&lt;LedgerMetadata&gt; writtenMetadata,
+                                  Throwable exception, LedgerMetadataBuilder metadataBuilder) {
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (exception != null) {</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (this.generateLedgerId</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">                &amp;&amp; (BKException.getExceptionCode(exception) == BKException.Code.LedgerExistException)) {</span>
+                // retry to generate a new ledger id
+<span class="nc" id="L233">                generateLedgerIdAndCreateLedger(metadataBuilder);</span>
+            } else {
+<span class="nc" id="L235">                createComplete(BKException.getExceptionCode(exception), null);</span>
+            }
+        } else {
+            try {
+<span class="nc bnc" id="L239" title="All 2 branches missed.">                if (adv) {</span>
+<span class="nc" id="L240">                    lh = new LedgerHandleAdv(bk.getClientCtx(), ledgerId, writtenMetadata,</span>
+                                             digestType, passwd, writeFlags);
+                } else {
+<span class="nc" id="L243">                    lh = new LedgerHandle(bk.getClientCtx(), ledgerId, writtenMetadata, digestType, passwd, writeFlags);</span>
+                }
+<span class="nc" id="L245">            } catch (GeneralSecurityException e) {</span>
+<span class="nc" id="L246">                LOG.error(&quot;Security exception while creating ledger: &quot; + ledgerId, e);</span>
+<span class="nc" id="L247">                createComplete(BKException.Code.DigestNotInitializedException, null);</span>
+<span class="nc" id="L248">                return;</span>
+<span class="nc" id="L249">            } catch (NumberFormatException e) {</span>
+<span class="nc" id="L250">                LOG.error(&quot;Incorrectly entered parameter throttle: &quot; + bk.getConf().getThrottleValue(), e);</span>
+<span class="nc" id="L251">                createComplete(BKException.Code.IncorrectParameterException, null);</span>
+<span class="nc" id="L252">                return;</span>
+<span class="nc" id="L253">            }</span>
+
+<span class="nc" id="L255">            List&lt;BookieId&gt; curEns = lh.getLedgerMetadata().getEnsembleAt(0L);</span>
+<span class="nc" id="L256">            LOG.info(&quot;Ensemble: {} for ledger: {}&quot;, curEns, lh.getId());</span>
+
+<span class="nc bnc" id="L258" title="All 2 branches missed.">            for (BookieId bsa : curEns) {</span>
+<span class="nc" id="L259">                clientStats.getEnsembleBookieDistributionCounter(bsa.toString()).inc();</span>
+<span class="nc" id="L260">            }</span>
+
+            // return the ledger handle back
+<span class="nc" id="L263">            createComplete(BKException.Code.OK, lh);</span>
+        }
+<span class="nc" id="L265">    }</span>
+
+    private void createComplete(int rc, LedgerHandle lh) {
+        // Opened a new ledger
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        if (BKException.Code.OK != rc) {</span>
+<span class="nc" id="L270">            createOpLogger.registerFailedEvent(MathUtils.elapsedNanos(startTime), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L272">            createOpLogger.registerSuccessfulEvent(MathUtils.elapsedNanos(startTime), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (lh != null) { // lh is null in case of errors</span>
+<span class="nc" id="L275">            lh.executeOrdered(() -&gt; cb.createComplete(rc, lh, ctx));</span>
+        } else {
+<span class="nc" id="L277">            cb.createComplete(rc, null, ctx);</span>
+        }
+<span class="nc" id="L279">    }</span>
+
+    public static class CreateBuilderImpl implements CreateBuilder {
+
+        private final BookKeeper bk;
+<span class="nc" id="L284">        private int builderEnsembleSize = 3;</span>
+<span class="nc" id="L285">        private int builderAckQuorumSize = 2;</span>
+<span class="nc" id="L286">        private int builderWriteQuorumSize = 2;</span>
+        private byte[] builderPassword;
+<span class="nc" id="L288">        private EnumSet&lt;WriteFlag&gt; builderWriteFlags = WriteFlag.NONE;</span>
+<span class="nc" id="L289">        private org.apache.bookkeeper.client.api.DigestType builderDigestType =</span>
+            org.apache.bookkeeper.client.api.DigestType.CRC32;
+<span class="nc" id="L291">        private Map&lt;String, byte[]&gt; builderCustomMetadata = Collections.emptyMap();</span>
+
+<span class="nc" id="L293">        CreateBuilderImpl(BookKeeper bk) {</span>
+<span class="nc" id="L294">            this.bk = bk;</span>
+<span class="nc" id="L295">        }</span>
+
+        @Override
+        public CreateBuilder withEnsembleSize(int ensembleSize) {
+<span class="nc" id="L299">            this.builderEnsembleSize = ensembleSize;</span>
+<span class="nc" id="L300">            return this;</span>
+        }
+
+        @Override
+        public CreateBuilder withWriteFlags(EnumSet&lt;WriteFlag&gt; writeFlags) {
+<span class="nc" id="L305">            this.builderWriteFlags = writeFlags;</span>
+<span class="nc" id="L306">            return this;</span>
+        }
+
+        @Override
+        public CreateBuilder withWriteQuorumSize(int writeQuorumSize) {
+<span class="nc" id="L311">            this.builderWriteQuorumSize = writeQuorumSize;</span>
+<span class="nc" id="L312">            return this;</span>
+        }
+
+        @Override
+        public CreateBuilder withAckQuorumSize(int ackQuorumSize) {
+<span class="nc" id="L317">            this.builderAckQuorumSize = ackQuorumSize;</span>
+<span class="nc" id="L318">            return this;</span>
+        }
+
+        @SuppressFBWarnings(&quot;EI_EXPOSE_REP2&quot;)
+        @Override
+        public CreateBuilder withPassword(byte[] password) {
+<span class="nc" id="L324">            this.builderPassword = password;</span>
+<span class="nc" id="L325">            return this;</span>
+        }
+
+        @Override
+        public CreateBuilder withCustomMetadata(Map&lt;String, byte[]&gt; customMetadata) {
+<span class="nc" id="L330">            this.builderCustomMetadata = customMetadata;</span>
+<span class="nc" id="L331">            return this;</span>
+        }
+
+        @Override
+        public CreateBuilder withDigestType(org.apache.bookkeeper.client.api.DigestType digestType) {
+<span class="nc" id="L336">            this.builderDigestType = digestType;</span>
+<span class="nc" id="L337">            return this;</span>
+        }
+
+        @Override
+        public CreateAdvBuilder makeAdv() {
+<span class="nc" id="L342">            return new CreateAdvBuilderImpl(this);</span>
+        }
+
+        private boolean validate() {
+<span class="nc bnc" id="L346" title="All 2 branches missed.">            if (builderWriteFlags == null) {</span>
+<span class="nc" id="L347">                LOG.error(&quot;invalid null writeFlags&quot;);</span>
+<span class="nc" id="L348">                return false;</span>
+            }
+
+<span class="nc bnc" id="L351" title="All 2 branches missed.">            if (builderWriteQuorumSize &gt; builderEnsembleSize) {</span>
+<span class="nc" id="L352">                LOG.error(&quot;invalid writeQuorumSize {} &gt; ensembleSize {}&quot;, builderWriteQuorumSize, builderEnsembleSize);</span>
+<span class="nc" id="L353">                return false;</span>
+            }
+
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            if (builderAckQuorumSize &gt; builderWriteQuorumSize) {</span>
+<span class="nc" id="L357">                LOG.error(&quot;invalid ackQuorumSize {} &gt; writeQuorumSize {}&quot;, builderAckQuorumSize,</span>
+<span class="nc" id="L358">                        builderWriteQuorumSize);</span>
+<span class="nc" id="L359">                return false;</span>
+            }
+
+<span class="nc bnc" id="L362" title="All 2 branches missed.">            if (builderAckQuorumSize &lt;= 0) {</span>
+<span class="nc" id="L363">                LOG.error(&quot;invalid ackQuorumSize {} &lt;= 0&quot;, builderAckQuorumSize);</span>
+<span class="nc" id="L364">                return false;</span>
+            }
+
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if (builderPassword == null) {</span>
+<span class="nc" id="L368">                LOG.error(&quot;invalid null password&quot;);</span>
+<span class="nc" id="L369">                return false;</span>
+            }
+
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            if (builderDigestType == null) {</span>
+<span class="nc" id="L373">                LOG.error(&quot;invalid null digestType&quot;);</span>
+<span class="nc" id="L374">                return false;</span>
+            }
+
+<span class="nc bnc" id="L377" title="All 2 branches missed.">            if (builderCustomMetadata == null) {</span>
+<span class="nc" id="L378">                LOG.error(&quot;invalid null customMetadata&quot;);</span>
+<span class="nc" id="L379">                return false;</span>
+            }
+
+<span class="nc" id="L382">            return true;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;WriteHandle&gt; execute() {
+<span class="nc" id="L387">            CompletableFuture&lt;WriteHandle&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L388">            SyncCreateCallback callback = new SyncCreateCallback(future);</span>
+<span class="nc" id="L389">            create(callback);</span>
+<span class="nc" id="L390">            return future;</span>
+        }
+
+        private void create(CreateCallback cb) {
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            if (!validate()) {</span>
+<span class="nc" id="L395">                cb.createComplete(BKException.Code.IncorrectParameterException, null, null);</span>
+<span class="nc" id="L396">                return;</span>
+            }
+<span class="nc" id="L398">            LedgerCreateOp op = new LedgerCreateOp(bk, builderEnsembleSize,</span>
+<span class="nc" id="L399">                builderWriteQuorumSize, builderAckQuorumSize, DigestType.fromApiDigestType(builderDigestType),</span>
+                builderPassword, cb, null, builderCustomMetadata, builderWriteFlags,
+<span class="nc" id="L401">                bk.getClientCtx().getClientStats());</span>
+<span class="nc" id="L402">            ReentrantReadWriteLock closeLock = bk.getCloseLock();</span>
+<span class="nc" id="L403">            closeLock.readLock().lock();</span>
+            try {
+<span class="nc bnc" id="L405" title="All 2 branches missed.">                if (bk.isClosed()) {</span>
+<span class="nc" id="L406">                    cb.createComplete(BKException.Code.ClientClosedException, null, null);</span>
+<span class="nc" id="L407">                    return;</span>
+                }
+<span class="nc" id="L409">                op.initiate();</span>
+            } finally {
+<span class="nc" id="L411">                closeLock.readLock().unlock();</span>
+            }
+<span class="nc" id="L413">        }</span>
+    }
+
+    private static class CreateAdvBuilderImpl implements CreateAdvBuilder {
+
+        private Long builderLedgerId;
+        private final CreateBuilderImpl parent;
+
+<span class="nc" id="L421">         private CreateAdvBuilderImpl(CreateBuilderImpl parent) {</span>
+<span class="nc" id="L422">            this.parent = parent;</span>
+<span class="nc" id="L423">        }</span>
+
+        @Override
+        public CreateAdvBuilder withLedgerId(long ledgerId) {
+<span class="nc" id="L427">            builderLedgerId = ledgerId;</span>
+<span class="nc" id="L428">            return this;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;WriteAdvHandle&gt; execute() {
+<span class="nc" id="L433">            CompletableFuture&lt;WriteAdvHandle&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L434">            SyncCreateAdvCallback callback = new SyncCreateAdvCallback(future);</span>
+<span class="nc" id="L435">            create(callback);</span>
+<span class="nc" id="L436">            return future;</span>
+        }
+
+        private boolean validate() {
+<span class="nc bnc" id="L440" title="All 2 branches missed.">            if (!parent.validate()) {</span>
+<span class="nc" id="L441">                return false;</span>
+            }
+<span class="nc bnc" id="L443" title="All 4 branches missed.">            if (builderLedgerId != null &amp;&amp; builderLedgerId &lt; 0) {</span>
+<span class="nc" id="L444">                LOG.error(&quot;invalid ledgerId {} &lt; 0. Do not set en explicit value if you want automatic generation&quot;,</span>
+                        builderLedgerId);
+<span class="nc" id="L446">                return false;</span>
+            }
+<span class="nc" id="L448">            return true;</span>
+        }
+
+        private void create(CreateCallback cb) {
+<span class="nc bnc" id="L452" title="All 2 branches missed.">            if (!validate()) {</span>
+<span class="nc" id="L453">                cb.createComplete(BKException.Code.IncorrectParameterException, null, null);</span>
+<span class="nc" id="L454">                return;</span>
+            }
+<span class="nc" id="L456">            LedgerCreateOp op = new LedgerCreateOp(parent.bk, parent.builderEnsembleSize,</span>
+<span class="nc" id="L457">                    parent.builderWriteQuorumSize, parent.builderAckQuorumSize,</span>
+<span class="nc" id="L458">                    DigestType.fromApiDigestType(parent.builderDigestType),</span>
+<span class="nc" id="L459">                    parent.builderPassword, cb, null, parent.builderCustomMetadata,</span>
+<span class="nc" id="L460">                    parent.builderWriteFlags,</span>
+<span class="nc" id="L461">                    parent.bk.getClientCtx().getClientStats());</span>
+<span class="nc" id="L462">            ReentrantReadWriteLock closeLock = parent.bk.getCloseLock();</span>
+<span class="nc" id="L463">            closeLock.readLock().lock();</span>
+            try {
+<span class="nc bnc" id="L465" title="All 2 branches missed.">                if (parent.bk.isClosed()) {</span>
+<span class="nc" id="L466">                    cb.createComplete(BKException.Code.ClientClosedException, null, null);</span>
+<span class="nc" id="L467">                    return;</span>
+                }
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                op.initiateAdv(builderLedgerId == null ? -1L : builderLedgerId);</span>
+            } finally {
+<span class="nc" id="L471">                closeLock.readLock().unlock();</span>
+            }
+<span class="nc" id="L473">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

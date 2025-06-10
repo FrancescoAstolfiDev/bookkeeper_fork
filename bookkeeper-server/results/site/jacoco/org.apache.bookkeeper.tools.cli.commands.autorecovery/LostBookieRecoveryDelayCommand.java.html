@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LostBookieRecoveryDelayCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.autorecovery</a> &gt; <span class="el_source">LostBookieRecoveryDelayCommand.java</span></div><h1>LostBookieRecoveryDelayCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.autorecovery;
+
+import com.beust.jcommander.Parameter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import java.io.IOException;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.replication.ReplicationException;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to Setter and Getter for LostBookieRecoveryDelay value (in seconds) in metadata store.
+ */
+public class LostBookieRecoveryDelayCommand extends BookieCommand&lt;LostBookieRecoveryDelayCommand.LBRDFlags&gt; {
+
+<span class="nc" id="L43">    static final Logger LOG = LoggerFactory.getLogger(LostBookieRecoveryDelayCommand.class);</span>
+
+    private static final String NAME = &quot;lostbookierecoverydelay&quot;;
+    private static final String DESC =
+        &quot;Setter and Getter for LostBookieRecoveryDelay value (in seconds) in metadata store&quot;;
+
+    private static final int DEFAULT = 0;
+
+    public LostBookieRecoveryDelayCommand() {
+<span class="nc" id="L52">        this(new LBRDFlags());</span>
+<span class="nc" id="L53">    }</span>
+
+    private LostBookieRecoveryDelayCommand(LBRDFlags flags) {
+<span class="nc" id="L56">        super(CliSpec.&lt;LBRDFlags&gt;newBuilder()</span>
+<span class="nc" id="L57">                  .withName(NAME)</span>
+<span class="nc" id="L58">                  .withDescription(DESC)</span>
+<span class="nc" id="L59">                  .withFlags(flags)</span>
+<span class="nc" id="L60">                  .build());</span>
+<span class="nc" id="L61">    }</span>
+
+    /**
+     * Flags for command LostBookieRecoveryDelay.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L67">    @Setter</span>
+<span class="nc" id="L68">    public static class LBRDFlags extends CliFlags{</span>
+
+        @Parameter(names = { &quot;-g&quot;, &quot;--get&quot; }, description = &quot;Get LostBookieRecoveryDelay value (in seconds)&quot;)
+        private boolean get;
+
+<span class="nc" id="L73">        @Parameter(names = { &quot;-s&quot;, &quot;--set&quot; }, description = &quot;Set LostBookieRecoveryDelay value (in seconds)&quot;)</span>
+        private int set = DEFAULT;
+
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, LBRDFlags cmdFlags) {
+        try {
+<span class="nc" id="L81">            return handler(conf, cmdFlags);</span>
+<span class="nc" id="L82">        } catch (Exception e) {</span>
+<span class="nc" id="L83">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+        }
+    }
+
+    public boolean handler(ServerConfiguration conf, LBRDFlags flags)
+        throws InterruptedException, BKException, IOException, ReplicationException.UnavailableException,
+               ReplicationException.CompatibilityException, KeeperException {
+<span class="nc" id="L90">        boolean getter = flags.get;</span>
+<span class="nc" id="L91">        boolean setter = false;</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        if (flags.set != DEFAULT) {</span>
+<span class="nc" id="L93">            setter = true;</span>
+        }
+
+<span class="nc bnc" id="L96" title="All 8 branches missed.">        if ((!getter &amp;&amp; !setter) || (getter &amp;&amp; setter)) {</span>
+<span class="nc" id="L97">            LOG.error(&quot;One and only one of -get and -set must be specified&quot;);</span>
+<span class="nc" id="L98">            return false;</span>
+        }
+<span class="nc" id="L100">        ClientConfiguration adminConf = new ClientConfiguration(conf);</span>
+<span class="nc" id="L101">        BookKeeperAdmin admin = new BookKeeperAdmin(adminConf);</span>
+        try {
+<span class="nc bnc" id="L103" title="All 2 branches missed.">            if (getter) {</span>
+<span class="nc" id="L104">                int lostBookieRecoveryDelay = admin.getLostBookieRecoveryDelay();</span>
+<span class="nc" id="L105">                LOG.info(&quot;LostBookieRecoveryDelay value in ZK: {}&quot;, lostBookieRecoveryDelay);</span>
+<span class="nc" id="L106">            } else {</span>
+<span class="nc" id="L107">                int lostBookieRecoveryDelay = flags.set;</span>
+<span class="nc" id="L108">                admin.setLostBookieRecoveryDelay(lostBookieRecoveryDelay);</span>
+<span class="nc" id="L109">                LOG.info(&quot;Successfully set LostBookieRecoveryDelay value in ZK: {}&quot;,</span>
+<span class="nc" id="L110">                        lostBookieRecoveryDelay);</span>
+            }
+        } finally {
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (admin != null) {</span>
+<span class="nc" id="L114">                admin.close();</span>
+            }
+        }
+<span class="nc" id="L117">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerRecoveryOp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">LedgerRecoveryOp.java</span></div><h1>LedgerRecoveryOp.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.client;
+
+import com.google.common.annotations.VisibleForTesting;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
+import org.apache.bookkeeper.client.AsyncCallback.AddCallback;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.ReadEntryListener;
+import org.apache.bookkeeper.proto.checksum.DigestManager.RecoveryData;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class encapsulated the ledger recovery operation. It first does a read
+ * with entry-id of -1 (BookieProtocol.LAST_ADD_CONFIRMED) to all bookies. Then
+ * starting from the last confirmed entry (from hints in the ledger entries),
+ * it reads forward until it is not able to find a particular entry.
+ */
+class LedgerRecoveryOp implements ReadEntryListener, AddCallback {
+
+<span class="nc" id="L38">    static final Logger LOG = LoggerFactory.getLogger(LedgerRecoveryOp.class);</span>
+
+    final LedgerHandle lh;
+    final ClientContext clientCtx;
+    final CompletableFuture&lt;LedgerHandle&gt; promise;
+
+    final AtomicLong readCount, writeCount;
+    volatile boolean readDone;
+    volatile long startEntryToRead;
+    volatile long endEntryToRead;
+
+    // keep a copy of metadata for recovery.
+    LedgerMetadata metadataForRecovery;
+
+    // EntryListener Hook
+<span class="nc" id="L53">    @VisibleForTesting</span>
+    ReadEntryListener entryListener = null;
+
+    class RecoveryReadOp extends ListenerBasedPendingReadOp {
+
+        RecoveryReadOp(LedgerHandle lh,
+                       ClientContext clientCtx,
+                       long startEntryId, long endEntryId,
+<span class="nc" id="L61">                       ReadEntryListener cb, Object ctx) {</span>
+<span class="nc" id="L62">            super(lh, clientCtx, startEntryId, endEntryId, cb, ctx, true);</span>
+<span class="nc" id="L63">        }</span>
+
+        @Override
+        protected LedgerMetadata getLedgerMetadata() {
+<span class="nc" id="L67">            return metadataForRecovery;</span>
+        }
+
+    }
+
+<span class="nc" id="L72">    public LedgerRecoveryOp(LedgerHandle lh, ClientContext clientCtx) {</span>
+<span class="nc" id="L73">        readCount = new AtomicLong(0);</span>
+<span class="nc" id="L74">        writeCount = new AtomicLong(0);</span>
+<span class="nc" id="L75">        readDone = false;</span>
+<span class="nc" id="L76">        this.promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L77">        this.lh = lh;</span>
+<span class="nc" id="L78">        this.clientCtx = clientCtx;</span>
+<span class="nc" id="L79">    }</span>
+
+    /**
+     * Set an entry listener to listen on individual recovery reads during recovery procedure.
+     *
+     * @param entryListener
+     *          entry listener
+     * @return ledger recovery operation
+     */
+    @VisibleForTesting
+    LedgerRecoveryOp setEntryListener(ReadEntryListener entryListener) {
+<span class="nc" id="L90">        this.entryListener = entryListener;</span>
+<span class="nc" id="L91">        return this;</span>
+    }
+
+    public CompletableFuture&lt;LedgerHandle&gt; initiate() {
+<span class="nc" id="L95">        ReadLastConfirmedOp rlcop = new ReadLastConfirmedOp(clientCtx.getBookieClient(),</span>
+                                                            lh.distributionSchedule,
+                                                            lh.macManager,
+                                                            lh.ledgerId,
+<span class="nc" id="L99">                                                            lh.getCurrentEnsemble(),</span>
+                                                            lh.ledgerKey,
+<span class="nc" id="L101">                new ReadLastConfirmedOp.LastConfirmedDataCallback() {</span>
+                    @Override
+                    public void readLastConfirmedDataComplete(int rc, RecoveryData data) {
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                        if (rc == BKException.Code.OK) {</span>
+<span class="nc" id="L105">                            synchronized (lh) {</span>
+                                /**
+                                 The lowest an LAC can be for use in recovery is the first entry id
+                                 of the current ensemble - 1.
+                                 All ensembles prior to the current one, if any, are confirmed and
+                                 immutable (so are not part of the recovery process).
+                                 So we take the highest of:
+                                 - the LAC returned by the current bookie ensemble (could be -1)
+                                 - the first entry id of the current ensemble - 1.
+                                 */
+<span class="nc" id="L115">                                Long lastEnsembleEntryId = lh.getVersionedLedgerMetadata()</span>
+<span class="nc" id="L116">                                        .getValue()</span>
+<span class="nc" id="L117">                                        .getAllEnsembles()</span>
+<span class="nc" id="L118">                                        .lastEntry()</span>
+<span class="nc" id="L119">                                        .getKey();</span>
+
+<span class="nc" id="L121">                                lh.lastAddPushed = lh.lastAddConfirmed = Math.max(data.getLastAddConfirmed(),</span>
+<span class="nc" id="L122">                                        (lastEnsembleEntryId - 1));</span>
+
+<span class="nc" id="L124">                                lh.length.set(data.getLength());</span>
+<span class="nc" id="L125">                                lh.pendingAddsSequenceHead = lh.lastAddConfirmed;</span>
+<span class="nc" id="L126">                                startEntryToRead = endEntryToRead = lh.lastAddConfirmed;</span>
+<span class="nc" id="L127">                            }</span>
+                            // keep a copy of ledger metadata before proceeding
+                            // ledger recovery
+<span class="nc" id="L130">                            metadataForRecovery = lh.getLedgerMetadata();</span>
+<span class="nc" id="L131">                            doRecoveryRead();</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                        } else if (rc == BKException.Code.TimeoutException) {</span>
+<span class="nc" id="L133">                            submitCallback(rc);</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                        } else if (rc == BKException.Code.UnauthorizedAccessException) {</span>
+<span class="nc" id="L135">                            submitCallback(rc);</span>
+                        } else {
+<span class="nc" id="L137">                            submitCallback(BKException.Code.ReadException);</span>
+                        }
+<span class="nc" id="L139">                    }</span>
+                });
+
+        /**
+         * Enable fencing on this op. When the read request reaches the bookies
+         * server it will fence off the ledger, stopping any subsequent operation
+         * from writing to it.
+         */
+<span class="nc" id="L147">        rlcop.initiateWithFencing();</span>
+
+<span class="nc" id="L149">        return promise;</span>
+    }
+
+    private void submitCallback(int rc) {
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (BKException.Code.OK == rc) {</span>
+<span class="nc" id="L154">            clientCtx.getClientStats().getRecoverAddCountLogger().registerSuccessfulValue(writeCount.get());</span>
+<span class="nc" id="L155">            clientCtx.getClientStats().getRecoverReadCountLogger().registerSuccessfulValue(readCount.get());</span>
+<span class="nc" id="L156">            promise.complete(lh);</span>
+        } else {
+<span class="nc" id="L158">            clientCtx.getClientStats().getRecoverAddCountLogger().registerFailedValue(writeCount.get());</span>
+<span class="nc" id="L159">            clientCtx.getClientStats().getRecoverReadCountLogger().registerFailedValue(readCount.get());</span>
+<span class="nc" id="L160">            promise.completeExceptionally(BKException.create(rc));</span>
+        }
+<span class="nc" id="L162">    }</span>
+
+    /**
+     * Try to read past the last confirmed.
+     */
+    private void doRecoveryRead() {
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (!promise.isDone()) {</span>
+<span class="nc" id="L169">            startEntryToRead = endEntryToRead + 1;</span>
+<span class="nc" id="L170">            endEntryToRead = endEntryToRead + clientCtx.getConf().recoveryReadBatchSize;</span>
+<span class="nc" id="L171">            new RecoveryReadOp(lh, clientCtx, startEntryToRead, endEntryToRead, this, null)</span>
+<span class="nc" id="L172">                .initiate();</span>
+        }
+<span class="nc" id="L174">    }</span>
+
+    @Override
+    public void onEntryComplete(int rc, LedgerHandle lh, LedgerEntry entry, Object ctx) {
+        // notify entry listener on individual entries being read during ledger recovery.
+<span class="nc" id="L179">        ReadEntryListener listener = entryListener;</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (null != listener) {</span>
+<span class="nc" id="L181">            listener.onEntryComplete(rc, lh, entry, ctx);</span>
+        }
+
+        // we only trigger recovery add an entry when readDone == false &amp;&amp; callbackDone == false
+<span class="nc bnc" id="L185" title="All 6 branches missed.">        if (!promise.isDone() &amp;&amp; !readDone &amp;&amp; rc == BKException.Code.OK) {</span>
+<span class="nc" id="L186">            readCount.incrementAndGet();</span>
+<span class="nc" id="L187">            byte[] data = entry.getEntry();</span>
+
+            /*
+             * We will add this entry again to make sure it is written to enough
+             * replicas. We subtract the length of the data itself, since it will
+             * be added again when processing the call to add it.
+             */
+<span class="nc" id="L194">            synchronized (lh) {</span>
+<span class="nc" id="L195">                lh.length.set(entry.getLength() - (long) data.length);</span>
+                // check whether entry id is expected, so we won't overwritten any entries by mistake
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                if (entry.getEntryId() != lh.lastAddPushed + 1) {</span>
+<span class="nc" id="L198">                    LOG.error(&quot;Unexpected to recovery add entry {} as entry {} for ledger {}.&quot;,</span>
+<span class="nc" id="L199">                            entry.getEntryId(), (lh.lastAddPushed + 1), lh.getId());</span>
+<span class="nc" id="L200">                    rc = BKException.Code.UnexpectedConditionException;</span>
+                }
+<span class="nc" id="L202">            }</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">            if (BKException.Code.OK == rc) {</span>
+<span class="nc" id="L204">                lh.asyncRecoveryAddEntry(data, 0, data.length, this, null);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                if (entry.getEntryId() == endEntryToRead) {</span>
+                    // trigger next batch read
+<span class="nc" id="L207">                    doRecoveryRead();</span>
+                }
+<span class="nc" id="L209">                return;</span>
+            }
+        }
+
+        // no entry found. stop recovery procedure but wait until recovery add finished.
+<span class="nc bnc" id="L214" title="All 4 branches missed.">        if (rc == BKException.Code.NoSuchEntryException || rc == BKException.Code.NoSuchLedgerExistsException) {</span>
+<span class="nc" id="L215">            readDone = true;</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (readCount.get() == writeCount.get()) {</span>
+<span class="nc" id="L217">                submitCallback(BKException.Code.OK);</span>
+            }
+<span class="nc" id="L219">            return;</span>
+        }
+
+        // otherwise, some other error, we can't handle
+<span class="nc bnc" id="L223" title="All 4 branches missed.">        if (BKException.Code.OK != rc &amp;&amp; !promise.isDone()) {</span>
+<span class="nc" id="L224">            LOG.error(&quot;Failure {} while reading entries: ({} - {}), ledger: {} while recovering ledger&quot;,</span>
+<span class="nc" id="L225">                      BKException.getMessage(rc), startEntryToRead, endEntryToRead, lh.getId());</span>
+<span class="nc" id="L226">            submitCallback(rc);</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        } else if (BKException.Code.OK == rc) {</span>
+            // we are here is because we successfully read an entry but readDone was already set to true.
+            // this would happen on recovery a ledger than has gaps in the tail.
+<span class="nc" id="L230">            LOG.warn(&quot;Successfully read entry {} for ledger {}, but readDone is already {}&quot;,</span>
+<span class="nc" id="L231">                    entry.getEntryId(), lh.getId(), readDone);</span>
+        }
+<span class="nc" id="L233">        return;</span>
+    }
+
+    @Override
+    public void addComplete(int rc, LedgerHandle lh, long entryId, Object ctx) {
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L239">            LOG.error(&quot;Failure {} while writing entry: {} while recovering ledger: {}&quot;,</span>
+<span class="nc" id="L240">                    BKException.codeLogger(rc), entryId + 1, lh.ledgerId);</span>
+<span class="nc" id="L241">            submitCallback(rc);</span>
+<span class="nc" id="L242">            return;</span>
+        }
+<span class="nc" id="L244">        long numAdd = writeCount.incrementAndGet();</span>
+<span class="nc bnc" id="L245" title="All 4 branches missed.">        if (readDone &amp;&amp; readCount.get() == numAdd) {</span>
+<span class="nc" id="L246">            submitCallback(rc);</span>
+        }
+<span class="nc" id="L248">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ZooWorker.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.zookeeper</a> &gt; <span class="el_source">ZooWorker.java</span></div><h1>ZooWorker.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.zookeeper;
+
+import com.google.common.util.concurrent.RateLimiter;
+import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Provide a mechanism to perform an operation on ZooKeeper that is safe on disconnections
+ * and recoverable errors.
+ */
+class ZooWorker {
+
+<span class="nc" id="L38">    private static final Logger logger = LoggerFactory.getLogger(ZooWorker.class);</span>
+
+<span class="nc" id="L40">    int attempts = 0;</span>
+    long startTimeNanos;
+<span class="nc" id="L42">    long elapsedTimeMs = 0L;</span>
+    final RetryPolicy retryPolicy;
+    final OpStatsLogger statsLogger;
+
+<span class="nc" id="L46">    ZooWorker(RetryPolicy retryPolicy, OpStatsLogger statsLogger) {</span>
+<span class="nc" id="L47">        this.retryPolicy = retryPolicy;</span>
+<span class="nc" id="L48">        this.statsLogger = statsLogger;</span>
+<span class="nc" id="L49">        this.startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L50">    }</span>
+
+    public boolean allowRetry(int rc) {
+<span class="nc" id="L53">        elapsedTimeMs = MathUtils.elapsedMSec(startTimeNanos);</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">        if (!ZooWorker.isRecoverableException(rc)) {</span>
+<span class="nc bnc" id="L55" title="All 2 branches missed.">            if (KeeperException.Code.OK.intValue() == rc) {</span>
+<span class="nc" id="L56">                statsLogger.registerSuccessfulEvent(MathUtils.elapsedMicroSec(startTimeNanos), TimeUnit.MICROSECONDS);</span>
+            } else {
+<span class="nc" id="L58">                statsLogger.registerFailedEvent(MathUtils.elapsedMicroSec(startTimeNanos), TimeUnit.MICROSECONDS);</span>
+            }
+<span class="nc" id="L60">            return false;</span>
+        }
+<span class="nc" id="L62">        ++attempts;</span>
+<span class="nc" id="L63">        return retryPolicy.allowRetry(attempts, elapsedTimeMs);</span>
+    }
+
+    public long nextRetryWaitTime() {
+<span class="nc" id="L67">        return retryPolicy.nextRetryWaitTime(attempts, elapsedTimeMs);</span>
+    }
+
+    /**
+     * Check whether the given result code is recoverable by retry.
+     *
+     * @param rc result code
+     * @return true if given result code is recoverable.
+     */
+    public static boolean isRecoverableException(int rc) {
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        return KeeperException.Code.CONNECTIONLOSS.intValue() == rc</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            || KeeperException.Code.OPERATIONTIMEOUT.intValue() == rc</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            || KeeperException.Code.SESSIONMOVED.intValue() == rc</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">            || KeeperException.Code.SESSIONEXPIRED.intValue() == rc;</span>
+    }
+
+    /**
+     * Check whether the given exception is recoverable by retry.
+     *
+     * @param exception given exception
+     * @return true if given exception is recoverable.
+     */
+    public static boolean isRecoverableException(KeeperException exception) {
+<span class="nc" id="L90">        return isRecoverableException(exception.code().intValue());</span>
+    }
+
+    interface ZooCallable&lt;T&gt; {
+        /**
+         * Be compatible with ZooKeeper interface.
+         *
+         * @return value
+         * @throws InterruptedException
+         * @throws KeeperException
+         */
+        T call() throws InterruptedException, KeeperException;
+    }
+
+    /**
+     * Execute a sync zookeeper operation with a given retry policy.
+     *
+     * @param client
+     *          ZooKeeper client.
+     * @param proc
+     *          Synchronous zookeeper operation wrapped in a {@link Callable}.
+     * @param retryPolicy
+     *          Retry policy to execute the synchronous operation.
+     * @param rateLimiter
+     *          Rate limiter for zookeeper calls
+     * @param statsLogger
+     *          Stats Logger for zookeeper client.
+     * @return result of the zookeeper operation
+     * @throws KeeperException any non-recoverable exception or recoverable exception exhausted all retires.
+     * @throws InterruptedException the operation is interrupted.
+     */
+    public static&lt;T&gt; T syncCallWithRetries(ZooKeeperClient client,
+                                           ZooCallable&lt;T&gt; proc,
+                                           RetryPolicy retryPolicy,
+                                           RateLimiter rateLimiter,
+                                           OpStatsLogger statsLogger)
+    throws KeeperException, InterruptedException {
+<span class="nc" id="L127">        T result = null;</span>
+<span class="nc" id="L128">        boolean isDone = false;</span>
+<span class="nc" id="L129">        int attempts = 0;</span>
+<span class="nc" id="L130">        long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        while (!isDone) {</span>
+            try {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                if (null != client) {</span>
+<span class="nc" id="L134">                    client.waitForConnection();</span>
+                }
+<span class="nc" id="L136">                logger.debug(&quot;Execute {} at {} retry attempt.&quot;, proc, attempts);</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">                if (null != rateLimiter) {</span>
+<span class="nc" id="L138">                    rateLimiter.acquire();</span>
+                }
+<span class="nc" id="L140">                result = proc.call();</span>
+<span class="nc" id="L141">                isDone = true;</span>
+<span class="nc" id="L142">                statsLogger.registerSuccessfulEvent(MathUtils.elapsedMicroSec(startTimeNanos), TimeUnit.MICROSECONDS);</span>
+<span class="nc" id="L143">            } catch (KeeperException e) {</span>
+<span class="nc" id="L144">                ++attempts;</span>
+<span class="nc" id="L145">                boolean rethrow = true;</span>
+<span class="nc" id="L146">                long elapsedTime = MathUtils.elapsedMSec(startTimeNanos);</span>
+<span class="nc bnc" id="L147" title="All 6 branches missed.">                if (((null != client &amp;&amp; isRecoverableException(e)) || null == client)</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                    &amp;&amp; retryPolicy.allowRetry(attempts, elapsedTime)) {</span>
+<span class="nc" id="L149">                    rethrow = false;</span>
+                }
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                if (rethrow) {</span>
+<span class="nc" id="L152">                    statsLogger.registerFailedEvent(MathUtils.elapsedMicroSec(startTimeNanos), TimeUnit.MICROSECONDS);</span>
+<span class="nc" id="L153">                    logger.debug(&quot;Stopped executing {} after {} attempts.&quot;, proc, attempts);</span>
+<span class="nc" id="L154">                    throw e;</span>
+                }
+<span class="nc" id="L156">                TimeUnit.MILLISECONDS.sleep(retryPolicy.nextRetryWaitTime(attempts, elapsedTime));</span>
+<span class="nc" id="L157">            }</span>
+        }
+<span class="nc" id="L159">        return result;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

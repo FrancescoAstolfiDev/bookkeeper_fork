@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DirectBookkeeperDriver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.verifier</a> &gt; <span class="el_source">DirectBookkeeperDriver.java</span></div><h1>DirectBookkeeperDriver.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.verifier;
+
+import java.util.ArrayList;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.LedgerHandle;
+
+/**
+ * Driver for a normal Bookkeeper cluster.
+ */
+class DirectBookkeeperDriver implements BookkeeperVerifier.BookkeeperDriver {
+<span class="nc" id="L36">    private final ConcurrentHashMap&lt;Long, LedgerHandle&gt; openHandles = new ConcurrentHashMap&lt;&gt;();</span>
+    private BookKeeper client;
+
+<span class="nc" id="L39">    DirectBookkeeperDriver(BookKeeper client) {</span>
+<span class="nc" id="L40">        this.client = client;</span>
+<span class="nc" id="L41">    }</span>
+
+    @Override
+    public void createLedger(long ledgerID, int enSize, int writeQSize, int ackQSize, Consumer&lt;Integer&gt; cb) {
+<span class="nc" id="L45">        client.asyncCreateLedgerAdv(</span>
+                ledgerID,
+                enSize,
+                writeQSize,
+                ackQSize,
+                BookKeeper.DigestType.CRC32,
+                new byte[0],
+                (rc, lh, ctx) -&gt; {
+<span class="nc" id="L53">                    openHandles.put(ledgerID, lh);</span>
+<span class="nc" id="L54">                    cb.accept(rc);</span>
+<span class="nc" id="L55">                },</span>
+                null,
+                null);
+<span class="nc" id="L58">    }</span>
+
+    @Override
+    public void closeLedger(long ledgerID, Consumer&lt;Integer&gt; cb) {
+<span class="nc" id="L62">        LedgerHandle handle = openHandles.remove(ledgerID);</span>
+<span class="nc" id="L63">        handle.asyncClose(</span>
+<span class="nc" id="L64">                (rc, lh, ctx) -&gt; cb.accept(rc),</span>
+                null);
+<span class="nc" id="L66">    }</span>
+
+    @Override
+    public void deleteLedger(long ledgerID, Consumer&lt;Integer&gt; cb) {
+<span class="nc" id="L70">        client.asyncDeleteLedger(ledgerID, (rc, ctx) -&gt; {</span>
+<span class="nc" id="L71">            cb.accept(rc);</span>
+<span class="nc" id="L72">        }, null);</span>
+<span class="nc" id="L73">    }</span>
+
+    @Override
+    public void writeEntry(long ledgerID, long entryID, byte[] data, Consumer&lt;Integer&gt; cb) {
+        LedgerHandle handle;
+<span class="nc" id="L78">        handle = openHandles.get(ledgerID);</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        if (handle == null) {</span>
+<span class="nc" id="L80">            cb.accept(BKException.Code.WriteException);</span>
+<span class="nc" id="L81">            return;</span>
+        }
+<span class="nc" id="L83">        handle.asyncAddEntry(entryID, data, (rc, lh, entryId, ctx) -&gt; {</span>
+<span class="nc" id="L84">            cb.accept(rc);</span>
+<span class="nc" id="L85">        }, null);</span>
+<span class="nc" id="L86">    }</span>
+
+    @Override
+    public void readEntries(
+            long ledgerID, long firstEntryID, long lastEntryID, BiConsumer&lt;Integer, ArrayList&lt;byte[]&gt;&gt; cb) {
+<span class="nc" id="L91">        client.asyncOpenLedgerNoRecovery(ledgerID, BookKeeper.DigestType.CRC32, new byte[0], (rc, lh, ctx) -&gt; {</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">            if (rc != 0) {</span>
+<span class="nc" id="L93">                cb.accept(rc, null);</span>
+<span class="nc" id="L94">                return;</span>
+            }
+<span class="nc" id="L96">            System.out.format(&quot;Got handle for read %d -&gt; %d on ledger %d%n&quot;, firstEntryID, lastEntryID, ledgerID);</span>
+<span class="nc" id="L97">            lh.asyncReadEntries(firstEntryID, lastEntryID, (rc1, lh1, seq, ctx1) -&gt; {</span>
+<span class="nc" id="L98">                System.out.format(&quot;Read cb %d -&gt; %d on ledger %d%n&quot;, firstEntryID, lastEntryID, ledgerID);</span>
+<span class="nc" id="L99">                ArrayList&lt;byte[]&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">                if (rc1 == 0) {</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                    while (seq.hasMoreElements()) {</span>
+<span class="nc" id="L102">                        results.add(seq.nextElement().getEntry());</span>
+                    }
+<span class="nc" id="L104">                    System.out.format(&quot;About to close handle for read %d -&gt; %d on ledger %d%n&quot;,</span>
+<span class="nc" id="L105">                            firstEntryID, lastEntryID, ledgerID);</span>
+                }
+<span class="nc" id="L107">                lh.asyncClose((rc2, lh2, ctx2) -&gt; {</span>
+<span class="nc" id="L108">                    System.out.format(&quot;Closed handle for read %d -&gt; %d on ledger %d result %d%n&quot;,</span>
+<span class="nc" id="L109">                            firstEntryID, lastEntryID, ledgerID, rc2);</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                    cb.accept(rc1 == 0 ? rc2 : rc1, results);</span>
+<span class="nc" id="L111">                }, null);</span>
+<span class="nc" id="L112">            }, null);</span>
+<span class="nc" id="L113">        }, null);</span>
+<span class="nc" id="L114">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

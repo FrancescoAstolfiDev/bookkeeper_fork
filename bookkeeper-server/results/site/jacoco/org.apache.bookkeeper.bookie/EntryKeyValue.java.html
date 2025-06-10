@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EntryKeyValue.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">EntryKeyValue.java</span></div><h1>EntryKeyValue.java</h1><pre class="source lang-java linenums">/**
+ * Copyright The Apache Software Foundation
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import java.nio.ByteBuffer;
+
+/**
+ * An entry Key/Value.
+ * EntryKeyValue wraps a byte array and takes offsets and lengths into the array to
+ * interpret the content as entry blob.
+ */
+public class EntryKeyValue extends EntryKey {
+    private final byte [] bytes;
+<span class="nc" id="L33">    private int offset = 0; // start offset of entry blob</span>
+<span class="nc" id="L34">    private int length = 0; // length of entry blob</span>
+
+    /**
+    * @return The byte array backing this EntryKeyValue.
+    */
+    public byte [] getBuffer() {
+<span class="nc" id="L40">        return this.bytes;</span>
+    }
+
+    /**
+    * @return Offset into {@link #getBuffer()} at which the EntryKeyValue starts.
+    */
+    public int getOffset() {
+<span class="nc" id="L47">        return this.offset;</span>
+    }
+
+    /**
+    * @return Length of bytes this EntryKeyValue occupies in {@link #getBuffer()}.
+    */
+    public int getLength() {
+<span class="nc" id="L54">        return this.length;</span>
+    }
+
+    /**
+     * Creates a EntryKeyValue from the start of the specified byte array.
+     * Presumes &lt;code&gt;bytes&lt;/code&gt; content contains the value portion of a EntryKeyValue.
+     * @param bytes byte array
+     */
+    public EntryKeyValue(long ledgerId, long entryId, final byte [] bytes) {
+<span class="nc" id="L63">        this(ledgerId, entryId, bytes, 0, bytes.length);</span>
+<span class="nc" id="L64">    }</span>
+
+    /**
+     * Creates a EntryKeyValue from the start of the specified byte array.
+     * Presumes &lt;code&gt;bytes&lt;/code&gt; content contains the value portion of a EntryKeyValue.
+     * @param bytes byte array
+     * @param offset offset in bytes as start of blob
+     * @param length of blob
+     */
+    public EntryKeyValue(long ledgerId, long entryId, final byte [] bytes, int offset, int length) {
+<span class="nc" id="L74">        super(ledgerId, entryId);</span>
+<span class="nc" id="L75">        this.bytes = bytes;</span>
+<span class="nc" id="L76">        this.offset = offset;</span>
+<span class="nc" id="L77">        this.length = length;</span>
+<span class="nc" id="L78">    }</span>
+
+    /**
+    * Returns the blob wrapped in a new &lt;code&gt;ByteBuffer&lt;/code&gt;.
+    *
+    * @return the value
+    */
+    public ByteBuf getValueAsByteBuffer() {
+<span class="nc" id="L86">        return Unpooled.wrappedBuffer(getBuffer(), getOffset(), getLength());</span>
+    }
+
+    /**
+    * Write EntryKeyValue blob into the provided byte buffer.
+    *
+    * @param dst the bytes buffer to use
+    *
+    * @return The number of useful bytes in the buffer.
+    *
+    * @throws IllegalArgumentException an illegal value was passed or there is insufficient space
+    * remaining in the buffer
+    */
+    int writeToByteBuffer(ByteBuffer dst) {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (dst.remaining() &lt; getLength()) {</span>
+<span class="nc" id="L101">            throw new IllegalArgumentException(&quot;Buffer size &quot; + dst.remaining() + &quot; &lt; &quot; + getLength());</span>
+        }
+
+<span class="nc" id="L104">        dst.put(getBuffer(), getOffset(), getLength());</span>
+<span class="nc" id="L105">        return getLength();</span>
+    }
+
+    /**
+    * String representation.
+    */
+    @Override
+    public String toString() {
+<span class="nc" id="L113">        return ledgerId + &quot;:&quot; + entryId;</span>
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        // since this entry is identified by (lid, eid)
+        // so just use {@link org.apache.bookkeeper.bookie.EntryKey#equals}.
+<span class="nc" id="L120">        return super.equals(other);</span>
+    }
+
+    @Override
+    public int hashCode() {
+        // since this entry is identified by (lid, eid)
+        // so just use {@link org.apache.bookkeeper.bookie.EntryKey#hashCode} as the hash code.
+<span class="nc" id="L127">        return super.hashCode();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

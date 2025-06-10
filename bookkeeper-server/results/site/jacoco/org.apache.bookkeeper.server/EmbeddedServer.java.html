@@ -1,0 +1,643 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmbeddedServer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server</a> &gt; <span class="el_source">EmbeddedServer.java</span></div><h1>EmbeddedServer.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.server;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.BOOKIE_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LD_INDEX_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LD_LEDGER_SCOPE;
+import static org.apache.bookkeeper.bookie.BookieImpl.newBookieImpl;
+import static org.apache.bookkeeper.bookie.LegacyCookieValidation.newLegacyCookieValidation;
+import static org.apache.bookkeeper.client.BookKeeperClientStats.CLIENT_SCOPE;
+import static org.apache.bookkeeper.replication.ReplicationStats.REPLICATION_SCOPE;
+import static org.apache.bookkeeper.server.Main.storageDirectoriesFromConf;
+import static org.apache.bookkeeper.server.component.ServerLifecycleComponent.loadServerComponents;
+
+import com.google.common.base.Ticker;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.CompositeByteBuf;
+import io.reactivex.rxjava3.core.Scheduler;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.BookieResources;
+import org.apache.bookkeeper.bookie.CookieValidation;
+import org.apache.bookkeeper.bookie.LedgerDirsManager;
+import org.apache.bookkeeper.bookie.LedgerStorage;
+import org.apache.bookkeeper.bookie.ReadOnlyBookie;
+import org.apache.bookkeeper.bookie.ScrubberStats;
+import org.apache.bookkeeper.bookie.UncleanShutdownDetection;
+import org.apache.bookkeeper.bookie.UncleanShutdownDetectionImpl;
+import org.apache.bookkeeper.bookie.datainteg.DataIntegrityCheck;
+import org.apache.bookkeeper.bookie.datainteg.DataIntegrityCheckImpl;
+import org.apache.bookkeeper.bookie.datainteg.DataIntegrityCookieValidation;
+import org.apache.bookkeeper.bookie.datainteg.DataIntegrityService;
+import org.apache.bookkeeper.bookie.datainteg.EntryCopier;
+import org.apache.bookkeeper.bookie.datainteg.EntryCopierImpl;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.common.allocator.ByteBufAllocatorWithOomHandler;
+import org.apache.bookkeeper.common.component.AutoCloseableLifecycleComponent;
+import org.apache.bookkeeper.common.component.ComponentInfoPublisher;
+import org.apache.bookkeeper.common.component.LifecycleComponentStack;
+import org.apache.bookkeeper.common.component.RxSchedulerLifecycleComponent;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.discover.BookieServiceInfo;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerManagerFactory;
+import org.apache.bookkeeper.meta.MetadataBookieDriver;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.server.component.ServerLifecycleComponent;
+import org.apache.bookkeeper.server.conf.BookieConfiguration;
+import org.apache.bookkeeper.server.http.BKHttpServiceProvider;
+import org.apache.bookkeeper.server.service.AutoRecoveryService;
+import org.apache.bookkeeper.server.service.BookieService;
+import org.apache.bookkeeper.server.service.HttpService;
+import org.apache.bookkeeper.server.service.ScrubberService;
+import org.apache.bookkeeper.server.service.StatsProviderService;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.StatsProvider;
+import org.apache.bookkeeper.util.DiskChecker;
+import org.apache.commons.lang3.StringUtils;
+
+/**
+ * An embedded server is a server that run bookie and serving rpc requests.
+ *
+ * &lt;p&gt;
+ * It is a rewritten server using {@link org.apache.bookkeeper.common.component.LifecycleComponent}, replacing the
+ * legacy server {@link org.apache.bookkeeper.proto.BookieServer}.
+ */
+public class EmbeddedServer {
+
+    private final LifecycleComponentStack lifecycleComponentStack;
+
+    private final StatsProvider statsProvider;
+
+    private final RegistrationManager registrationManager;
+
+    private final LedgerManagerFactory ledgerManagerFactory;
+
+    private final DiskChecker diskChecker;
+    private final LedgerDirsManager ledgerDirsManager;
+    private final LedgerDirsManager indexDirsManager;
+
+    private final BookieService bookieService;
+    private final AutoRecoveryService autoRecoveryService;
+    private final DataIntegrityService dataIntegrityService;
+    private final HttpService httpService;
+
+    private EmbeddedServer(LifecycleComponentStack lifecycleComponentStack, StatsProvider statsProvider,
+                           RegistrationManager registrationManager, LedgerManagerFactory ledgerManagerFactory,
+                           DiskChecker diskChecker, LedgerDirsManager ledgerDirsManager,
+                           LedgerDirsManager indexDirsManager, BookieService bookieService,
+                           AutoRecoveryService autoRecoveryService, DataIntegrityService dataIntegrityService,
+<span class="nc" id="L123">                           HttpService httpService) {</span>
+<span class="nc" id="L124">        this.lifecycleComponentStack = lifecycleComponentStack;</span>
+<span class="nc" id="L125">        this.statsProvider = statsProvider;</span>
+<span class="nc" id="L126">        this.registrationManager = registrationManager;</span>
+<span class="nc" id="L127">        this.ledgerManagerFactory = ledgerManagerFactory;</span>
+<span class="nc" id="L128">        this.diskChecker = diskChecker;</span>
+<span class="nc" id="L129">        this.ledgerDirsManager = ledgerDirsManager;</span>
+<span class="nc" id="L130">        this.indexDirsManager = indexDirsManager;</span>
+<span class="nc" id="L131">        this.bookieService = bookieService;</span>
+<span class="nc" id="L132">        this.autoRecoveryService = autoRecoveryService;</span>
+<span class="nc" id="L133">        this.dataIntegrityService = dataIntegrityService;</span>
+<span class="nc" id="L134">        this.httpService = httpService;</span>
+<span class="nc" id="L135">    }</span>
+
+    public LifecycleComponentStack getLifecycleComponentStack() {
+<span class="nc" id="L138">        return lifecycleComponentStack;</span>
+    }
+
+    public StatsProvider getStatsProvider() {
+<span class="nc" id="L142">        return statsProvider;</span>
+    }
+
+    public RegistrationManager getRegistrationManager() {
+<span class="nc" id="L146">        return registrationManager;</span>
+    }
+
+    public LedgerManagerFactory getLedgerManagerFactory() {
+<span class="nc" id="L150">        return ledgerManagerFactory;</span>
+    }
+
+    public DiskChecker getDiskChecker() {
+<span class="nc" id="L154">        return diskChecker;</span>
+    }
+
+    public LedgerDirsManager getLedgerDirsManager() {
+<span class="nc" id="L158">        return ledgerDirsManager;</span>
+    }
+
+    public LedgerDirsManager getIndexDirsManager() {
+<span class="nc" id="L162">        return indexDirsManager;</span>
+    }
+
+    public BookieService getBookieService() {
+<span class="nc" id="L166">        return bookieService;</span>
+    }
+
+    public AutoRecoveryService getAutoRecoveryService() {
+<span class="nc" id="L170">        return autoRecoveryService;</span>
+    }
+
+    public DataIntegrityService getDataIntegrityService() {
+<span class="nc" id="L174">        return dataIntegrityService;</span>
+    }
+
+    public HttpService getHttpService() {
+<span class="nc" id="L178">        return httpService;</span>
+    }
+
+    /**
+     * Create a new builder from given configuration. Actual services implementations can be provided to the builder and
+     * will override ones defined in the configuration.
+     * &lt;p&gt;
+     * Invoker is responsible to start and stop provided services implementations, components from
+     * {@link EmbeddedServer#getLifecycleComponentStack()} will reflect only those created from provided configuration.
+     *
+     * @param conf bookie configuration
+     * @return a new embedded server builder
+     */
+    public static final Builder builder(BookieConfiguration conf) {
+<span class="nc" id="L192">        return new Builder(conf);</span>
+    }
+
+<span class="nc" id="L195">    @Slf4j</span>
+    public static class Builder {
+
+        private BookieConfiguration conf;
+
+        private StatsProvider statsProvider;
+
+        private MetadataBookieDriver metadataDriver;
+
+        private RegistrationManager registrationManager;
+
+        private LedgerManagerFactory ledgerManagerFactory;
+
+        private DiskChecker diskChecker;
+        private LedgerDirsManager ledgerDirsManager;
+        private LedgerDirsManager indexDirsManager;
+
+        private ByteBufAllocator allocator;
+        private UncleanShutdownDetection uncleanShutdownDetection;
+
+<span class="nc" id="L215">        private Builder(BookieConfiguration conf) {</span>
+<span class="nc" id="L216">            checkNotNull(conf, &quot;bookieConfiguration cannot be null&quot;);</span>
+
+<span class="nc" id="L218">            this.conf = conf;</span>
+<span class="nc" id="L219">        }</span>
+
+        public Builder statsProvider(StatsProvider statsProvider) {
+<span class="nc" id="L222">            this.statsProvider = statsProvider;</span>
+<span class="nc" id="L223">            return this;</span>
+        }
+
+        public Builder metadataDriver(MetadataBookieDriver metadataDriver) {
+<span class="nc" id="L227">            this.metadataDriver = metadataDriver;</span>
+<span class="nc" id="L228">            return this;</span>
+        }
+
+        public Builder registrationManager(RegistrationManager registrationManager) {
+<span class="nc" id="L232">            this.registrationManager = registrationManager;</span>
+<span class="nc" id="L233">            return this;</span>
+        }
+
+        public Builder ledgerManagerFactory(LedgerManagerFactory ledgerManagerFactory) {
+<span class="nc" id="L237">            this.ledgerManagerFactory = ledgerManagerFactory;</span>
+<span class="nc" id="L238">            return this;</span>
+        }
+
+        public Builder diskChecker(DiskChecker diskChecker) {
+<span class="nc" id="L242">            this.diskChecker = diskChecker;</span>
+<span class="nc" id="L243">            return this;</span>
+        }
+
+        public Builder ledgerDirsManager(LedgerDirsManager ledgerDirsManager) {
+<span class="nc" id="L247">            this.ledgerDirsManager = ledgerDirsManager;</span>
+<span class="nc" id="L248">            return this;</span>
+        }
+
+        public Builder indexDirsManager(LedgerDirsManager indexDirsManager) {
+<span class="nc" id="L252">            this.indexDirsManager = indexDirsManager;</span>
+<span class="nc" id="L253">            return this;</span>
+        }
+
+        public Builder allocator(ByteBufAllocator allocator) {
+<span class="nc" id="L257">            this.allocator = allocator;</span>
+<span class="nc" id="L258">            return this;</span>
+        }
+
+        public Builder uncleanShutdownDetection(UncleanShutdownDetection uncleanShutdownDetection) {
+<span class="nc" id="L262">            this.uncleanShutdownDetection = uncleanShutdownDetection;</span>
+<span class="nc" id="L263">            return this;</span>
+        }
+
+        /**
+         * Build the bookie server.
+         *
+         * &lt;p&gt;
+         * The sequence of the components is:
+         *
+         * &lt;pre&gt;
+         * - stats provider
+         * - bookie server
+         * - autorecovery daemon
+         * - http service
+         * &lt;/pre&gt;
+         *
+         * @return lifecycle stack
+         * @throws Exception
+         */
+        public EmbeddedServer build() throws Exception {
+
+<span class="nc" id="L284">            final ComponentInfoPublisher componentInfoPublisher = new ComponentInfoPublisher();</span>
+
+<span class="nc" id="L286">            final Supplier&lt;BookieServiceInfo&gt; bookieServiceInfoProvider =</span>
+<span class="nc" id="L287">                    () -&gt; buildBookieServiceInfo(componentInfoPublisher);</span>
+
+            LifecycleComponentStack.Builder serverBuilder = LifecycleComponentStack
+<span class="nc" id="L290">                    .newBuilder()</span>
+<span class="nc" id="L291">                    .withComponentInfoPublisher(componentInfoPublisher)</span>
+<span class="nc" id="L292">                    .withName(&quot;bookie-server&quot;);</span>
+
+            // 1. build stats provider
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            if (statsProvider == null) {</span>
+<span class="nc" id="L296">                StatsProviderService statsProviderService = new StatsProviderService(conf);</span>
+<span class="nc" id="L297">                statsProvider = statsProviderService.getStatsProvider();</span>
+<span class="nc" id="L298">                serverBuilder.addComponent(statsProviderService);</span>
+<span class="nc" id="L299">                log.info(&quot;Load lifecycle component : {}&quot;, statsProviderService.getName());</span>
+            }
+
+<span class="nc" id="L302">            StatsLogger rootStatsLogger = statsProvider.getStatsLogger(&quot;&quot;);</span>
+
+            // 2. Build metadata driver
+<span class="nc bnc" id="L305" title="All 2 branches missed.">            if (metadataDriver == null) {</span>
+<span class="nc bnc" id="L306" title="All 4 branches missed.">                if (ledgerManagerFactory == null || registrationManager == null) {</span>
+<span class="nc" id="L307">                    metadataDriver = BookieResources.createMetadataDriver(conf.getServerConf(), rootStatsLogger);</span>
+<span class="nc" id="L308">                    serverBuilder.addComponent(new AutoCloseableLifecycleComponent(&quot;metadataDriver&quot;, metadataDriver));</span>
+                }
+            }
+
+<span class="nc bnc" id="L312" title="All 2 branches missed.">            if (registrationManager == null) {</span>
+<span class="nc" id="L313">                registrationManager = metadataDriver.createRegistrationManager();</span>
+<span class="nc" id="L314">                serverBuilder.addComponent(</span>
+                        new AutoCloseableLifecycleComponent(&quot;registrationManager&quot;, registrationManager));
+            }
+
+            // 3. Build ledger manager
+<span class="nc bnc" id="L319" title="All 2 branches missed.">            if (ledgerManagerFactory == null) {</span>
+<span class="nc" id="L320">                ledgerManagerFactory = metadataDriver.getLedgerManagerFactory();</span>
+<span class="nc" id="L321">                serverBuilder.addComponent(new AutoCloseableLifecycleComponent(&quot;lmFactory&quot;, ledgerManagerFactory));</span>
+            }
+<span class="nc" id="L323">            LedgerManager ledgerManager = ledgerManagerFactory.newLedgerManager();</span>
+<span class="nc" id="L324">            serverBuilder.addComponent(new AutoCloseableLifecycleComponent(&quot;ledgerManager&quot;, ledgerManager));</span>
+
+            // 4. Build bookie
+<span class="nc" id="L327">            StatsLogger bookieStats = rootStatsLogger.scope(BOOKIE_SCOPE);</span>
+
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            if (diskChecker == null) {</span>
+<span class="nc" id="L330">                diskChecker = BookieResources.createDiskChecker(conf.getServerConf());</span>
+            }
+
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            if (ledgerDirsManager == null) {</span>
+<span class="nc" id="L334">                ledgerDirsManager = BookieResources.createLedgerDirsManager(</span>
+<span class="nc" id="L335">                        conf.getServerConf(), diskChecker, bookieStats.scope(LD_LEDGER_SCOPE));</span>
+            }
+
+<span class="nc bnc" id="L338" title="All 2 branches missed.">            if (indexDirsManager == null) {</span>
+<span class="nc" id="L339">                indexDirsManager = BookieResources.createIndexDirsManager(</span>
+<span class="nc" id="L340">                        conf.getServerConf(), diskChecker, bookieStats.scope(LD_INDEX_SCOPE), ledgerDirsManager);</span>
+            }
+
+            ByteBufAllocatorWithOomHandler allocatorWithOomHandler;
+<span class="nc bnc" id="L344" title="All 2 branches missed.">            if (allocator == null) {</span>
+<span class="nc" id="L345">                allocatorWithOomHandler = BookieResources.createAllocator(conf.getServerConf());</span>
+<span class="nc" id="L346">                allocator = allocatorWithOomHandler;</span>
+            } else {
+<span class="nc bnc" id="L348" title="All 2 branches missed.">                if (allocator instanceof ByteBufAllocatorWithOomHandler) {</span>
+<span class="nc" id="L349">                    allocatorWithOomHandler = (ByteBufAllocatorWithOomHandler) allocator;</span>
+                } else {
+<span class="nc" id="L351">                    allocatorWithOomHandler = new ByteBuffAllocatorWrapper(allocator);</span>
+                }
+            }
+
+<span class="nc bnc" id="L355" title="All 2 branches missed.">            if (uncleanShutdownDetection == null) {</span>
+<span class="nc" id="L356">                uncleanShutdownDetection = new UncleanShutdownDetectionImpl(ledgerDirsManager);</span>
+            }
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            if (uncleanShutdownDetection.lastShutdownWasUnclean()) {</span>
+<span class="nc" id="L359">                log.info(&quot;Unclean shutdown detected. &quot;</span>
+                        + &quot;The bookie did not register a graceful shutdown prior to this boot.&quot;);
+            }
+
+            // bookie takes ownership of storage, so shuts it down
+<span class="nc" id="L364">            LedgerStorage storage = null;</span>
+<span class="nc" id="L365">            DataIntegrityCheck integCheck = null;</span>
+
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if (conf.getServerConf().isDataIntegrityCheckingEnabled()) {</span>
+<span class="nc" id="L368">                StatsLogger clientStats = bookieStats.scope(CLIENT_SCOPE);</span>
+<span class="nc" id="L369">                ClientConfiguration clientConfiguration = new ClientConfiguration(conf.getServerConf());</span>
+<span class="nc" id="L370">                clientConfiguration.setClientRole(ClientConfiguration.CLIENT_ROLE_SYSTEM);</span>
+<span class="nc" id="L371">                BookKeeper bkc = BookKeeper.forConfig(clientConfiguration).statsLogger(clientStats).build();</span>
+<span class="nc" id="L372">                serverBuilder.addComponent(new AutoCloseableLifecycleComponent(&quot;bkc&quot;, bkc));</span>
+
+<span class="nc" id="L374">                BookieId bookieId = BookieImpl.getBookieId(conf.getServerConf());</span>
+<span class="nc" id="L375">                ExecutorService rxExecutor = Executors.newFixedThreadPool(</span>
+<span class="nc" id="L376">                        2, new ThreadFactoryBuilder().setNameFormat(&quot;rx-schedule-%d&quot;)</span>
+<span class="nc" id="L377">                                .setUncaughtExceptionHandler(</span>
+<span class="nc" id="L378">                                        (t, ex) -&gt; log.error(&quot;Uncaught exception on thread {}&quot;, t.getName(), ex))</span>
+<span class="nc" id="L379">                                .build());</span>
+<span class="nc" id="L380">                Scheduler rxScheduler = Schedulers.from(rxExecutor);</span>
+<span class="nc" id="L381">                serverBuilder.addComponent(</span>
+                        new RxSchedulerLifecycleComponent(&quot;rx-scheduler&quot;, conf, bookieStats,
+                                rxScheduler, rxExecutor));
+
+<span class="nc" id="L385">                storage = BookieResources.createLedgerStorage(conf.getServerConf(), ledgerManager,</span>
+                        ledgerDirsManager, indexDirsManager, bookieStats, allocator);
+
+<span class="nc" id="L388">                EntryCopier copier = new EntryCopierImpl(bookieId,</span>
+<span class="nc" id="L389">                        ((BookKeeper) bkc).getClientCtx().getBookieClient(),</span>
+<span class="nc" id="L390">                        storage, Ticker.systemTicker());</span>
+
+<span class="nc" id="L392">                integCheck = new DataIntegrityCheckImpl(bookieId,</span>
+                        ledgerManager, storage, copier,
+                        new BookKeeperAdmin(bkc, clientStats, clientConfiguration),
+                        rxScheduler);
+
+                // if we're running with journal writes disabled and an unclean shutdown occurred then
+                // run the preboot check to protect against data loss and to perform data repair
+<span class="nc bnc" id="L399" title="All 2 branches missed.">                if (!conf.getServerConf().getJournalWriteData()</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">                        &amp;&amp; uncleanShutdownDetection.lastShutdownWasUnclean()) {</span>
+<span class="nc" id="L401">                    integCheck.runPreBootCheck(&quot;UNCLEAN_SHUTDOWN&quot;);</span>
+                }
+<span class="nc" id="L403">                CookieValidation cookieValidation = new DataIntegrityCookieValidation(conf.getServerConf(),</span>
+                        registrationManager, integCheck);
+<span class="nc" id="L405">                cookieValidation.checkCookies(storageDirectoriesFromConf(conf.getServerConf()));</span>
+<span class="nc" id="L406">            } else {</span>
+<span class="nc" id="L407">                CookieValidation cookieValidation = newLegacyCookieValidation(conf.getServerConf(),</span>
+                        registrationManager);
+<span class="nc" id="L409">                cookieValidation.checkCookies(storageDirectoriesFromConf(conf.getServerConf()));</span>
+                // storage should be created after legacy validation or it will fail (it would find ledger dirs)
+<span class="nc" id="L411">                storage = BookieResources.createLedgerStorage(conf.getServerConf(), ledgerManager,</span>
+                        ledgerDirsManager, indexDirsManager, bookieStats, allocator);
+            }
+
+            Bookie bookie;
+<span class="nc bnc" id="L416" title="All 2 branches missed.">            if (conf.getServerConf().isForceReadOnlyBookie()) {</span>
+<span class="nc" id="L417">                bookie = new ReadOnlyBookie(conf.getServerConf(), registrationManager, storage,</span>
+                        diskChecker,
+                        ledgerDirsManager, indexDirsManager,
+                        bookieStats, allocator,
+                        bookieServiceInfoProvider);
+            } else {
+<span class="nc" id="L423">                bookie = newBookieImpl(conf.getServerConf(), registrationManager, storage,</span>
+                        diskChecker,
+                        ledgerDirsManager, indexDirsManager,
+                        bookieStats, allocator,
+                        bookieServiceInfoProvider);
+            }
+
+            // 5. build bookie server
+<span class="nc" id="L431">            BookieService bookieService =</span>
+                    new BookieService(conf, bookie, rootStatsLogger, allocatorWithOomHandler, uncleanShutdownDetection);
+
+<span class="nc" id="L434">            serverBuilder.addComponent(bookieService);</span>
+<span class="nc" id="L435">            log.info(&quot;Load lifecycle component : {}&quot;, bookieService.getName());</span>
+
+<span class="nc bnc" id="L437" title="All 2 branches missed.">            if (conf.getServerConf().isLocalScrubEnabled()) {</span>
+<span class="nc" id="L438">                serverBuilder.addComponent(</span>
+                        new ScrubberService(
+<span class="nc" id="L440">                                rootStatsLogger.scope(ScrubberStats.SCOPE),</span>
+<span class="nc" id="L441">                                conf, bookieService.getServer().getBookie().getLedgerStorage()));</span>
+            }
+
+            // 6. build auto recovery
+<span class="nc" id="L445">            AutoRecoveryService autoRecoveryService = null;</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">            if (conf.getServerConf().isAutoRecoveryDaemonEnabled()) {</span>
+<span class="nc" id="L447">                autoRecoveryService = new AutoRecoveryService(conf, rootStatsLogger.scope(REPLICATION_SCOPE));</span>
+
+<span class="nc" id="L449">                serverBuilder.addComponent(autoRecoveryService);</span>
+<span class="nc" id="L450">                log.info(&quot;Load lifecycle component : {}&quot;, autoRecoveryService.getName());</span>
+            }
+
+            // 7. build data integrity check service
+<span class="nc" id="L454">            DataIntegrityService dataIntegrityService = null;</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">            if (conf.getServerConf().isDataIntegrityCheckingEnabled()) {</span>
+<span class="nc" id="L456">                checkNotNull(integCheck, &quot;integCheck should have been initialized with the cookie validation&quot;);</span>
+<span class="nc" id="L457">                dataIntegrityService =</span>
+<span class="nc" id="L458">                        new DataIntegrityService(conf, rootStatsLogger.scope(REPLICATION_SCOPE), integCheck);</span>
+<span class="nc" id="L459">                serverBuilder.addComponent(dataIntegrityService);</span>
+<span class="nc" id="L460">                log.info(&quot;Load lifecycle component : {}&quot;, dataIntegrityService.getName());</span>
+            }
+
+            // 8. build http service
+<span class="nc" id="L464">            HttpService httpService = null;</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">            if (conf.getServerConf().isHttpServerEnabled()) {</span>
+<span class="nc" id="L466">                BKHttpServiceProvider provider = new BKHttpServiceProvider.Builder()</span>
+<span class="nc" id="L467">                        .setBookieServer(bookieService.getServer())</span>
+<span class="nc" id="L468">                        .setServerConfiguration(conf.getServerConf())</span>
+<span class="nc" id="L469">                        .setStatsProvider(statsProvider)</span>
+<span class="nc" id="L470">                        .setLedgerManagerFactory(ledgerManagerFactory)</span>
+<span class="nc" id="L471">                        .build();</span>
+<span class="nc" id="L472">                httpService = new HttpService(provider, conf, rootStatsLogger);</span>
+<span class="nc" id="L473">                serverBuilder.addComponent(httpService);</span>
+<span class="nc" id="L474">                log.info(&quot;Load lifecycle component : {}&quot;, httpService.getName());</span>
+            }
+
+            // 9. build extra services
+<span class="nc" id="L478">            String[] extraComponents = conf.getServerConf().getExtraServerComponents();</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">            if (null != extraComponents) {</span>
+                try {
+<span class="nc" id="L481">                    List&lt;ServerLifecycleComponent&gt; components = loadServerComponents(</span>
+                            extraComponents,
+                            conf,
+                            rootStatsLogger);
+<span class="nc bnc" id="L485" title="All 2 branches missed.">                    for (ServerLifecycleComponent component : components) {</span>
+<span class="nc" id="L486">                        serverBuilder.addComponent(component);</span>
+<span class="nc" id="L487">                        log.info(&quot;Load lifecycle component : {}&quot;, component.getName());</span>
+<span class="nc" id="L488">                    }</span>
+<span class="nc" id="L489">                } catch (Exception e) {</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">                    if (conf.getServerConf().getIgnoreExtraServerComponentsStartupFailures()) {</span>
+<span class="nc" id="L491">                        log.info(&quot;Failed to load extra components '{}' - {}. Continuing without those components.&quot;,</span>
+<span class="nc" id="L492">                                StringUtils.join(extraComponents), e.getMessage());</span>
+                    } else {
+<span class="nc" id="L494">                        throw e;</span>
+                    }
+<span class="nc" id="L496">                }</span>
+            }
+
+<span class="nc" id="L499">            return new EmbeddedServer(serverBuilder.build(), statsProvider, registrationManager, ledgerManagerFactory,</span>
+                    diskChecker, ledgerDirsManager, indexDirsManager, bookieService, autoRecoveryService,
+                    dataIntegrityService, httpService);
+
+        }
+
+        /**
+         * Create the {@link BookieServiceInfo} starting from the published endpoints.
+         *
+         * @see ComponentInfoPublisher
+         * @param componentInfoPublisher the endpoint publisher
+         * @return the created bookie service info
+         */
+        private static BookieServiceInfo buildBookieServiceInfo(ComponentInfoPublisher componentInfoPublisher) {
+<span class="nc" id="L513">            List&lt;BookieServiceInfo.Endpoint&gt; endpoints = componentInfoPublisher.getEndpoints().values()</span>
+<span class="nc" id="L514">                    .stream().map(e -&gt; {</span>
+<span class="nc" id="L515">                        return new BookieServiceInfo.Endpoint(</span>
+<span class="nc" id="L516">                                e.getId(),</span>
+<span class="nc" id="L517">                                e.getPort(),</span>
+<span class="nc" id="L518">                                e.getHost(),</span>
+<span class="nc" id="L519">                                e.getProtocol(),</span>
+<span class="nc" id="L520">                                e.getAuth(),</span>
+<span class="nc" id="L521">                                e.getExtensions()</span>
+                        );
+<span class="nc" id="L523">                    }).collect(Collectors.toList());</span>
+<span class="nc" id="L524">            return new BookieServiceInfo(componentInfoPublisher.getProperties(), endpoints);</span>
+        }
+    }
+
+    private static final class ByteBuffAllocatorWrapper implements ByteBufAllocatorWithOomHandler {
+
+        private final ByteBufAllocator allocator;
+
+        @Override
+        public ByteBuf buffer() {
+<span class="nc" id="L534">            return allocator.buffer();</span>
+        }
+
+        @Override
+        public ByteBuf buffer(int i) {
+<span class="nc" id="L539">            return allocator.buffer(i);</span>
+        }
+
+        @Override
+        public ByteBuf buffer(int i, int i1) {
+<span class="nc" id="L544">            return allocator.buffer(i, i1);</span>
+        }
+
+        @Override
+        public ByteBuf ioBuffer() {
+<span class="nc" id="L549">            return allocator.ioBuffer();</span>
+        }
+
+        @Override
+        public ByteBuf ioBuffer(int i) {
+<span class="nc" id="L554">            return allocator.ioBuffer(i);</span>
+        }
+
+        @Override
+        public ByteBuf ioBuffer(int i, int i1) {
+<span class="nc" id="L559">            return allocator.ioBuffer(i, i1);</span>
+        }
+
+        @Override
+        public ByteBuf heapBuffer() {
+<span class="nc" id="L564">            return allocator.heapBuffer();</span>
+        }
+
+        @Override
+        public ByteBuf heapBuffer(int i) {
+<span class="nc" id="L569">            return allocator.heapBuffer(i);</span>
+        }
+
+        @Override
+        public ByteBuf heapBuffer(int i, int i1) {
+<span class="nc" id="L574">            return allocator.heapBuffer(i, i1);</span>
+        }
+
+        @Override
+        public ByteBuf directBuffer() {
+<span class="nc" id="L579">            return allocator.directBuffer();</span>
+        }
+
+        @Override
+        public ByteBuf directBuffer(int i) {
+<span class="nc" id="L584">            return allocator.directBuffer(i);</span>
+        }
+
+        @Override
+        public ByteBuf directBuffer(int i, int i1) {
+<span class="nc" id="L589">            return allocator.directBuffer(i, i1);</span>
+        }
+
+        @Override
+        public CompositeByteBuf compositeBuffer() {
+<span class="nc" id="L594">            return allocator.compositeBuffer();</span>
+        }
+
+        @Override
+        public CompositeByteBuf compositeBuffer(int i) {
+<span class="nc" id="L599">            return allocator.compositeBuffer(i);</span>
+        }
+
+        @Override
+        public CompositeByteBuf compositeHeapBuffer() {
+<span class="nc" id="L604">            return allocator.compositeHeapBuffer();</span>
+        }
+
+        @Override
+        public CompositeByteBuf compositeHeapBuffer(int i) {
+<span class="nc" id="L609">            return allocator.compositeHeapBuffer(i);</span>
+        }
+
+        @Override
+        public CompositeByteBuf compositeDirectBuffer() {
+<span class="nc" id="L614">            return allocator.compositeDirectBuffer();</span>
+        }
+
+        @Override
+        public CompositeByteBuf compositeDirectBuffer(int i) {
+<span class="nc" id="L619">            return allocator.compositeDirectBuffer(i);</span>
+        }
+
+        @Override
+        public boolean isDirectBufferPooled() {
+<span class="nc" id="L624">            return allocator.isDirectBufferPooled();</span>
+        }
+
+        @Override
+        public int calculateNewCapacity(int i, int i1) {
+<span class="nc" id="L629">            return allocator.calculateNewCapacity(i, i1);</span>
+        }
+
+<span class="nc" id="L632">        public ByteBuffAllocatorWrapper(ByteBufAllocator allocator) {</span>
+<span class="nc" id="L633">            this.allocator = allocator;</span>
+<span class="nc" id="L634">        }</span>
+
+        @Override
+        public void setOomHandler(Consumer&lt;OutOfMemoryError&gt; handler) {
+            // NOP
+<span class="nc" id="L639">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

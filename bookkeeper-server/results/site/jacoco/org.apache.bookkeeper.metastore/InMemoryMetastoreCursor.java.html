@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InMemoryMetastoreCursor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.metastore</a> &gt; <span class="el_source">InMemoryMetastoreCursor.java</span></div><h1>InMemoryMetastoreCursor.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.metastore;
+
+import static org.apache.bookkeeper.metastore.InMemoryMetastoreTable.cloneValue;
+
+import com.google.common.collect.ImmutableSortedMap;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.SortedMap;
+import java.util.concurrent.ScheduledExecutorService;
+import org.apache.bookkeeper.metastore.MSException.Code;
+import org.apache.bookkeeper.versioning.Versioned;
+
+class InMemoryMetastoreCursor implements MetastoreCursor {
+
+    private final ScheduledExecutorService scheduler;
+    private final Iterator&lt;Map.Entry&lt;String, Versioned&lt;Value&gt;&gt;&gt; iter;
+    private final Set&lt;String&gt; fields;
+
+    public InMemoryMetastoreCursor(SortedMap&lt;String, Versioned&lt;Value&gt;&gt; map, Set&lt;String&gt; fields,
+<span class="nc" id="L41">            ScheduledExecutorService scheduler) {</span>
+        // copy an map for iterator to avoid concurrent modification problem.
+<span class="nc" id="L43">        this.iter = ImmutableSortedMap.copyOfSorted(map).entrySet().iterator();</span>
+<span class="nc" id="L44">        this.fields = fields;</span>
+<span class="nc" id="L45">        this.scheduler = scheduler;</span>
+<span class="nc" id="L46">    }</span>
+
+    @Override
+    public boolean hasMoreEntries() {
+<span class="nc" id="L50">        return iter.hasNext();</span>
+    }
+
+    @Override
+    public Iterator&lt;MetastoreTableItem&gt; readEntries(int numEntries)
+    throws MSException {
+<span class="nc bnc" id="L56" title="All 2 branches missed.">        if (numEntries &lt; 0) {</span>
+<span class="nc" id="L57">            throw MSException.create(Code.IllegalOp);</span>
+        }
+<span class="nc" id="L59">        return unsafeReadEntries(numEntries);</span>
+    }
+
+    @Override
+    public void asyncReadEntries(final int numEntries, final ReadEntriesCallback cb, final Object ctx) {
+<span class="nc" id="L64">        scheduler.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                if (numEntries &lt; 0) {</span>
+<span class="nc" id="L68">                    cb.complete(Code.IllegalOp.getCode(), null, ctx);</span>
+<span class="nc" id="L69">                    return;</span>
+                }
+<span class="nc" id="L71">                Iterator&lt;MetastoreTableItem&gt; result = unsafeReadEntries(numEntries);</span>
+<span class="nc" id="L72">                cb.complete(Code.OK.getCode(), result, ctx);</span>
+<span class="nc" id="L73">            }</span>
+        });
+<span class="nc" id="L75">    }</span>
+
+    private Iterator&lt;MetastoreTableItem&gt; unsafeReadEntries(int numEntries) {
+<span class="nc" id="L78">        List&lt;MetastoreTableItem&gt; entries = new ArrayList&lt;MetastoreTableItem&gt;();</span>
+<span class="nc" id="L79">        int nCount = 0;</span>
+<span class="nc bnc" id="L80" title="All 4 branches missed.">        while (iter.hasNext() &amp;&amp; nCount &lt; numEntries) {</span>
+<span class="nc" id="L81">            Map.Entry&lt;String, Versioned&lt;Value&gt;&gt; entry = iter.next();</span>
+<span class="nc" id="L82">            Versioned&lt;Value&gt; value = entry.getValue();</span>
+<span class="nc" id="L83">            Versioned&lt;Value&gt; vv = cloneValue(value.getValue(), value.getVersion(), fields);</span>
+<span class="nc" id="L84">            String key = entry.getKey();</span>
+<span class="nc" id="L85">            entries.add(new MetastoreTableItem(key, vv));</span>
+<span class="nc" id="L86">            ++nCount;</span>
+<span class="nc" id="L87">        }</span>
+<span class="nc" id="L88">        return entries.iterator();</span>
+    }
+
+    @Override
+    public void close() throws IOException {
+        // do nothing
+<span class="nc" id="L94">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

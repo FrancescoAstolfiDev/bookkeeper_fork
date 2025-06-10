@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EntryLogManagerBase.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">EntryLogManagerBase.java</span></div><h1>EntryLogManagerBase.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static org.apache.bookkeeper.bookie.DefaultEntryLogger.UNASSIGNED_LEDGERID;
+
+import com.google.common.annotations.VisibleForTesting;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.util.concurrent.FastThreadLocal;
+import java.io.File;
+import java.io.IOException;
+import java.util.List;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.DefaultEntryLogger.BufferedLogChannel;
+import org.apache.bookkeeper.bookie.DefaultEntryLogger.EntryLogListener;
+import org.apache.bookkeeper.bookie.LedgerDirsManager.NoWritableLedgerDirException;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+
+<span class="nc" id="L39">@Slf4j</span>
+abstract class EntryLogManagerBase implements EntryLogManager {
+    volatile List&lt;BufferedLogChannel&gt; rotatedLogChannels;
+    final EntryLoggerAllocator entryLoggerAllocator;
+    final LedgerDirsManager ledgerDirsManager;
+    private final List&lt;EntryLogListener&gt; listeners;
+    /**
+     * The maximum size of a entry logger file.
+     */
+    final long logSizeLimit;
+
+    EntryLogManagerBase(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+<span class="nc" id="L51">            EntryLoggerAllocator entryLoggerAllocator, List&lt;EntryLogListener&gt; listeners) {</span>
+<span class="nc" id="L52">        this.ledgerDirsManager = ledgerDirsManager;</span>
+<span class="nc" id="L53">        this.entryLoggerAllocator = entryLoggerAllocator;</span>
+<span class="nc" id="L54">        this.listeners = listeners;</span>
+<span class="nc" id="L55">        this.logSizeLimit = conf.getEntryLogSizeLimit();</span>
+<span class="nc" id="L56">    }</span>
+
+<span class="nc" id="L58">    private final FastThreadLocal&lt;ByteBuf&gt; sizeBufferForAdd = new FastThreadLocal&lt;ByteBuf&gt;() {</span>
+        @Override
+        protected ByteBuf initialValue() throws Exception {
+<span class="nc" id="L61">            return Unpooled.buffer(4);</span>
+        }
+    };
+
+    /*
+     * This method should be guarded by a lock, so callers of this method
+     * should be in the right scope of the lock.
+     */
+    @Override
+    public long addEntry(long ledger, ByteBuf entry, boolean rollLog) throws IOException {
+<span class="nc" id="L71">        int entrySize = entry.readableBytes() + 4; // Adding 4 bytes to prepend the size</span>
+<span class="nc" id="L72">        BufferedLogChannel logChannel = getCurrentLogForLedgerForAddEntry(ledger, entrySize, rollLog);</span>
+<span class="nc" id="L73">        ByteBuf sizeBuffer = sizeBufferForAdd.get();</span>
+<span class="nc" id="L74">        sizeBuffer.clear();</span>
+<span class="nc" id="L75">        sizeBuffer.writeInt(entry.readableBytes());</span>
+<span class="nc" id="L76">        logChannel.write(sizeBuffer);</span>
+
+<span class="nc" id="L78">        long pos = logChannel.position();</span>
+<span class="nc" id="L79">        logChannel.write(entry);</span>
+<span class="nc" id="L80">        logChannel.registerWrittenEntry(ledger, entrySize);</span>
+
+<span class="nc" id="L82">        return (logChannel.getLogId() &lt;&lt; 32L) | pos;</span>
+    }
+
+    boolean reachEntryLogLimit(BufferedLogChannel logChannel, long size) {
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        if (logChannel == null) {</span>
+<span class="nc" id="L87">            return false;</span>
+        }
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        return logChannel.position() + size &gt; logSizeLimit;</span>
+    }
+
+    boolean readEntryLogHardLimit(BufferedLogChannel logChannel, long size) {
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (logChannel == null) {</span>
+<span class="nc" id="L94">            return false;</span>
+        }
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        return logChannel.position() + size &gt; Integer.MAX_VALUE;</span>
+    }
+
+    abstract BufferedLogChannel getCurrentLogForLedger(long ledgerId) throws IOException;
+
+    abstract BufferedLogChannel getCurrentLogForLedgerForAddEntry(long ledgerId, int entrySize, boolean rollLog)
+            throws IOException;
+
+    abstract void setCurrentLogForLedgerAndAddToRotate(long ledgerId, BufferedLogChannel logChannel) throws IOException;
+
+    /*
+     * flush current logs.
+     */
+    abstract void flushCurrentLogs() throws IOException;
+
+    /*
+     * flush rotated logs.
+     */
+    abstract void flushRotatedLogs() throws IOException;
+
+    List&lt;BufferedLogChannel&gt; getRotatedLogChannels() {
+<span class="nc" id="L117">        return rotatedLogChannels;</span>
+    }
+
+    @Override
+    public void flush() throws IOException {
+<span class="nc" id="L122">        flushCurrentLogs();</span>
+<span class="nc" id="L123">        flushRotatedLogs();</span>
+<span class="nc" id="L124">    }</span>
+
+    void flushLogChannel(BufferedLogChannel logChannel, boolean forceMetadata) throws IOException {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (logChannel != null) {</span>
+<span class="nc" id="L128">            logChannel.flushAndForceWrite(forceMetadata);</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L130">                log.debug(&quot;Flush and sync current entry logger {}&quot;, logChannel.getLogId());</span>
+            }
+        }
+<span class="nc" id="L133">    }</span>
+
+    /*
+     * Creates a new log file. This method should be guarded by a lock,
+     * so callers of this method should be in right scope of the lock.
+     */
+    @VisibleForTesting
+    void createNewLog(long ledgerId) throws IOException {
+<span class="nc" id="L141">        createNewLog(ledgerId, &quot;&quot;);</span>
+<span class="nc" id="L142">    }</span>
+
+    void createNewLog(long ledgerId, String reason) throws IOException {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (ledgerId != UNASSIGNED_LEDGERID) {</span>
+<span class="nc" id="L146">            log.info(&quot;Creating a new entry log file for ledger '{}' {}&quot;, ledgerId, reason);</span>
+        } else {
+<span class="nc" id="L148">            log.info(&quot;Creating a new entry log file {}&quot;, reason);</span>
+        }
+
+<span class="nc" id="L151">        BufferedLogChannel logChannel = getCurrentLogForLedger(ledgerId);</span>
+        // first tried to create a new log channel. add current log channel to ToFlush list only when
+        // there is a new log channel. it would prevent that a log channel is referenced by both
+        // *logChannel* and *ToFlush* list.
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (null != logChannel) {</span>
+
+            // flush the internal buffer back to filesystem but not sync disk
+<span class="nc" id="L158">            logChannel.flush();</span>
+
+            // Append ledgers map at the end of entry log
+<span class="nc" id="L161">            logChannel.appendLedgersMap();</span>
+
+<span class="nc" id="L163">            BufferedLogChannel newLogChannel = entryLoggerAllocator.createNewLog(selectDirForNextEntryLog());</span>
+<span class="nc" id="L164">            entryLoggerAllocator.setWritingLogId(newLogChannel.getLogId());</span>
+<span class="nc" id="L165">            setCurrentLogForLedgerAndAddToRotate(ledgerId, newLogChannel);</span>
+<span class="nc" id="L166">            log.info(&quot;Flushing entry logger {} back to filesystem, pending for syncing entry loggers : {}.&quot;,</span>
+<span class="nc" id="L167">                    logChannel.getLogId(), rotatedLogChannels);</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            for (EntryLogListener listener : listeners) {</span>
+<span class="nc" id="L169">                listener.onRotateEntryLog();</span>
+<span class="nc" id="L170">            }</span>
+<span class="nc" id="L171">        } else {</span>
+<span class="nc" id="L172">            BufferedLogChannel newLogChannel = entryLoggerAllocator.createNewLog(selectDirForNextEntryLog());</span>
+<span class="nc" id="L173">            entryLoggerAllocator.setWritingLogId(newLogChannel.getLogId());</span>
+<span class="nc" id="L174">            setCurrentLogForLedgerAndAddToRotate(ledgerId, newLogChannel);</span>
+        }
+<span class="nc" id="L176">    }</span>
+
+    File selectDirForNextEntryLog() throws NoWritableLedgerDirException {
+<span class="nc" id="L179">        return getDirForNextEntryLog(ledgerDirsManager.getWritableLedgerDirsForNewLog());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerEntry.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">LedgerEntry.java</span></div><h1>LedgerEntry.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import static com.google.common.base.Preconditions.checkState;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufInputStream;
+import java.io.InputStream;
+import org.apache.bookkeeper.client.impl.LedgerEntryImpl;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+
+/**
+ * Ledger entry. Its a simple tuple containing the ledger id, the entry-id, and
+ * the entry content.
+ *
+ */
+public class LedgerEntry {
+
+    final long ledgerId;
+    final long entryId;
+    final long length;
+    ByteBuf data;
+
+<span class="nc" id="L43">    LedgerEntry(LedgerEntryImpl entry) {</span>
+<span class="nc" id="L44">        this.ledgerId = entry.getLedgerId();</span>
+<span class="nc" id="L45">        this.entryId = entry.getEntryId();</span>
+<span class="nc" id="L46">        this.length = entry.getLength();</span>
+<span class="nc" id="L47">        this.data = entry.getEntryBuffer().retain();</span>
+<span class="nc" id="L48">    }</span>
+
+    public long getLedgerId() {
+<span class="nc" id="L51">        return ledgerId;</span>
+    }
+
+    public long getEntryId() {
+<span class="nc" id="L55">        return entryId;</span>
+    }
+
+    public long getLength() {
+<span class="nc" id="L59">        return length;</span>
+    }
+
+    /**
+     * Returns the content of the entry.
+     * This method can be called only once. While using v2 wire protocol this method will automatically release
+     * the internal ByteBuf
+     *
+     * @return the content of the entry
+     * @throws IllegalStateException if this method is called twice
+     */
+    public byte[] getEntry() {
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        checkState(null != data, &quot;entry content can be accessed only once&quot;);</span>
+<span class="nc" id="L72">        byte[] entry = new byte[data.readableBytes()];</span>
+<span class="nc" id="L73">        data.readBytes(entry);</span>
+<span class="nc" id="L74">        data.release();</span>
+<span class="nc" id="L75">        data = null;</span>
+<span class="nc" id="L76">        return entry;</span>
+    }
+
+    /**
+     * Returns the content of the entry.
+     * This method can be called only once. While using v2 wire protocol this method will automatically release
+     * the internal ByteBuf when calling the close
+     * method of the returned InputStream
+     *
+     * @return an InputStream which gives access to the content of the entry
+     * @throws IllegalStateException if this method is called twice
+     */
+    public InputStream getEntryInputStream() {
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        checkState(null != data, &quot;entry content can be accessed only once&quot;);</span>
+<span class="nc" id="L90">        ByteBufInputStream res = new ByteBufInputStream(data);</span>
+<span class="nc" id="L91">        data = null;</span>
+<span class="nc" id="L92">        return res;</span>
+    }
+
+    /**
+     * Return the internal buffer that contains the entry payload.
+     *
+     * &lt;p&gt;Note: Using v2 wire protocol it is responsibility of the caller to ensure to release the buffer after usage.
+     *
+     * @return a ByteBuf which contains the data
+     *
+     * @see ClientConfiguration#setNettyUsePooledBuffers(boolean)
+     * @throws IllegalStateException if the entry has been retrieved by {@link #getEntry()}
+     * or {@link #getEntryInputStream()}.
+     */
+    public ByteBuf getEntryBuffer() {
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        checkState(null != data, &quot;entry content has been retrieved by #getEntry or #getEntryInputStream&quot;);</span>
+<span class="nc" id="L108">        return data;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

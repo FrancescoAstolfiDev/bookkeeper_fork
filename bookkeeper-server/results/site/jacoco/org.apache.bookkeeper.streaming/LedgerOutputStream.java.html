@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerOutputStream.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.streaming</a> &gt; <span class="el_source">LedgerOutputStream.java</span></div><h1>LedgerOutputStream.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.streaming;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.LedgerHandle;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * this class provides a streaming api to get an output stream from a ledger
+ * handle and write to it as a stream of bytes. This is built on top of
+ * ledgerhandle api and uses a buffer to cache the data written to it and writes
+ * out the entry to the ledger.
+ */
+public class LedgerOutputStream extends OutputStream {
+
+<span class="nc" id="L39">    private static final Logger LOG = LoggerFactory.getLogger(LedgerOutputStream.class);</span>
+
+    private final LedgerHandle lh;
+    private ByteBuffer bytebuff;
+    byte[] bbytes;
+<span class="nc" id="L44">    int defaultSize = 1024 * 1024; // 1MB default size</span>
+
+    /**
+     * construct a outputstream from a ledger handle.
+     *
+     * @param lh
+     *            ledger handle
+     */
+<span class="nc" id="L52">    public LedgerOutputStream(LedgerHandle lh) {</span>
+<span class="nc" id="L53">        this.lh = lh;</span>
+<span class="nc" id="L54">        bbytes = new byte[defaultSize];</span>
+<span class="nc" id="L55">        this.bytebuff = ByteBuffer.wrap(bbytes);</span>
+<span class="nc" id="L56">    }</span>
+
+    /**
+     * construct a outputstream from a ledger handle.
+     *
+     * @param lh
+     *            the ledger handle
+     * @param size
+     *            the size of the buffer
+     */
+<span class="nc" id="L66">    public LedgerOutputStream(LedgerHandle lh, int size) {</span>
+<span class="nc" id="L67">        this.lh = lh;</span>
+<span class="nc" id="L68">        bbytes = new byte[size];</span>
+<span class="nc" id="L69">        this.bytebuff = ByteBuffer.wrap(bbytes);</span>
+<span class="nc" id="L70">    }</span>
+
+    @Override
+    public void close() {
+        // flush everything
+        // we have
+<span class="nc" id="L76">        flush();</span>
+<span class="nc" id="L77">    }</span>
+
+    @Override
+    public synchronized void flush() {
+        // lets flush all the data
+        // into the ledger entry
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (bytebuff.position() &gt; 0) {</span>
+            // copy the bytes into
+            // a new byte buffer and send it out
+<span class="nc" id="L86">            byte[] b = new byte[bytebuff.position()];</span>
+<span class="nc" id="L87">            LOG.info(&quot;Comment: flushing with params &quot; + &quot; &quot; + bytebuff.position());</span>
+<span class="nc" id="L88">            System.arraycopy(bbytes, 0, b, 0, bytebuff.position());</span>
+            try {
+<span class="nc" id="L90">                lh.addEntry(b);</span>
+<span class="nc" id="L91">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L92">                LOG.warn(&quot;Interrupted while flushing &quot; + ie);</span>
+<span class="nc" id="L93">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L94">            } catch (BKException bke) {</span>
+<span class="nc" id="L95">                LOG.warn(&quot;BookKeeper exception &quot;, bke);</span>
+<span class="nc" id="L96">            }</span>
+        }
+<span class="nc" id="L98">    }</span>
+
+    /**
+     * make space for len bytes to be written to the buffer.
+     *
+     * @param len
+     * @return if true then we can make space for len if false we cannot
+     */
+    private boolean makeSpace(int len) {
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (bytebuff.remaining() &lt; len) {</span>
+<span class="nc" id="L108">            flush();</span>
+<span class="nc" id="L109">            bytebuff.clear();</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">            return bytebuff.capacity() &gt;= len;</span>
+        }
+<span class="nc" id="L112">        return true;</span>
+    }
+
+    @Override
+    public synchronized void write(byte[] b) {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (makeSpace(b.length)) {</span>
+<span class="nc" id="L118">            bytebuff.put(b);</span>
+        } else {
+            try {
+<span class="nc" id="L121">                lh.addEntry(b);</span>
+<span class="nc" id="L122">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L123">                LOG.warn(&quot;Interrupted while writing&quot;, ie);</span>
+<span class="nc" id="L124">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L125">            } catch (BKException bke) {</span>
+<span class="nc" id="L126">                LOG.warn(&quot;BookKeeper exception&quot;, bke);</span>
+<span class="nc" id="L127">            }</span>
+        }
+<span class="nc" id="L129">    }</span>
+
+    @Override
+    public synchronized void write(byte[] b, int off, int len) {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (!makeSpace(len)) {</span>
+            // lets try making the buffer bigger
+<span class="nc" id="L135">            bbytes = new byte[len];</span>
+<span class="nc" id="L136">            bytebuff = ByteBuffer.wrap(bbytes);</span>
+        }
+<span class="nc" id="L138">        bytebuff.put(b, off, len);</span>
+<span class="nc" id="L139">    }</span>
+
+    @Override
+    public synchronized void write(int b) throws IOException {
+<span class="nc" id="L143">        makeSpace(1);</span>
+<span class="nc" id="L144">        byte oneB = (byte) (b &amp; 0xFF);</span>
+<span class="nc" id="L145">        bytebuff.put(oneB);</span>
+<span class="nc" id="L146">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

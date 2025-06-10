@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PendingReadLacOp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">PendingReadLacOp.java</span></div><h1>PendingReadLacOp.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.client;
+
+import io.netty.buffer.ByteBuf;
+import java.util.List;
+import org.apache.bookkeeper.client.BKException.BKDigestMatchException;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookieClient;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.ReadLacCallback;
+import org.apache.bookkeeper.proto.checksum.DigestManager.RecoveryData;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This represents a pending ReadLac operation.
+ *
+ * &lt;p&gt;LAC is stored in two places on bookies.
+ * 1. WriteLac operation sends Explicit LAC and is stored in memory on each bookie.
+ * 2. Each AddEntry operation piggy-backs LAC which is stored on bookie's disk.
+ *
+ * &lt;p&gt;This operation returns both of those entries and we pick the latest LAC out of
+ * available answers.
+ *
+ * &lt;p&gt;This is an optional protocol operations to facilitate tailing readers
+ * to be up to date with the writer. This is best effort to get latest LAC
+ * from bookies, and doesn't affect the correctness of the protocol.
+ */
+
+class PendingReadLacOp implements ReadLacCallback {
+<span class="nc" id="L46">    static final Logger LOG = LoggerFactory.getLogger(PendingReadLacOp.class);</span>
+    LedgerHandle lh;
+    BookieClient bookieClient;
+    LacCallback cb;
+    int numResponsesPending;
+<span class="nc" id="L51">    volatile boolean completed = false;</span>
+<span class="nc" id="L52">    int lastSeenError = BKException.Code.ReadException;</span>
+    final DistributionSchedule.QuorumCoverageSet coverageSet;
+<span class="nc" id="L54">    long maxLac = LedgerHandle.INVALID_ENTRY_ID;</span>
+    final List&lt;BookieId&gt; currentEnsemble;
+
+    /*
+     * Wrapper to get Lac from the request
+     */
+    interface LacCallback {
+        void getLacComplete(int rc, long lac);
+    }
+
+<span class="nc" id="L64">    PendingReadLacOp(LedgerHandle lh, BookieClient bookieClient, List&lt;BookieId&gt; ensemble, LacCallback cb) {</span>
+<span class="nc" id="L65">        this.lh = lh;</span>
+<span class="nc" id="L66">        this.bookieClient = bookieClient;</span>
+<span class="nc" id="L67">        this.cb = cb;</span>
+<span class="nc" id="L68">        this.numResponsesPending = ensemble.size();</span>
+<span class="nc" id="L69">        this.coverageSet = lh.distributionSchedule.getCoverageSet();</span>
+<span class="nc" id="L70">        this.currentEnsemble = ensemble;</span>
+<span class="nc" id="L71">    }</span>
+
+    public void initiate() {
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        for (int i = 0; i &lt; currentEnsemble.size(); i++) {</span>
+<span class="nc" id="L75">            bookieClient.readLac(currentEnsemble.get(i), lh.ledgerId, this, i);</span>
+        }
+<span class="nc" id="L77">    }</span>
+
+    @Override
+    public void readLacComplete(int rc, long ledgerId, final ByteBuf lacBuffer, final ByteBuf lastEntryBuffer,
+            Object ctx) {
+<span class="nc" id="L82">        int bookieIndex = (Integer) ctx;</span>
+
+        // add the response to coverage set
+<span class="nc" id="L85">        coverageSet.addBookie(bookieIndex, rc);</span>
+
+<span class="nc" id="L87">        numResponsesPending--;</span>
+<span class="nc" id="L88">        boolean heardValidResponse = false;</span>
+
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (completed) {</span>
+<span class="nc" id="L91">            return;</span>
+        }
+
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (rc == BKException.Code.OK) {</span>
+            try {
+                // Each bookie may have two store LAC in two places.
+                // One is in-memory copy in FileInfo and other is
+                // piggy-backed LAC on the last entry.
+                // This routine picks both of them and compares to return
+                // the latest Lac.
+
+                // lacBuffer and lastEntryBuffer are optional in the protocol.
+                // So check if they exist before processing them.
+
+                // Extract lac from FileInfo on the ledger.
+<span class="nc bnc" id="L106" title="All 4 branches missed.">                if (lacBuffer != null &amp;&amp; lacBuffer.readableBytes() &gt; 0) {</span>
+<span class="nc" id="L107">                    long lac = lh.macManager.verifyDigestAndReturnLac(lacBuffer);</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                    if (lac &gt; maxLac) {</span>
+<span class="nc" id="L109">                        maxLac = lac;</span>
+                    }
+                }
+                // Extract lac from last entry on the disk
+<span class="nc bnc" id="L113" title="All 4 branches missed.">                if (lastEntryBuffer != null &amp;&amp; lastEntryBuffer.readableBytes() &gt; 0) {</span>
+<span class="nc" id="L114">                    RecoveryData recoveryData = lh.macManager.verifyDigestAndReturnLastConfirmed(lastEntryBuffer);</span>
+<span class="nc" id="L115">                    long recoveredLac = recoveryData.getLastAddConfirmed();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                    if (recoveredLac &gt; maxLac) {</span>
+<span class="nc" id="L117">                        maxLac = recoveredLac;</span>
+                    }
+                }
+<span class="nc" id="L120">                heardValidResponse = true;</span>
+<span class="nc" id="L121">            } catch (BKDigestMatchException e) {</span>
+                // Too bad, this bookie did not give us a valid answer, we
+                // still might be able to recover. So, continue
+<span class="nc" id="L124">                LOG.error(&quot;Mac mismatch while reading  ledger: &quot; + ledgerId + &quot; LAC from bookie: &quot;</span>
+<span class="nc" id="L125">                        + currentEnsemble.get(bookieIndex));</span>
+<span class="nc" id="L126">                rc = BKException.Code.DigestMatchException;</span>
+<span class="nc" id="L127">            }</span>
+        }
+
+<span class="nc bnc" id="L130" title="All 4 branches missed.">        if (rc == BKException.Code.NoSuchLedgerExistsException || rc == BKException.Code.NoSuchEntryException) {</span>
+<span class="nc" id="L131">            heardValidResponse = true;</span>
+        }
+
+<span class="nc bnc" id="L134" title="All 4 branches missed.">        if (rc == BKException.Code.UnauthorizedAccessException &amp;&amp; !completed) {</span>
+<span class="nc" id="L135">            cb.getLacComplete(rc, maxLac);</span>
+<span class="nc" id="L136">            completed = true;</span>
+<span class="nc" id="L137">            return;</span>
+        }
+
+<span class="nc bnc" id="L140" title="All 4 branches missed.">        if (!heardValidResponse &amp;&amp; BKException.Code.OK != rc) {</span>
+<span class="nc" id="L141">            lastSeenError = rc;</span>
+        }
+
+        // We don't consider a success until we have coverage set responses.
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (heardValidResponse</span>
+<span class="nc bnc" id="L146" title="All 4 branches missed.">                &amp;&amp; coverageSet.checkCovered()</span>
+                &amp;&amp; !completed) {
+<span class="nc" id="L148">            completed = true;</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L150">                LOG.debug(&quot;Read LAC complete with enough validResponse for ledger: {} LAC: {}&quot;, ledgerId, maxLac);</span>
+            }
+<span class="nc" id="L152">            cb.getLacComplete(BKException.Code.OK, maxLac);</span>
+<span class="nc" id="L153">            return;</span>
+        }
+
+<span class="nc bnc" id="L156" title="All 4 branches missed.">        if (numResponsesPending == 0 &amp;&amp; !completed) {</span>
+<span class="nc" id="L157">            LOG.error(</span>
+                    &quot;While readLac ledger: {} did not hear success responses from all of ensemble, coverageSet is: {}&quot;,
+<span class="nc" id="L159">                    ledgerId, coverageSet);</span>
+<span class="nc" id="L160">            cb.getLacComplete(lastSeenError, maxLac);</span>
+        }
+<span class="nc" id="L162">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

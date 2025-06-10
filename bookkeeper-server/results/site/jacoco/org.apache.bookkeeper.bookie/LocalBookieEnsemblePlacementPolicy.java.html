@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalBookieEnsemblePlacementPolicy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">LocalBookieEnsemblePlacementPolicy.java</span></div><h1>LocalBookieEnsemblePlacementPolicy.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie;
+
+import com.google.common.collect.Lists;
+import io.netty.util.HashedWheelTimer;
+import java.net.UnknownHostException;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import org.apache.bookkeeper.client.BKException.BKNotEnoughBookiesException;
+import org.apache.bookkeeper.client.BookieInfoReader.BookieInfo;
+import org.apache.bookkeeper.client.BookiesHealthInfo;
+import org.apache.bookkeeper.client.DistributionSchedule;
+import org.apache.bookkeeper.client.EnsemblePlacementPolicy;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.feature.FeatureProvider;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.net.DNSToSwitchMapping;
+import org.apache.bookkeeper.proto.BookieAddressResolver;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Special ensemble placement policy that always return local bookie. Only works with ledgers with ensemble=1.
+ *
+ * @see EnsemblePlacementPolicy
+ */
+<span class="nc" id="L48">public class LocalBookieEnsemblePlacementPolicy implements EnsemblePlacementPolicy {</span>
+
+<span class="nc" id="L50">    static final Logger LOG = LoggerFactory.getLogger(LocalBookieEnsemblePlacementPolicy.class);</span>
+
+    private BookieId bookieAddress;
+
+    @Override
+    public EnsemblePlacementPolicy initialize(ClientConfiguration conf,
+                                              Optional&lt;DNSToSwitchMapping&gt; optionalDnsResolver,
+                                              HashedWheelTimer hashedWheelTimer,
+                                              FeatureProvider featureProvider,
+                                              StatsLogger statsLogger, BookieAddressResolver bookieAddressResolver) {
+        // Configuration will have already the bookie configuration inserted
+<span class="nc" id="L61">        ServerConfiguration serverConf = new ServerConfiguration();</span>
+<span class="nc" id="L62">        serverConf.addConfiguration(conf);</span>
+
+        try {
+<span class="nc" id="L65">            bookieAddress = BookieImpl.getBookieId(serverConf);</span>
+<span class="nc" id="L66">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L67">            LOG.warn(&quot;Unable to get bookie address&quot;, e);</span>
+<span class="nc" id="L68">            throw new RuntimeException(e);</span>
+<span class="nc" id="L69">        }</span>
+<span class="nc" id="L70">        return this;</span>
+    }
+
+    @Override
+    public void uninitalize() {
+        // do nothing
+<span class="nc" id="L76">    }</span>
+
+    @Override
+    public Set&lt;BookieId&gt; onClusterChanged(Set&lt;BookieId&gt; writableBookies,
+            Set&lt;BookieId&gt; readOnlyBookies) {
+<span class="nc" id="L81">        return Collections.emptySet();</span>
+    }
+
+    @Override
+    public PlacementResult&lt;BookieId&gt; replaceBookie(int ensembleSize, int writeQuorumSize, int ackQuorumSize,
+            Map&lt;String, byte[]&gt; customMetadata, List&lt;BookieId&gt; currentEnsemble,
+            BookieId bookieToReplace, Set&lt;BookieId&gt; excludeBookies)
+            throws BKNotEnoughBookiesException {
+<span class="nc" id="L89">        throw new BKNotEnoughBookiesException();</span>
+    }
+
+    @Override
+    public void registerSlowBookie(BookieId bookieSocketAddress, long entryId) {
+<span class="nc" id="L94">        return;</span>
+    }
+
+    @Override
+    public DistributionSchedule.WriteSet reorderReadSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc" id="L102">        return writeSet;</span>
+    }
+
+    @Override
+    public DistributionSchedule.WriteSet reorderReadLACSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc" id="L110">        return writeSet;</span>
+    }
+
+    @Override
+    public PlacementResult&lt;List&lt;BookieId&gt;&gt; newEnsemble(int ensembleSize, int writeQuorumSize,
+            int ackQuorumSize, Map&lt;String, byte[]&gt; customMetadata, Set&lt;BookieId&gt; excludeBookies)
+            throws BKNotEnoughBookiesException {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (ensembleSize &gt; 1) {</span>
+<span class="nc" id="L118">            throw new IllegalArgumentException(&quot;Local ensemble policy can only return 1 bookie&quot;);</span>
+        }
+
+<span class="nc" id="L121">        return PlacementResult.of(Lists.newArrayList(bookieAddress), PlacementPolicyAdherence.MEETS_STRICT);</span>
+    }
+
+    @Override
+    public void updateBookieInfo(Map&lt;BookieId, BookieInfo&gt; bookieToFreeSpaceMap) {
+<span class="nc" id="L126">        return;</span>
+    }
+
+    @Override
+    public PlacementPolicyAdherence isEnsembleAdheringToPlacementPolicy(List&lt;BookieId&gt; ensembleList,
+            int writeQuorumSize, int ackQuorumSize) {
+<span class="nc" id="L132">        return PlacementPolicyAdherence.MEETS_STRICT;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

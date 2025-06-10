@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GarbageCollectorStats.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.stats</a> &gt; <span class="el_source">GarbageCollectorStats.java</span></div><h1>GarbageCollectorStats.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.bookie.stats;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ACTIVE_ENTRY_LOG_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ACTIVE_ENTRY_LOG_SPACE_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ACTIVE_LEDGER_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.BOOKIE_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.CATEGORY_SERVER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.COMPACT_RUNTIME;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.DELETED_LEDGER_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ENTRY_LOCATION_COMPACTION_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ENTRY_LOG_COMPACT_RATIO;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ENTRY_LOG_SPACE_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.EXTRACT_META_RUNTIME;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.GC_LEDGER_RUNTIME;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.MAJOR_COMPACTION_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.MINOR_COMPACTION_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.RECLAIMED_COMPACTION_SPACE_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.RECLAIMED_DELETION_SPACE_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.RECLAIM_FAILED_TO_DELETE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.THREAD_RUNTIME;
+
+import java.util.function.Supplier;
+import lombok.Getter;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+
+/**
+ * A umbrella class for gc stats.
+ */
+@StatsDoc(
+    name = BOOKIE_SCOPE,
+    category = CATEGORY_SERVER,
+    help = &quot;Garbage Collector related stats&quot;
+)
+@Getter
+public class GarbageCollectorStats {
+
+<span class="nc" id="L60">    final StatsLogger statsLogger;</span>
+    @StatsDoc(
+        name = MINOR_COMPACTION_COUNT,
+        help = &quot;Number of minor compactions&quot;
+    )
+<span class="nc" id="L65">    private final Counter minorCompactionCounter;</span>
+    @StatsDoc(
+        name = MAJOR_COMPACTION_COUNT,
+        help = &quot;Number of major compactions&quot;
+    )
+<span class="nc" id="L70">    private final Counter majorCompactionCounter;</span>
+    @StatsDoc(
+            name = ENTRY_LOCATION_COMPACTION_COUNT,
+            help = &quot;Number of entry location compactions&quot;
+    )
+<span class="nc" id="L75">    private final Counter entryLocationCompactionCounter;</span>
+    @StatsDoc(
+        name = RECLAIMED_DELETION_SPACE_BYTES,
+        help = &quot;Number of disk space bytes reclaimed via deleting entry log files&quot;
+    )
+<span class="nc" id="L80">    private final Counter reclaimedSpaceViaDeletes;</span>
+    @StatsDoc(
+        name = RECLAIMED_COMPACTION_SPACE_BYTES,
+        help = &quot;Number of disk space bytes reclaimed via compacting entry log files&quot;
+    )
+<span class="nc" id="L85">    private final Counter reclaimedSpaceViaCompaction;</span>
+    @StatsDoc(
+            name = RECLAIM_FAILED_TO_DELETE,
+            help = &quot;Number of reclaim failed counts when deleting entry log files&quot;
+    )
+<span class="nc" id="L90">    private final Counter reclaimFailedToDelete;</span>
+    @StatsDoc(
+        name = DELETED_LEDGER_COUNT,
+        help = &quot;Number of ledgers deleted by garbage collection&quot;
+    )
+<span class="nc" id="L95">    private final Counter deletedLedgerCounter;</span>
+    @StatsDoc(
+        name = THREAD_RUNTIME,
+        help = &quot;Operation stats of garbage collections&quot;
+    )
+<span class="nc" id="L100">    private final OpStatsLogger gcThreadRuntime;</span>
+    @StatsDoc(
+        name = ACTIVE_ENTRY_LOG_COUNT,
+        help = &quot;Current number of active entry log files&quot;
+    )
+<span class="nc" id="L105">    private final Gauge&lt;Integer&gt; activeEntryLogCountGauge;</span>
+    @StatsDoc(
+        name = ACTIVE_ENTRY_LOG_SPACE_BYTES,
+        help = &quot;Current number of active entry log space bytes&quot;
+    )
+<span class="nc" id="L110">    private final Gauge&lt;Long&gt; activeEntryLogSpaceBytesGauge;</span>
+    @StatsDoc(
+            name = ENTRY_LOG_SPACE_BYTES,
+            help = &quot;Current number of total entry log space bytes&quot;
+    )
+<span class="nc" id="L115">    private final Gauge&lt;Long&gt; entryLogSpaceBytesGauge;</span>
+    @StatsDoc(
+        name = ACTIVE_LEDGER_COUNT,
+        help = &quot;Current number of active ledgers&quot;
+    )
+<span class="nc" id="L120">    private final Gauge&lt;Integer&gt; activeLedgerCountGauge;</span>
+    @StatsDoc(
+            name = GC_LEDGER_RUNTIME,
+            help = &quot;Operation stats of doing gc ledgers base on metaStore&quot;
+    )
+<span class="nc" id="L125">    private final OpStatsLogger gcLedgerRuntime;</span>
+    @StatsDoc(
+            name = COMPACT_RUNTIME,
+            help = &quot;Operation stats of entry log compaction&quot;
+    )
+<span class="nc" id="L130">    private final OpStatsLogger compactRuntime;</span>
+    @StatsDoc(
+            name = EXTRACT_META_RUNTIME,
+            help = &quot;Operation stats of extracting Meta from entryLogs&quot;
+    )
+<span class="nc" id="L135">    private final OpStatsLogger extractMetaRuntime;</span>
+    @StatsDoc(
+        name = ENTRY_LOG_COMPACT_RATIO,
+        help = &quot;Current proportion of compacted entry log files that have been executed&quot;
+    )
+<span class="nc" id="L140">    private final Gauge&lt;Double&gt; entryLogCompactRatioGauge;</span>
+<span class="nc" id="L141">    private volatile int[] entryLogUsageBuckets;</span>
+<span class="nc" id="L142">    private final Gauge&lt;Integer&gt;[] entryLogUsageBucketsLeGauges;</span>
+
+
+    public GarbageCollectorStats(StatsLogger statsLogger,
+                                 Supplier&lt;Integer&gt; activeEntryLogCountSupplier,
+                                 Supplier&lt;Long&gt; activeEntryLogSpaceBytesSupplier,
+                                 Supplier&lt;Long&gt; entryLogSpaceBytesSupplier,
+                                 Supplier&lt;Integer&gt; activeLedgerCountSupplier,
+                                 Supplier&lt;Double&gt; entryLogCompactRatioSupplier,
+<span class="nc" id="L151">                                 Supplier&lt;int[]&gt; usageBuckets) {</span>
+<span class="nc" id="L152">        this.statsLogger = statsLogger;</span>
+
+<span class="nc" id="L154">        this.minorCompactionCounter = statsLogger.getCounter(MINOR_COMPACTION_COUNT);</span>
+<span class="nc" id="L155">        this.majorCompactionCounter = statsLogger.getCounter(MAJOR_COMPACTION_COUNT);</span>
+<span class="nc" id="L156">        this.entryLocationCompactionCounter = statsLogger.getCounter(ENTRY_LOCATION_COMPACTION_COUNT);</span>
+<span class="nc" id="L157">        this.reclaimedSpaceViaCompaction = statsLogger.getCounter(RECLAIMED_COMPACTION_SPACE_BYTES);</span>
+<span class="nc" id="L158">        this.reclaimedSpaceViaDeletes = statsLogger.getCounter(RECLAIMED_DELETION_SPACE_BYTES);</span>
+<span class="nc" id="L159">        this.reclaimFailedToDelete = statsLogger.getCounter(RECLAIM_FAILED_TO_DELETE);</span>
+<span class="nc" id="L160">        this.gcThreadRuntime = statsLogger.getOpStatsLogger(THREAD_RUNTIME);</span>
+<span class="nc" id="L161">        this.deletedLedgerCounter = statsLogger.getCounter(DELETED_LEDGER_COUNT);</span>
+<span class="nc" id="L162">        this.gcLedgerRuntime = statsLogger.getOpStatsLogger(GC_LEDGER_RUNTIME);</span>
+<span class="nc" id="L163">        this.compactRuntime = statsLogger.getOpStatsLogger(COMPACT_RUNTIME);</span>
+<span class="nc" id="L164">        this.extractMetaRuntime = statsLogger.getOpStatsLogger(EXTRACT_META_RUNTIME);</span>
+<span class="nc" id="L165">        this.entryLogUsageBuckets = usageBuckets.get();</span>
+
+<span class="nc" id="L167">        this.activeEntryLogCountGauge = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L170">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L175">                return activeEntryLogCountSupplier.get();</span>
+            }
+        };
+<span class="nc" id="L178">        statsLogger.registerGauge(ACTIVE_ENTRY_LOG_COUNT, activeEntryLogCountGauge);</span>
+<span class="nc" id="L179">        this.activeEntryLogSpaceBytesGauge = new Gauge&lt;Long&gt;() {</span>
+            @Override
+            public Long getDefaultValue() {
+<span class="nc" id="L182">                return 0L;</span>
+            }
+
+            @Override
+            public Long getSample() {
+<span class="nc" id="L187">                return activeEntryLogSpaceBytesSupplier.get();</span>
+            }
+        };
+<span class="nc" id="L190">        statsLogger.registerGauge(ACTIVE_ENTRY_LOG_SPACE_BYTES, activeEntryLogSpaceBytesGauge);</span>
+<span class="nc" id="L191">        this.entryLogSpaceBytesGauge = new Gauge&lt;Long&gt;() {</span>
+            @Override
+            public Long getDefaultValue() {
+<span class="nc" id="L194">                return 0L;</span>
+            }
+
+            @Override
+            public Long getSample() {
+<span class="nc" id="L199">                return entryLogSpaceBytesSupplier.get();</span>
+            }
+        };
+<span class="nc" id="L202">        statsLogger.registerGauge(ENTRY_LOG_SPACE_BYTES, entryLogSpaceBytesGauge);</span>
+<span class="nc" id="L203">        this.activeLedgerCountGauge = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L206">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L211">                return activeLedgerCountSupplier.get();</span>
+            }
+        };
+<span class="nc" id="L214">        statsLogger.registerGauge(ACTIVE_LEDGER_COUNT, activeLedgerCountGauge);</span>
+<span class="nc" id="L215">        this.entryLogCompactRatioGauge = new Gauge&lt;Double&gt;() {</span>
+            @Override
+            public Double getDefaultValue() {
+<span class="nc" id="L218">                return 0.0;</span>
+            }
+
+            @Override
+            public Double getSample() {
+<span class="nc" id="L223">                return entryLogCompactRatioSupplier.get();</span>
+            }
+        };
+<span class="nc" id="L226">        statsLogger.registerGauge(ENTRY_LOG_COMPACT_RATIO, entryLogCompactRatioGauge);</span>
+
+<span class="nc" id="L228">        this.entryLogUsageBucketsLeGauges = new Gauge[entryLogUsageBuckets.length];</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        for (int i = 0; i &lt; entryLogUsageBucketsLeGauges.length; i++) {</span>
+<span class="nc" id="L230">            entryLogUsageBucketsLeGauges[i] =</span>
+<span class="nc" id="L231">                    registerEntryLogUsageBucketsLeGauge(&quot;entry_log_usage_buckets_le_&quot; + (i + 1) * 10, i);</span>
+        }
+<span class="nc" id="L233">    }</span>
+
+    private Gauge&lt;Integer&gt; registerEntryLogUsageBucketsLeGauge(String name, int index) {
+<span class="nc" id="L236">        Gauge&lt;Integer&gt; gauge = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L239">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L244">                return entryLogUsageBuckets[index];</span>
+            }
+        };
+<span class="nc" id="L247">        statsLogger.registerGauge(name, gauge);</span>
+<span class="nc" id="L248">        return gauge;</span>
+    }
+
+
+    public void setEntryLogUsageBuckets(int[] usageBuckets) {
+<span class="nc" id="L253">        entryLogUsageBuckets = usageBuckets;</span>
+<span class="nc" id="L254">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

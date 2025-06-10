@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookie</a> &gt; <span class="el_source">LedgerCommand.java</span></div><h1>LedgerCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.bookie;
+
+import com.beust.jcommander.Parameter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.IOException;
+import java.util.function.Consumer;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.InterleavedLedgerStorage;
+import org.apache.bookkeeper.bookie.LedgerCache;
+import org.apache.bookkeeper.bookie.LedgerEntryPage;
+import org.apache.bookkeeper.bookie.SortedLedgerStorage;
+import org.apache.bookkeeper.bookie.storage.ldb.DbLedgerStorage;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.apache.bookkeeper.util.LedgerIdFormatter;
+import org.apache.commons.lang3.mutable.MutableLong;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to dump ledger index entries into readable format.
+ */
+public class LedgerCommand extends BookieCommand&lt;LedgerCommand.LedgerFlags&gt; {
+
+<span class="nc" id="L48">    static final Logger LOG = LoggerFactory.getLogger(LedgerCommand.class);</span>
+
+    private static final String NAME = &quot;ledger&quot;;
+    private static final String DESC = &quot;Dump ledger index entries into readable format&quot;;
+
+    private LedgerIdFormatter ledgerIdFormatter;
+
+<span class="nc" id="L55">    private Consumer&lt;String&gt; print = this::printInfoLine;</span>
+
+    public void setPrint(Consumer&lt;String&gt; print) {
+<span class="nc" id="L58">        this.print = print;</span>
+<span class="nc" id="L59">    }</span>
+
+    public LedgerCommand() {
+<span class="nc" id="L62">        this(new LedgerFlags());</span>
+<span class="nc" id="L63">    }</span>
+
+    public LedgerCommand(LedgerIdFormatter ledgerIdFormatter) {
+<span class="nc" id="L66">        this(new LedgerFlags());</span>
+<span class="nc" id="L67">        this.ledgerIdFormatter = ledgerIdFormatter;</span>
+<span class="nc" id="L68">    }</span>
+
+    private LedgerCommand(LedgerFlags flags) {
+<span class="nc" id="L71">        super(CliSpec.&lt;LedgerFlags&gt;newBuilder().withName(NAME).withDescription(DESC).withFlags(flags).build());</span>
+<span class="nc" id="L72">    }</span>
+
+    /**
+     * Flags for ledger command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L78">    @Setter</span>
+<span class="nc" id="L79">    public static class LedgerFlags extends CliFlags {</span>
+
+        @Parameter(names = { &quot;-id&quot;, &quot;--ledgerId&quot; }, description = &quot;Specific ledger id&quot;, required = true)
+        private long ledgerId;
+
+        @Parameter(names = { &quot;-m&quot;, &quot;--meta&quot; }, description = &quot;Print meta information&quot;)
+        private boolean meta;
+
+<span class="nc" id="L87">        @Parameter(names = { &quot;-l&quot;, &quot;--ledgeridformatter&quot; }, description = &quot;Set ledger id formatter&quot;)</span>
+        private String ledgerIdFormatter = &quot;&quot;;
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, LedgerFlags cmdFlags) {
+<span class="nc" id="L93">        initLedgerIdFormatter(conf, cmdFlags);</span>
+<span class="nc" id="L94">        long ledgerId = cmdFlags.ledgerId;</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (conf.getLedgerStorageClass().equals(DbLedgerStorage.class.getName())) {</span>
+            // dump ledger info
+<span class="nc" id="L97">            return dumpLedgerInfo(ledgerId, conf);</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        } else if (conf.getLedgerStorageClass().equals(SortedLedgerStorage.class.getName())</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                || conf.getLedgerStorageClass().equals(InterleavedLedgerStorage.class.getName())) {</span>
+<span class="nc" id="L100">            ServerConfiguration tConf = new ServerConfiguration(conf);</span>
+<span class="nc" id="L101">            InterleavedLedgerStorage interleavedLedgerStorage = new InterleavedLedgerStorage();</span>
+            try {
+<span class="nc" id="L103">                BookieImpl.mountLedgerStorageOffline(tConf, interleavedLedgerStorage);</span>
+<span class="nc" id="L104">            } catch (IOException e) {</span>
+<span class="nc" id="L105">                throw new UncheckedExecutionException(e.getMessage(), e);</span>
+<span class="nc" id="L106">            }</span>
+
+<span class="nc bnc" id="L108" title="All 2 branches missed.">            if (cmdFlags.meta) {</span>
+                // print meta
+<span class="nc" id="L110">                printMeta(ledgerId, interleavedLedgerStorage);</span>
+            }
+
+            try {
+<span class="nc" id="L114">                print.accept(&quot;===== LEDGER: &quot; + ledgerIdFormatter.formatLedgerId(ledgerId) + &quot; =====&quot;);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                for (LedgerCache.PageEntries page : interleavedLedgerStorage.getIndexEntries(ledgerId)) {</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                    if (printPageEntries(page)) {</span>
+<span class="nc" id="L117">                        return true;</span>
+                    }
+<span class="nc" id="L119">                }</span>
+<span class="nc" id="L120">            } catch (IOException e) {</span>
+<span class="nc" id="L121">                LOG.error(&quot;Failed to read index page&quot;);</span>
+<span class="nc" id="L122">                return true;</span>
+<span class="nc" id="L123">            }</span>
+
+        }
+<span class="nc" id="L126">        return true;</span>
+    }
+
+    private void initLedgerIdFormatter(ServerConfiguration conf, LedgerFlags flags) {
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        if (flags.ledgerIdFormatter.equals(&quot;&quot;)) {</span>
+<span class="nc" id="L131">            this.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(conf);</span>
+        } else {
+<span class="nc" id="L133">            this.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(flags.ledgerIdFormatter, conf);</span>
+        }
+<span class="nc" id="L135">    }</span>
+
+    private boolean dumpLedgerInfo(long ledgerId, ServerConfiguration conf) {
+        try {
+<span class="nc" id="L139">            DbLedgerStorage.readLedgerIndexEntries(ledgerId, conf, (currentEntry, entryLogId, position) -&gt; System.out</span>
+<span class="nc" id="L140">                    .println(&quot;entry &quot; + currentEntry + &quot;\t:\t(log: &quot; + entryLogId + &quot;, pos: &quot; + position + &quot;)&quot;));</span>
+<span class="nc" id="L141">        } catch (IOException e) {</span>
+<span class="nc" id="L142">            System.err.printf(&quot;ERROR: initializing dbLedgerStorage %s&quot;, e.getMessage());</span>
+<span class="nc" id="L143">            return false;</span>
+<span class="nc" id="L144">        }</span>
+<span class="nc" id="L145">        return true;</span>
+    }
+
+    private void printMeta(long ledgerId, InterleavedLedgerStorage interleavedLedgerStorage) {
+<span class="nc" id="L149">        print.accept(&quot;===== LEDGER: &quot; + ledgerIdFormatter.formatLedgerId(ledgerId) + &quot; =====&quot;);</span>
+        try {
+<span class="nc" id="L151">            LedgerCache.LedgerIndexMetadata meta = interleavedLedgerStorage.readLedgerIndexMetadata(ledgerId);</span>
+<span class="nc" id="L152">            print.accept(&quot;master key  : &quot; + meta.getMasterKeyHex());</span>
+<span class="nc" id="L153">            long size = meta.size;</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">            if (size % 8 == 0) {</span>
+<span class="nc" id="L155">                print.accept(&quot;size         : &quot; + size);</span>
+            } else {
+<span class="nc" id="L157">                print.accept(&quot;size : &quot; + size + &quot;(not aligned with 8, may be corrupted or under flushing now)&quot;);</span>
+            }
+
+<span class="nc" id="L160">            print.accept(&quot;entries      : &quot; + (size / 8));</span>
+<span class="nc" id="L161">            print.accept(&quot;isFenced     : &quot; + meta.fenced);</span>
+<span class="nc" id="L162">        } catch (IOException e) {</span>
+<span class="nc" id="L163">            throw new UncheckedExecutionException(e.getMessage(), e);</span>
+<span class="nc" id="L164">        }</span>
+<span class="nc" id="L165">    }</span>
+
+    @SuppressFBWarnings(&quot;RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE&quot;)
+    private boolean printPageEntries(LedgerCache.PageEntries page) {
+<span class="nc" id="L169">        final MutableLong curEntry = new MutableLong(page.getFirstEntry());</span>
+<span class="nc" id="L170">        try (LedgerEntryPage lep = page.getLEP()) {</span>
+<span class="nc" id="L171">            lep.getEntries((entry, offset) -&gt; {</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                while (curEntry.longValue() &lt; entry) {</span>
+<span class="nc" id="L173">                    print.accept(&quot;entry &quot; + curEntry + &quot;\t:\tN/A&quot;);</span>
+<span class="nc" id="L174">                    curEntry.increment();</span>
+                }
+<span class="nc" id="L176">                long entryLogId = offset &gt;&gt; 32L;</span>
+<span class="nc" id="L177">                long pos = offset &amp; 0xffffffffL;</span>
+<span class="nc" id="L178">                print.accept(&quot;entry &quot; + curEntry + &quot;\t:\t(log:&quot; + entryLogId + &quot;, pos: &quot; + pos + &quot;)&quot;);</span>
+<span class="nc" id="L179">                curEntry.increment();</span>
+<span class="nc" id="L180">                return true;</span>
+            });
+<span class="nc" id="L182">        } catch (Exception e) {</span>
+<span class="nc" id="L183">            print.accept(</span>
+<span class="nc" id="L184">                    &quot;Failed to read index page @ &quot; + page.getFirstEntry() + &quot;, the index file may be corrupted : &quot; + e</span>
+<span class="nc" id="L185">                            .getMessage());</span>
+<span class="nc" id="L186">            return true;</span>
+<span class="nc" id="L187">        }</span>
+
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        while (curEntry.longValue() &lt; page.getLastEntry()) {</span>
+<span class="nc" id="L190">            print.accept(&quot;entry &quot; + curEntry + &quot;\t:\tN/A&quot;);</span>
+<span class="nc" id="L191">            curEntry.increment();</span>
+        }
+
+<span class="nc" id="L194">        return false;</span>
+    }
+
+
+    private void printInfoLine(String mes) {
+<span class="nc" id="L199">        System.out.println(mes);</span>
+<span class="nc" id="L200">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

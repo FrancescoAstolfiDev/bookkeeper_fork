@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FormatCommand.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookie</a> &gt; <span class="el_source">FormatCommand.java</span></div><h1>FormatCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.tools.cli.commands.bookie;
+
+import static org.apache.bookkeeper.meta.MetadataDrivers.runFunctionWithRegistrationManager;
+
+import com.beust.jcommander.Parameter;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import java.util.concurrent.ExecutionException;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.Cookie;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.exceptions.MetadataException;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Command to format the current server contents.
+ */
+public class FormatCommand extends BookieCommand&lt;FormatCommand.Flags&gt; {
+
+<span class="nc" id="L44">    static final Logger LOG = LoggerFactory.getLogger(FormatCommand.class);</span>
+
+    private static final String NAME = &quot;format&quot;;
+    private static final String DESC = &quot;Format the current server contents.&quot;;
+
+    public FormatCommand() {
+<span class="nc" id="L50">        this(new Flags());</span>
+<span class="nc" id="L51">    }</span>
+
+    public FormatCommand(Flags flags) {
+<span class="nc" id="L54">        super(CliSpec.&lt;Flags&gt;newBuilder()</span>
+<span class="nc" id="L55">            .withName(NAME)</span>
+<span class="nc" id="L56">            .withDescription(DESC)</span>
+<span class="nc" id="L57">            .withFlags(flags)</span>
+<span class="nc" id="L58">            .build());</span>
+<span class="nc" id="L59">    }</span>
+
+    /**
+     * Flags for format bookie command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L65">    @Setter</span>
+<span class="nc" id="L66">    public static class Flags extends CliFlags {</span>
+
+        @Parameter(names = {&quot;-n&quot;, &quot;--noninteractive&quot;},
+            description = &quot;Whether to confirm if old data exists?&quot;)
+        private boolean nonInteractive;
+
+        @Parameter(names = {&quot;-f&quot;, &quot;--force&quot;},
+            description = &quot;If [noninteractive] is specified, then whether&quot;
+                + &quot;to force delete the old data without prompt?&quot;)
+        private boolean force;
+
+        @Parameter(names = {&quot;-d&quot;, &quot;--deletecookie&quot;},
+            description = &quot;Delete its cookie on metadata store.&quot;)
+        private boolean deleteCookie;
+
+    }
+
+    @Override
+    public boolean apply(ServerConfiguration conf, Flags cmdFlags) {
+
+<span class="nc" id="L86">        ServerConfiguration bfconf = new ServerConfiguration(conf);</span>
+<span class="nc" id="L87">        boolean result = BookieImpl.format(bfconf, cmdFlags.nonInteractive, cmdFlags.force);</span>
+
+        // delete cookie
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (cmdFlags.deleteCookie) {</span>
+            try {
+<span class="nc" id="L92">                runFunctionWithRegistrationManager(conf, rm -&gt; {</span>
+
+                    try {
+<span class="nc" id="L95">                        Versioned&lt;Cookie&gt; cookie = Cookie.readFromRegistrationManager(rm, bfconf);</span>
+<span class="nc" id="L96">                        cookie.getValue().deleteFromRegistrationManager(rm, bfconf, cookie.getVersion());</span>
+<span class="nc" id="L97">                    } catch (Exception e) {</span>
+<span class="nc" id="L98">                        throw new UncheckedExecutionException(e.getMessage(), e);</span>
+<span class="nc" id="L99">                    }</span>
+
+<span class="nc" id="L101">                    return null;</span>
+                });
+<span class="nc" id="L103">            } catch (MetadataException | ExecutionException e) {</span>
+<span class="nc" id="L104">                throw new UncheckedExecutionException(e.getMessage(), e);</span>
+<span class="nc" id="L105">            }</span>
+        }
+<span class="nc" id="L107">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WriteEntryProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">WriteEntryProcessor.java</span></div><h1>WriteEntryProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.proto;
+
+import com.google.common.annotations.VisibleForTesting;
+import io.netty.buffer.ByteBuf;
+import io.netty.util.Recycler;
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.BookieException.OperationRejectedException;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookieProtocol.ParsedAddRequest;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.WriteCallback;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Processes add entry requests.
+ */
+class WriteEntryProcessor extends PacketProcessorBase&lt;ParsedAddRequest&gt; implements WriteCallback {
+
+<span class="nc" id="L39">    private static final Logger LOG = LoggerFactory.getLogger(WriteEntryProcessor.class);</span>
+
+    long startTimeNanos;
+
+    @Override
+    protected void reset() {
+<span class="nc" id="L45">        super.reset();</span>
+<span class="nc" id="L46">        startTimeNanos = -1L;</span>
+<span class="nc" id="L47">    }</span>
+
+    public static WriteEntryProcessor create(ParsedAddRequest request, BookieRequestHandler requestHandler,
+                                             BookieRequestProcessor requestProcessor) {
+<span class="nc" id="L51">        WriteEntryProcessor wep = RECYCLER.get();</span>
+<span class="nc" id="L52">        wep.init(request, requestHandler, requestProcessor);</span>
+<span class="nc" id="L53">        requestProcessor.onAddRequestStart(requestHandler.ctx().channel());</span>
+<span class="nc" id="L54">        return wep;</span>
+    }
+
+    @Override
+    protected void processPacket() {
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if (requestProcessor.getBookie().isReadOnly()</span>
+<span class="nc bnc" id="L60" title="All 4 branches missed.">            &amp;&amp; !(request.isHighPriority() &amp;&amp; requestProcessor.getBookie().isAvailableForHighPriorityWrites())) {</span>
+<span class="nc" id="L61">            LOG.warn(&quot;BookieServer is running in readonly mode,&quot;</span>
+                    + &quot; so rejecting the request from the client!&quot;);
+<span class="nc" id="L63">            sendWriteReqResponse(BookieProtocol.EREADONLY,</span>
+<span class="nc" id="L64">                         ResponseBuilder.buildErrorResponse(BookieProtocol.EREADONLY, request),</span>
+<span class="nc" id="L65">                         requestProcessor.getRequestStats().getAddRequestStats());</span>
+<span class="nc" id="L66">            request.release();</span>
+<span class="nc" id="L67">            request.recycle();</span>
+<span class="nc" id="L68">            recycle();</span>
+<span class="nc" id="L69">            return;</span>
+        }
+
+<span class="nc" id="L72">        startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L73">        int rc = BookieProtocol.EOK;</span>
+<span class="nc" id="L74">        ByteBuf addData = request.getData();</span>
+        try {
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if (request.isRecoveryAdd()) {</span>
+<span class="nc" id="L77">                requestProcessor.getBookie().recoveryAddEntry(addData, this, requestHandler, request.getMasterKey());</span>
+            } else {
+<span class="nc" id="L79">                requestProcessor.getBookie().addEntry(addData, false, this,</span>
+<span class="nc" id="L80">                        requestHandler, request.getMasterKey());</span>
+            }
+<span class="nc" id="L82">        } catch (OperationRejectedException e) {</span>
+<span class="nc" id="L83">            requestProcessor.getRequestStats().getAddEntryRejectedCounter().inc();</span>
+            // Avoid to log each occurrence of this exception as this can happen when the ledger storage is
+            // unable to keep up with the write rate.
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L87">                LOG.debug(&quot;Operation rejected while writing {}&quot;, request, e);</span>
+            }
+<span class="nc" id="L89">            rc = BookieProtocol.ETOOMANYREQUESTS;</span>
+<span class="nc" id="L90">        } catch (IOException e) {</span>
+<span class="nc" id="L91">            LOG.error(&quot;Error writing {}&quot;, request, e);</span>
+<span class="nc" id="L92">            rc = BookieProtocol.EIO;</span>
+<span class="nc" id="L93">        } catch (BookieException.LedgerFencedException lfe) {</span>
+<span class="nc" id="L94">            LOG.warn(&quot;Write attempt on fenced ledger {} by client {}&quot;, request.getLedgerId(),</span>
+<span class="nc" id="L95">                    requestHandler.ctx().channel().remoteAddress());</span>
+<span class="nc" id="L96">            rc = BookieProtocol.EFENCED;</span>
+<span class="nc" id="L97">        } catch (BookieException e) {</span>
+<span class="nc" id="L98">            LOG.error(&quot;Unauthorized access to ledger {}&quot;, request.getLedgerId(), e);</span>
+<span class="nc" id="L99">            rc = BookieProtocol.EUA;</span>
+<span class="nc" id="L100">        } catch (Throwable t) {</span>
+<span class="nc" id="L101">            LOG.error(&quot;Unexpected exception while writing {}@{} : {}&quot;,</span>
+<span class="nc" id="L102">                      request.ledgerId, request.entryId, t.getMessage(), t);</span>
+            // some bad request which cause unexpected exception
+<span class="nc" id="L104">            rc = BookieProtocol.EBADREQ;</span>
+<span class="nc" id="L105">        }</span>
+
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (rc != BookieProtocol.EOK) {</span>
+<span class="nc" id="L108">            requestProcessor.getRequestStats().getAddEntryStats()</span>
+<span class="nc" id="L109">                .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L110">            sendWriteReqResponse(rc,</span>
+<span class="nc" id="L111">                         ResponseBuilder.buildErrorResponse(rc, request),</span>
+<span class="nc" id="L112">                         requestProcessor.getRequestStats().getAddRequestStats());</span>
+<span class="nc" id="L113">            request.recycle();</span>
+<span class="nc" id="L114">            recycle();</span>
+        }
+<span class="nc" id="L116">    }</span>
+
+    @Override
+    public void writeComplete(int rc, long ledgerId, long entryId,
+                              BookieId addr, Object ctx) {
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (BookieProtocol.EOK == rc) {</span>
+<span class="nc" id="L122">            requestProcessor.getRequestStats().getAddEntryStats()</span>
+<span class="nc" id="L123">                .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L125">            requestProcessor.getRequestStats().getAddEntryStats()</span>
+<span class="nc" id="L126">                .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+        }
+
+<span class="nc" id="L129">        requestHandler.prepareSendResponseV2(rc, request);</span>
+<span class="nc" id="L130">        requestProcessor.onAddRequestFinish();</span>
+
+<span class="nc" id="L132">        request.recycle();</span>
+<span class="nc" id="L133">        recycle();</span>
+<span class="nc" id="L134">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L138">        return String.format(&quot;WriteEntry(%d, %d)&quot;,</span>
+<span class="nc" id="L139">                             request.getLedgerId(), request.getEntryId());</span>
+    }
+
+    @VisibleForTesting
+    void recycle() {
+<span class="nc" id="L144">        reset();</span>
+<span class="nc" id="L145">        recyclerHandle.recycle(this);</span>
+<span class="nc" id="L146">    }</span>
+
+    private final Recycler.Handle&lt;WriteEntryProcessor&gt; recyclerHandle;
+
+<span class="nc" id="L150">    private WriteEntryProcessor(Recycler.Handle&lt;WriteEntryProcessor&gt; recyclerHandle) {</span>
+<span class="nc" id="L151">        this.recyclerHandle = recyclerHandle;</span>
+<span class="nc" id="L152">    }</span>
+
+<span class="nc" id="L154">    private static final Recycler&lt;WriteEntryProcessor&gt; RECYCLER = new Recycler&lt;WriteEntryProcessor&gt;() {</span>
+        @Override
+        protected WriteEntryProcessor newObject(Handle&lt;WriteEntryProcessor&gt; handle) {
+<span class="nc" id="L157">            return new WriteEntryProcessor(handle);</span>
+        }
+    };
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

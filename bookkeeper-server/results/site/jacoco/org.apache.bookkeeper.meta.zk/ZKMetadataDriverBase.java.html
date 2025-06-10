@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ZKMetadataDriverBase.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta.zk</a> &gt; <span class="el_source">ZKMetadataDriverBase.java</span></div><h1>ZKMetadataDriverBase.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.meta.zk;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.bookkeeper.util.BookKeeperConstants.AVAILABLE_NODE;
+import static org.apache.bookkeeper.util.BookKeeperConstants.DISABLE_HEALTH_CHECK;
+import static org.apache.bookkeeper.util.BookKeeperConstants.EMPTY_BYTE_ARRAY;
+import static org.apache.bookkeeper.util.BookKeeperConstants.READONLY;
+
+import java.io.IOException;
+import java.net.URI;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.meta.AbstractZkLedgerManagerFactory;
+import org.apache.bookkeeper.meta.HierarchicalLedgerManagerFactory;
+import org.apache.bookkeeper.meta.LayoutManager;
+import org.apache.bookkeeper.meta.LedgerManagerFactory;
+import org.apache.bookkeeper.meta.LongHierarchicalLedgerManagerFactory;
+import org.apache.bookkeeper.meta.ZkLayoutManager;
+import org.apache.bookkeeper.meta.exceptions.Code;
+import org.apache.bookkeeper.meta.exceptions.MetadataException;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.BookKeeperConstants;
+import org.apache.bookkeeper.util.ZkUtils;
+import org.apache.bookkeeper.zookeeper.RetryPolicy;
+import org.apache.bookkeeper.zookeeper.ZooKeeperClient;
+import org.apache.commons.configuration2.ex.ConfigurationException;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.zookeeper.AsyncCallback;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.ACL;
+import org.apache.zookeeper.data.Stat;
+
+/**
+ * This is a mixin class for supporting zookeeper based metadata driver.
+ */
+<span class="nc" id="L65">@Slf4j</span>
+<span class="nc" id="L66">public class ZKMetadataDriverBase implements AutoCloseable {</span>
+
+    protected static final String SCHEME = &quot;zk&quot;;
+
+    protected volatile boolean metadataServiceAvailable;
+
+    private static final int ZK_CLIENT_WAIT_FOR_SHUTDOWN_TIMEOUT_MS = 5000;
+
+    public static String getZKServersFromServiceUri(URI uri) {
+<span class="nc" id="L75">        String authority = uri.getAuthority();</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        if (authority == null) {</span>
+<span class="nc" id="L77">            throw new IllegalArgumentException(&quot;Invalid metadata service URI format: &quot; + uri);</span>
+        }
+<span class="nc" id="L79">        return authority.replace(&quot;;&quot;, &quot;,&quot;);</span>
+    }
+
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public static String resolveZkServers(AbstractConfiguration&lt;?&gt; conf) {
+<span class="nc" id="L84">        String metadataServiceUriStr = conf.getMetadataServiceUriUnchecked();</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (null == metadataServiceUriStr) {</span>
+<span class="nc" id="L86">            return conf.getZkServers();</span>
+        }
+<span class="nc" id="L88">        URI metadataServiceUri = URI.create(metadataServiceUriStr);</span>
+<span class="nc" id="L89">        return getZKServersFromServiceUri(metadataServiceUri);</span>
+    }
+
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public static String resolveZkLedgersRootPath(AbstractConfiguration&lt;?&gt; conf) {
+<span class="nc" id="L94">        String metadataServiceUriStr = conf.getMetadataServiceUriUnchecked();</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (null == metadataServiceUriStr) {</span>
+<span class="nc" id="L96">            return conf.getZkLedgersRootPath();</span>
+        }
+<span class="nc" id="L98">        URI metadataServiceUri = URI.create(metadataServiceUriStr);</span>
+<span class="nc" id="L99">        return metadataServiceUri.getPath();</span>
+    }
+
+    @SuppressWarnings(&quot;deprecation&quot;)
+    public static Class&lt;? extends LedgerManagerFactory&gt; resolveLedgerManagerFactory(URI metadataServiceUri) {
+<span class="nc" id="L104">        checkNotNull(metadataServiceUri, &quot;Metadata service uri is null&quot;);</span>
+<span class="nc" id="L105">        String scheme = metadataServiceUri.getScheme();</span>
+<span class="nc" id="L106">        checkNotNull(scheme, &quot;Invalid metadata service : &quot; + metadataServiceUri);</span>
+<span class="nc" id="L107">        String[] schemeParts = StringUtils.split(scheme.toLowerCase(), '+');</span>
+<span class="nc" id="L108">        checkArgument(SCHEME.equals(schemeParts[0]), &quot;Unknown metadata service scheme found : &quot;</span>
+            + schemeParts[0]);
+        Class&lt;? extends LedgerManagerFactory&gt; ledgerManagerFactoryClass;
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (schemeParts.length &gt; 1) {</span>
+<span class="nc bnc" id="L112" title="All 6 branches missed.">            switch (schemeParts[1]) {</span>
+                case org.apache.bookkeeper.meta.FlatLedgerManagerFactory.NAME:
+<span class="nc" id="L114">                    ledgerManagerFactoryClass = org.apache.bookkeeper.meta.FlatLedgerManagerFactory.class;</span>
+<span class="nc" id="L115">                    break;</span>
+                case HierarchicalLedgerManagerFactory.NAME:
+<span class="nc" id="L117">                    ledgerManagerFactoryClass = HierarchicalLedgerManagerFactory.class;</span>
+<span class="nc" id="L118">                    break;</span>
+                case LongHierarchicalLedgerManagerFactory.NAME:
+<span class="nc" id="L120">                    ledgerManagerFactoryClass = LongHierarchicalLedgerManagerFactory.class;</span>
+<span class="nc" id="L121">                    break;</span>
+                case org.apache.bookkeeper.meta.MSLedgerManagerFactory.NAME:
+<span class="nc" id="L123">                    ledgerManagerFactoryClass = org.apache.bookkeeper.meta.MSLedgerManagerFactory.class;</span>
+<span class="nc" id="L124">                    break;</span>
+                case &quot;null&quot;:
+                    // the ledger manager factory class is not set, so the client will be using the class that is
+                    // recorded in ledger manager layout.
+<span class="nc" id="L128">                    ledgerManagerFactoryClass = null;</span>
+<span class="nc" id="L129">                    break;</span>
+                default:
+<span class="nc" id="L131">                    throw new IllegalArgumentException(&quot;Unknown ledger manager type found '&quot;</span>
+                        + schemeParts[1] + &quot;' at uri : &quot; + metadataServiceUri);
+            }
+        } else {
+            // behave as in the +null case, infer the layout from the store or fall back to the default
+<span class="nc" id="L136">            ledgerManagerFactoryClass = null;</span>
+        }
+<span class="nc" id="L138">        return ledgerManagerFactoryClass;</span>
+    }
+
+    // URI
+    protected AbstractConfiguration&lt;?&gt; conf;
+    protected StatsLogger statsLogger;
+
+    // zookeeper related variables
+    protected List&lt;ACL&gt; acls;
+<span class="nc" id="L147">    @Getter</span>
+<span class="nc" id="L148">    @Setter</span>
+    protected ZooKeeper zk = null;
+    // whether the zk handle is one we created, or is owned by whoever
+    // instantiated us
+<span class="nc" id="L152">    protected boolean ownZKHandle = false;</span>
+
+    // disable health check path
+    String disableHealthCheckPath;
+
+    // ledgers root path
+    protected String ledgersRootPath;
+
+    // managers
+    protected LayoutManager layoutManager;
+    protected LedgerManagerFactory lmFactory;
+
+    public String getScheme() {
+<span class="nc" id="L165">        return SCHEME;</span>
+    }
+
+    @SuppressWarnings(&quot;deprecation&quot;)
+<span class="nc" id="L169">    @SneakyThrows(InterruptedException.class)</span>
+    protected void initialize(AbstractConfiguration&lt;?&gt; conf,
+                              StatsLogger statsLogger,
+                              RetryPolicy zkRetryPolicy,
+                              Optional&lt;Object&gt; optionalCtx) throws MetadataException {
+<span class="nc" id="L174">        this.conf = conf;</span>
+<span class="nc" id="L175">        this.acls = ZkUtils.getACLs(conf);</span>
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if (optionalCtx.isPresent()</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">            &amp;&amp; optionalCtx.get() instanceof ZooKeeper) {</span>
+<span class="nc" id="L179">            this.ledgersRootPath = conf.getZkLedgersRootPath();</span>
+
+<span class="nc" id="L181">            log.info(&quot;Initialize zookeeper metadata driver with external zookeeper client : ledgersRootPath = {}.&quot;,</span>
+                ledgersRootPath);
+
+            // if an external zookeeper is added, use the zookeeper instance
+<span class="nc" id="L185">            this.zk = (ZooKeeper) (optionalCtx.get());</span>
+<span class="nc" id="L186">            this.ownZKHandle = false;</span>
+<span class="nc" id="L187">            this.metadataServiceAvailable = true;</span>
+        } else {
+            final String metadataServiceUriStr;
+            try {
+<span class="nc" id="L191">                metadataServiceUriStr = conf.getMetadataServiceUri();</span>
+<span class="nc" id="L192">            } catch (ConfigurationException e) {</span>
+<span class="nc" id="L193">                log.error(&quot;Failed to retrieve metadata service uri from configuration&quot;, e);</span>
+<span class="nc" id="L194">                throw new MetadataException(</span>
+                    Code.INVALID_METADATA_SERVICE_URI, e);
+<span class="nc" id="L196">            }</span>
+
+<span class="nc" id="L198">            URI metadataServiceUri = URI.create(metadataServiceUriStr);</span>
+            // get the initialize root path
+<span class="nc" id="L200">            this.ledgersRootPath = metadataServiceUri.getPath();</span>
+<span class="nc" id="L201">            final String bookieRegistrationPath = ledgersRootPath + &quot;/&quot; + AVAILABLE_NODE;</span>
+<span class="nc" id="L202">            final String bookieReadonlyRegistrationPath = bookieRegistrationPath + &quot;/&quot; + READONLY;</span>
+
+            // construct the zookeeper
+            final String zkServers;
+            try {
+<span class="nc" id="L207">                zkServers = getZKServersFromServiceUri(metadataServiceUri);</span>
+<span class="nc" id="L208">            } catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L209">                throw new MetadataException(</span>
+                        Code.INVALID_METADATA_SERVICE_URI, ex);
+<span class="nc" id="L211">            }</span>
+<span class="nc" id="L212">            log.info(&quot;Initialize zookeeper metadata driver at metadata service uri {} :&quot;</span>
+                + &quot; zkServers = {}, ledgersRootPath = {}.&quot;, metadataServiceUriStr, zkServers, ledgersRootPath);
+
+            try {
+<span class="nc" id="L216">                this.zk = ZooKeeperClient.newBuilder()</span>
+<span class="nc" id="L217">                    .connectString(zkServers)</span>
+<span class="nc" id="L218">                    .sessionTimeoutMs(conf.getZkTimeout())</span>
+<span class="nc" id="L219">                    .operationRetryPolicy(zkRetryPolicy)</span>
+<span class="nc" id="L220">                    .requestRateLimit(conf.getZkRequestRateLimit())</span>
+<span class="nc" id="L221">                    .watchers(Collections.singleton(watchedEvent -&gt; {</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L223">                            log.debug(&quot;Got ZK session watch event: {}&quot;, watchedEvent);</span>
+                        }
+<span class="nc" id="L225">                        handleState(watchedEvent.getState());</span>
+<span class="nc" id="L226">                    }))</span>
+<span class="nc" id="L227">                    .statsLogger(statsLogger)</span>
+<span class="nc" id="L228">                    .build();</span>
+
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                if (null == zk.exists(bookieReadonlyRegistrationPath, false)) {</span>
+                    try {
+<span class="nc" id="L232">                        zk.create(bookieReadonlyRegistrationPath,</span>
+                            EMPTY_BYTE_ARRAY,
+                            acls,
+                            CreateMode.PERSISTENT);
+<span class="nc" id="L236">                    } catch (KeeperException.NodeExistsException e) {</span>
+                        // this node is just now created by someone.
+<span class="nc" id="L238">                    } catch (KeeperException.NoNodeException e) {</span>
+                        // the cluster hasn't been initialized
+<span class="nc" id="L240">                    }</span>
+                }
+<span class="nc" id="L242">            } catch (IOException | KeeperException e) {</span>
+<span class="nc" id="L243">                log.error(&quot;Failed to create zookeeper client to {}&quot;, zkServers, e);</span>
+<span class="nc" id="L244">                MetadataException me = new MetadataException(</span>
+                    Code.METADATA_SERVICE_ERROR,
+                    &quot;Failed to create zookeeper client to &quot; + zkServers,
+                    e);
+<span class="nc" id="L248">                me.fillInStackTrace();</span>
+<span class="nc" id="L249">                throw me;</span>
+<span class="nc" id="L250">            }</span>
+<span class="nc" id="L251">            this.ownZKHandle = true;</span>
+        }
+
+<span class="nc" id="L254">        disableHealthCheckPath = ledgersRootPath + &quot;/&quot; + DISABLE_HEALTH_CHECK;</span>
+        // once created the zookeeper client, create the layout manager and registration client
+<span class="nc" id="L256">        this.layoutManager = new ZkLayoutManager(</span>
+            zk,
+            ledgersRootPath,
+            acls);
+<span class="nc" id="L260">    }</span>
+
+    private void handleState(Watcher.Event.KeeperState zkClientState) {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        switch (zkClientState) {</span>
+            case Expired:
+            case Disconnected:
+<span class="nc" id="L266">                this.metadataServiceAvailable = false;</span>
+<span class="nc" id="L267">                break;</span>
+            default:
+<span class="nc" id="L269">                this.metadataServiceAvailable = true;</span>
+        }
+<span class="nc" id="L271">    }</span>
+
+    public LayoutManager getLayoutManager() {
+<span class="nc" id="L274">        return layoutManager;</span>
+    }
+
+<span class="nc" id="L277">    @SneakyThrows</span>
+    public synchronized LedgerManagerFactory getLedgerManagerFactory()
+            throws MetadataException {
+<span class="nc bnc" id="L280" title="All 2 branches missed.">        if (null == lmFactory) {</span>
+            try {
+<span class="nc" id="L282">                lmFactory = AbstractZkLedgerManagerFactory.newLedgerManagerFactory(</span>
+                    conf,
+                    layoutManager);
+<span class="nc" id="L285">            } catch (IOException e) {</span>
+<span class="nc" id="L286">                throw new MetadataException(</span>
+                    Code.METADATA_SERVICE_ERROR, &quot;Failed to initialized ledger manager factory&quot;, e);
+<span class="nc" id="L288">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L289">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L290">                throw e;</span>
+<span class="nc" id="L291">            }</span>
+        }
+<span class="nc" id="L293">        return lmFactory;</span>
+    }
+
+    public CompletableFuture&lt;Void&gt; disableHealthCheck() {
+<span class="nc" id="L297">        CompletableFuture&lt;Void&gt; createResult = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L298">        zk.create(disableHealthCheckPath, BookKeeperConstants.EMPTY_BYTE_ARRAY, acls,</span>
+<span class="nc" id="L299">                CreateMode.PERSISTENT, new AsyncCallback.StringCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx, String name) {
+<span class="nc bnc" id="L302" title="All 2 branches missed.">                if (KeeperException.Code.OK.intValue() == rc) {</span>
+<span class="nc" id="L303">                    createResult.complete(null);</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">                } else if (KeeperException.Code.NODEEXISTS.intValue() == rc) {</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L306">                        log.debug(&quot;health check already disabled!&quot;);</span>
+                    }
+<span class="nc" id="L308">                    createResult.complete(null);</span>
+                } else {
+<span class="nc" id="L310">                    createResult.completeExceptionally(KeeperException.create(KeeperException.Code.get(rc), path));</span>
+                }
+<span class="nc" id="L312">            }</span>
+        }, null);
+
+<span class="nc" id="L315">        return createResult;</span>
+    }
+
+    public CompletableFuture&lt;Void&gt; enableHealthCheck() {
+<span class="nc" id="L319">        CompletableFuture&lt;Void&gt; deleteResult = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L321">        zk.delete(disableHealthCheckPath, -1, new AsyncCallback.VoidCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                if (KeeperException.Code.OK.intValue() == rc) {</span>
+<span class="nc" id="L325">                    deleteResult.complete(null);</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                } else if (KeeperException.Code.NONODE.intValue() == rc) {</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L328">                        log.debug(&quot;health check already enabled!&quot;);</span>
+                    }
+<span class="nc" id="L330">                    deleteResult.complete(null);</span>
+                } else {
+<span class="nc" id="L332">                    deleteResult.completeExceptionally(KeeperException.create(KeeperException.Code.get(rc), path));</span>
+                }
+<span class="nc" id="L334">            }</span>
+        }, null);
+
+<span class="nc" id="L337">        return deleteResult;</span>
+    }
+
+    public CompletableFuture&lt;Boolean&gt; isHealthCheckEnabled() {
+<span class="nc" id="L341">        CompletableFuture&lt;Boolean&gt; enableResult = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L342">        zk.exists(disableHealthCheckPath, false, new AsyncCallback.StatCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx, Stat stat) {
+<span class="nc bnc" id="L345" title="All 2 branches missed.">                if (KeeperException.Code.OK.intValue() == rc) {</span>
+<span class="nc" id="L346">                    enableResult.complete(false);</span>
+                } else {
+<span class="nc" id="L348">                    enableResult.complete(true);</span>
+                }
+<span class="nc" id="L350">            }</span>
+        }, null);
+
+<span class="nc" id="L353">        return enableResult;</span>
+    }
+
+    @Override
+    public void close() {
+<span class="nc bnc" id="L358" title="All 2 branches missed.">        if (null != lmFactory) {</span>
+            try {
+<span class="nc" id="L360">                lmFactory.close();</span>
+<span class="nc" id="L361">            } catch (IOException e) {</span>
+<span class="nc" id="L362">                log.warn(&quot;Failed to close zookeeper based ledger manager&quot;, e);</span>
+<span class="nc" id="L363">            }</span>
+<span class="nc" id="L364">            lmFactory = null;</span>
+        }
+<span class="nc bnc" id="L366" title="All 4 branches missed.">        if (ownZKHandle &amp;&amp; null != zk) {</span>
+            try {
+<span class="nc" id="L368">                zk.close(ZK_CLIENT_WAIT_FOR_SHUTDOWN_TIMEOUT_MS);</span>
+<span class="nc" id="L369">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L370">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L371">                log.warn(&quot;Interrupted on closing zookeeper client&quot;, e);</span>
+<span class="nc" id="L372">            }</span>
+<span class="nc" id="L373">            zk = null;</span>
+        }
+<span class="nc" id="L375">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

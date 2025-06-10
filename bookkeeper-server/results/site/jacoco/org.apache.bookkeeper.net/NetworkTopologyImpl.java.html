@@ -1,0 +1,939 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>NetworkTopologyImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.net</a> &gt; <span class="el_source">NetworkTopologyImpl.java</span></div><h1>NetworkTopologyImpl.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.net;
+
+import com.google.common.base.Strings;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The class represents a cluster of computer with a tree hierarchical
+ * network topology.
+ * For example, a cluster may be consists of many data centers filled
+ * with racks of computers.
+ * In a network topology, leaves represent data nodes (computers) and inner
+ * nodes represent switches/routers that manage traffic in/out of data centers
+ * or racks.
+ *
+ */
+public class NetworkTopologyImpl implements NetworkTopology {
+
+    public static final int DEFAULT_HOST_LEVEL = 2;
+<span class="nc" id="L46">    public static final Logger LOG = LoggerFactory.getLogger(NetworkTopologyImpl.class);</span>
+    public static final String NODE_SEPARATOR = &quot;,&quot;;
+    public static final String INVERSE = &quot;~&quot;;
+
+    /**
+     * A marker for an InvalidTopology Exception.
+     */
+    public static class InvalidTopologyException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        public InvalidTopologyException(String msg) {
+<span class="nc" id="L57">            super(msg);</span>
+<span class="nc" id="L58">        }</span>
+    }
+
+    /** InnerNode represents a switch/router of a data center or rack.
+     * Different from a leaf node, it has non-null children.
+     */
+    static class InnerNode extends NodeBase {
+<span class="nc" id="L65">        protected List&lt;Node&gt; children = new ArrayList&lt;Node&gt;();</span>
+        private int numOfLeaves;
+
+        /**
+         * Construct an InnerNode from a path-like string.
+         */
+        InnerNode(String path) {
+<span class="nc" id="L72">            super(path);</span>
+<span class="nc" id="L73">        }</span>
+
+        /**
+         * Construct an InnerNode from its name and its network location.
+         */
+        InnerNode(String name, String location) {
+<span class="nc" id="L79">            super(name, location);</span>
+<span class="nc" id="L80">        }</span>
+
+        /**
+         * Construct an InnerNode from its name, its network location, its parent, and its level.
+         */
+        InnerNode(String name, String location, InnerNode parent, int level) {
+<span class="nc" id="L86">            super(name, location, parent, level);</span>
+<span class="nc" id="L87">        }</span>
+
+        /**
+         * @return its children
+         */
+        List&lt;Node&gt; getChildren() {
+<span class="nc" id="L93">            return children;</span>
+        }
+
+        /**
+         * @return the number of children this node has
+         */
+        int getNumOfChildren() {
+<span class="nc" id="L100">            return children.size();</span>
+        }
+
+        /**
+         * Judge if this node represents a rack.
+         * @return true if it has no child or its children are not InnerNodes
+         */
+        boolean isRack() {
+<span class="nc bnc" id="L108" title="All 2 branches missed.">            if (children.isEmpty()) {</span>
+<span class="nc" id="L109">                return true;</span>
+            }
+
+<span class="nc" id="L112">            Node firstChild = children.get(0);</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            return !(firstChild instanceof InnerNode);</span>
+        }
+
+        /**
+         * Judge if this node is an ancestor of node &lt;i&gt;n&lt;/i&gt;.
+         *
+         * @param n a node
+         * @return true if this node is an ancestor of &lt;i&gt;n&lt;/i&gt;
+         */
+        boolean isAncestor(Node n) {
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            return !Strings.isNullOrEmpty(n.getNetworkLocation())</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">                &amp;&amp; (getPath(this).equals(NodeBase.PATH_SEPARATOR_STR)</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                    || (n.getNetworkLocation() + NodeBase.PATH_SEPARATOR_STR).startsWith(getPath(this)</span>
+                            + NodeBase.PATH_SEPARATOR_STR));
+        }
+
+        /**
+         * Judge if this node is the parent of node &lt;i&gt;n&lt;/i&gt;.
+         *
+         * @param n a node
+         * @return true if this node is the parent of &lt;i&gt;n&lt;/i&gt;
+         */
+        boolean isParent(Node n) {
+<span class="nc" id="L136">            return n.getNetworkLocation().equals(getPath(this));</span>
+        }
+
+        /**
+         * Return a child name of this node who is an ancestor of node &lt;i&gt;n&lt;/i&gt;.
+         */
+        private String getNextAncestorName(Node n) {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">            if (!isAncestor(n)) {</span>
+<span class="nc" id="L144">                throw new IllegalArgumentException(this + &quot;is not an ancestor of &quot; + n);</span>
+            }
+<span class="nc" id="L146">            String name = n.getNetworkLocation().substring(getPath(this).length());</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">            if (name.charAt(0) == PATH_SEPARATOR) {</span>
+<span class="nc" id="L148">                name = name.substring(1);</span>
+            }
+<span class="nc" id="L150">            int index = name.indexOf(PATH_SEPARATOR);</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            if (index != -1) {</span>
+<span class="nc" id="L152">                name = name.substring(0, index);</span>
+            }
+<span class="nc" id="L154">            return name;</span>
+        }
+
+        /**
+         * Add node &lt;i&gt;n&lt;/i&gt; to the subtree of this node.
+         * @param n node to be added
+         * @return true if the node is added; false otherwise
+         */
+        boolean add(Node n) {
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (!isAncestor(n)) {</span>
+<span class="nc" id="L164">                throw new IllegalArgumentException(n.getName() + &quot;, which is located at &quot; + n.getNetworkLocation()</span>
+<span class="nc" id="L165">                        + &quot;, is not a descendent of &quot; + getPath(this));</span>
+            }
+<span class="nc bnc" id="L167" title="All 2 branches missed.">            if (isParent(n)) {</span>
+                // this node is the parent of n; add n directly
+<span class="nc" id="L169">                n.setParent(this);</span>
+<span class="nc" id="L170">                n.setLevel(this.level + 1);</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">                for (int i = 0; i &lt; children.size(); i++) {</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                    if (children.get(i).getName().equals(n.getName())) {</span>
+<span class="nc" id="L173">                        children.set(i, n);</span>
+<span class="nc" id="L174">                        return false;</span>
+                    }
+                }
+<span class="nc" id="L177">                children.add(n);</span>
+<span class="nc" id="L178">                numOfLeaves++;</span>
+<span class="nc" id="L179">                return true;</span>
+            } else {
+                // find the next ancestor node
+<span class="nc" id="L182">                String parentName = getNextAncestorName(n);</span>
+<span class="nc" id="L183">                InnerNode parentNode = null;</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                for (int i = 0; i &lt; children.size(); i++) {</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                    if (children.get(i).getName().equals(parentName)) {</span>
+<span class="nc" id="L186">                        parentNode = (InnerNode) children.get(i);</span>
+<span class="nc" id="L187">                        break;</span>
+                    }
+                }
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (parentNode == null) {</span>
+                    // create a new InnerNode
+<span class="nc" id="L192">                    parentNode = createParentNode(parentName);</span>
+<span class="nc" id="L193">                    children.add(parentNode);</span>
+                }
+                // add n to the subtree of the next ancestor node
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                if (parentNode.add(n)) {</span>
+<span class="nc" id="L197">                    numOfLeaves++;</span>
+<span class="nc" id="L198">                    return true;</span>
+                } else {
+<span class="nc" id="L200">                    return false;</span>
+                }
+            }
+        }
+
+        /**
+         * Creates a parent node to be added to the list of children.
+         * Creates a node using the InnerNode four argument constructor specifying
+         * the name, location, parent, and level of this node.
+         *
+         * &lt;p&gt;To be overridden in subclasses for specific InnerNode implementations,
+         * as alternative to overriding the full {@link #add(Node)} method.
+         *
+         * @param parentName The name of the parent node
+         * @return A new inner node
+         * @see InnerNode#InnerNode(String, String, InnerNode, int)
+         */
+        protected InnerNode createParentNode(String parentName) {
+<span class="nc" id="L218">            return new InnerNode(parentName, getPath(this), this, this.getLevel() + 1);</span>
+        }
+
+        /**
+         * Remove node &lt;i&gt;n&lt;/i&gt; from the subtree of this node.
+         * @param n node to be deleted
+         * @return true if the node is deleted; false otherwise
+         */
+        boolean remove(Node n) {
+<span class="nc" id="L227">            String parent = n.getNetworkLocation();</span>
+<span class="nc" id="L228">            String currentPath = getPath(this);</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">            if (!isAncestor(n)) {</span>
+<span class="nc" id="L230">                throw new IllegalArgumentException(n.getName() + &quot;, which is located at &quot; + parent</span>
+                        + &quot;, is not a descendent of &quot; + currentPath);
+            }
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            if (isParent(n)) {</span>
+                // this node is the parent of n; remove n directly
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                for (int i = 0; i &lt; children.size(); i++) {</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                    if (children.get(i).getName().equals(n.getName())) {</span>
+<span class="nc" id="L237">                        children.remove(i);</span>
+<span class="nc" id="L238">                        numOfLeaves--;</span>
+<span class="nc" id="L239">                        n.setParent(null);</span>
+<span class="nc" id="L240">                        return true;</span>
+                    }
+                }
+<span class="nc" id="L243">                return false;</span>
+            } else {
+                // find the next ancestor node: the parent node
+<span class="nc" id="L246">                String parentName = getNextAncestorName(n);</span>
+<span class="nc" id="L247">                InnerNode parentNode = null;</span>
+                int i;
+<span class="nc bnc" id="L249" title="All 2 branches missed.">                for (i = 0; i &lt; children.size(); i++) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">                    if (children.get(i).getName().equals(parentName)) {</span>
+<span class="nc" id="L251">                        parentNode = (InnerNode) children.get(i);</span>
+<span class="nc" id="L252">                        break;</span>
+                    }
+                }
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                if (parentNode == null) {</span>
+<span class="nc" id="L256">                    return false;</span>
+                }
+                // remove n from the parent node
+<span class="nc" id="L259">                boolean isRemoved = parentNode.remove(n);</span>
+                // if the parent node has no children, remove the parent node too
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                if (isRemoved) {</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                    if (parentNode.getNumOfChildren() == 0) {</span>
+<span class="nc" id="L263">                        children.remove(i);</span>
+                    }
+<span class="nc" id="L265">                    numOfLeaves--;</span>
+                }
+<span class="nc" id="L267">                return isRemoved;</span>
+            }
+        } // end of remove
+
+        /**
+         * Given a node's string representation, return a reference to the node.
+         * @param loc string location of the form /rack/node
+         * @return null if the node is not found or the childnode is there but
+         * not an instance of {@link InnerNode}
+         */
+        private Node getLoc(String loc) {
+<span class="nc bnc" id="L278" title="All 4 branches missed.">            if (loc == null || loc.length() == 0) {</span>
+<span class="nc" id="L279">                return this;</span>
+            }
+
+<span class="nc" id="L282">            String[] path = loc.split(PATH_SEPARATOR_STR, 2);</span>
+<span class="nc" id="L283">            Node childnode = null;</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            for (int i = 0; i &lt; children.size(); i++) {</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">                if (children.get(i).getName().equals(path[0])) {</span>
+<span class="nc" id="L286">                    childnode = children.get(i);</span>
+                }
+            }
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            if (childnode == null) {</span>
+<span class="nc" id="L290">                return null; // non-existing node</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">            } else if (path.length == 1) {</span>
+<span class="nc" id="L292">                return childnode;</span>
+<span class="nc bnc" id="L293" title="All 2 branches missed.">            } else if (childnode instanceof InnerNode) {</span>
+<span class="nc" id="L294">                return ((InnerNode) childnode).getLoc(path[1]);</span>
+            } else {
+<span class="nc" id="L296">                return null;</span>
+            }
+        }
+
+        /**
+         * Get &lt;i&gt;leafIndex&lt;/i&gt; leaf of this subtree
+         * if it is not in the &lt;i&gt;excludedNode&lt;/i&gt;.
+         *
+         * @param leafIndex an indexed leaf of the node
+         * @param excludedNode an excluded node (can be null)
+         * @return
+         */
+        Node getLeaf(int leafIndex, Node excludedNode) {
+<span class="nc" id="L309">            int count = 0;</span>
+            // check if the excluded node a leaf
+<span class="nc bnc" id="L311" title="All 4 branches missed.">            boolean isLeaf = excludedNode == null || !(excludedNode instanceof InnerNode);</span>
+            // calculate the total number of excluded leaf nodes
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            int numOfExcludedLeaves = isLeaf ? 1 : ((InnerNode) excludedNode).getNumOfLeaves();</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">            if (isLeafParent()) { // children are leaves</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">                if (isLeaf) { // excluded node is a leaf node</span>
+<span class="nc" id="L316">                    int excludedIndex = children.indexOf(excludedNode);</span>
+<span class="nc bnc" id="L317" title="All 4 branches missed.">                    if (excludedIndex != -1 &amp;&amp; leafIndex &gt;= 0) {</span>
+                        // excluded node is one of the children so adjust the leaf index
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                        leafIndex = leafIndex &gt;= excludedIndex ? leafIndex + 1 : leafIndex;</span>
+                    }
+                }
+                // range check
+<span class="nc bnc" id="L323" title="All 4 branches missed.">                if (leafIndex &lt; 0 || leafIndex &gt;= this.getNumOfChildren()) {</span>
+<span class="nc" id="L324">                    return null;</span>
+                }
+<span class="nc" id="L326">                return children.get(leafIndex);</span>
+            } else {
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                for (int i = 0; i &lt; children.size(); i++) {</span>
+<span class="nc" id="L329">                    InnerNode child = (InnerNode) children.get(i);</span>
+<span class="nc bnc" id="L330" title="All 4 branches missed.">                    if (excludedNode == null || excludedNode != child) {</span>
+                        // not the excludedNode
+<span class="nc" id="L332">                        int numOfLeaves = child.getNumOfLeaves();</span>
+<span class="nc bnc" id="L333" title="All 4 branches missed.">                        if (excludedNode != null &amp;&amp; child.isAncestor(excludedNode)) {</span>
+<span class="nc" id="L334">                            numOfLeaves -= numOfExcludedLeaves;</span>
+                        }
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                        if (count + numOfLeaves &gt; leafIndex) {</span>
+                            // the leaf is in the child subtree
+<span class="nc" id="L338">                            return child.getLeaf(leafIndex - count, excludedNode);</span>
+                        } else {
+                            // go to the next child
+<span class="nc" id="L341">                            count = count + numOfLeaves;</span>
+                        }
+<span class="nc" id="L343">                    } else { // it is the excluededNode</span>
+                        // skip it and set the excludedNode to be null
+<span class="nc" id="L345">                        excludedNode = null;</span>
+                    }
+                }
+<span class="nc" id="L348">                return null;</span>
+            }
+        }
+
+        protected boolean isLeafParent() {
+<span class="nc" id="L353">            return isRack();</span>
+        }
+
+        /**
+          * Determine if children a leaves, default implementation calls {@link #isRack()}.
+          *
+          * &lt;p&gt;To be overridden in subclasses for specific InnerNode implementations,
+          * as alternative to overriding the full {@link #getLeaf(int, Node)} method.
+          *
+          * @return true if children are leaves, false otherwise
+          */
+        protected boolean areChildrenLeaves() {
+<span class="nc" id="L365">            return isRack();</span>
+        }
+
+        /**
+         * Get number of leaves.
+         */
+        int getNumOfLeaves() {
+<span class="nc" id="L372">            return numOfLeaves;</span>
+        }
+    } // end of InnerNode
+
+    /**
+     * The root cluster map.
+     */
+    InnerNode clusterMap;
+    /**
+     * Depth of all leaf nodes.
+     */
+<span class="nc" id="L383">    private int depthOfAllLeaves = -1;</span>
+    /**
+     * Rack counter.
+     */
+<span class="nc" id="L387">    protected int numOfRacks = 0;</span>
+    /**
+     * The lock used to manage access.
+     */
+<span class="nc" id="L391">    protected ReadWriteLock netlock = new ReentrantReadWriteLock();</span>
+
+<span class="nc" id="L393">    public NetworkTopologyImpl() {</span>
+<span class="nc" id="L394">        clusterMap = new InnerNode(InnerNode.ROOT);</span>
+<span class="nc" id="L395">    }</span>
+
+    /**
+     * Add a leaf node.
+     * Update node counter and rack counter if necessary
+     * @param node node to be added; can be null
+     * @exception IllegalArgumentException if add a node to a leave
+                                           or node to be added is not a leaf
+     */
+    @Override
+    public void add(Node node) {
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if (node == null) {</span>
+<span class="nc" id="L407">            return;</span>
+        }
+<span class="nc" id="L409">        String oldTopoStr = this.toString();</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if (node instanceof InnerNode) {</span>
+<span class="nc" id="L411">            throw new IllegalArgumentException(&quot;Not allow to add an inner node: &quot; + NodeBase.getPath(node));</span>
+        }
+<span class="nc" id="L413">        int newDepth = NodeBase.locationToDepth(node.getNetworkLocation()) + 1;</span>
+<span class="nc" id="L414">        netlock.writeLock().lock();</span>
+        try {
+<span class="nc bnc" id="L416" title="All 4 branches missed.">            if ((depthOfAllLeaves != -1) &amp;&amp; (depthOfAllLeaves != newDepth)) {</span>
+<span class="nc" id="L417">                LOG.error(&quot;Error: can't add leaf node {} at depth {} to topology:\n{}&quot;, node, newDepth, oldTopoStr);</span>
+<span class="nc" id="L418">                throw new InvalidTopologyException(&quot;Invalid network topology. &quot;</span>
+                        + &quot;You cannot have a rack and a non-rack node at the same level of the network topology.&quot;);
+            }
+<span class="nc" id="L421">            Node rack = getNodeForNetworkLocation(node);</span>
+<span class="nc bnc" id="L422" title="All 4 branches missed.">            if (rack != null &amp;&amp; !(rack instanceof InnerNode)) {</span>
+<span class="nc" id="L423">                LOG.error(&quot;Unexpected data node {} at an illegal network location&quot;, node);</span>
+<span class="nc" id="L424">                throw new IllegalArgumentException(&quot;Unexpected data node &quot; + node</span>
+                        + &quot; at an illegal network location&quot;);
+            }
+<span class="nc bnc" id="L427" title="All 2 branches missed.">            if (clusterMap.add(node)) {</span>
+<span class="nc" id="L428">                LOG.info(&quot;Adding a new node: &quot; + NodeBase.getPath(node));</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">                if (rack == null) {</span>
+<span class="nc" id="L430">                    numOfRacks++;</span>
+                }
+<span class="nc bnc" id="L432" title="All 2 branches missed.">                if (!(node instanceof InnerNode)) {</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">                    if (depthOfAllLeaves == -1) {</span>
+<span class="nc" id="L434">                        depthOfAllLeaves = node.getLevel();</span>
+                    }
+                }
+            }
+<span class="nc bnc" id="L438" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L439">                LOG.debug(&quot;NetworkTopology became:\n&quot; + this);</span>
+            }
+        } finally {
+<span class="nc" id="L442">            netlock.writeLock().unlock();</span>
+        }
+<span class="nc" id="L444">    }</span>
+
+    /**
+     * Return a reference to the node given its string representation.
+     * Default implementation delegates to {@link #getNode(String)}.
+     *
+     * &lt;p&gt;To be overridden in subclasses for specific NetworkTopology
+     * implementations, as alternative to overriding the full {@link #add(Node)}
+     *  method.
+     *
+     * @param node The string representation of this node's network location is
+     * used to retrieve a Node object.
+     * @return a reference to the node; null if the node is not in the tree
+     *
+     * @see #add(Node)
+     * @see #getNode(String)
+     */
+    protected Node getNodeForNetworkLocation(Node node) {
+<span class="nc" id="L462">        return getNode(node.getNetworkLocation());</span>
+    }
+
+    /**
+     * Given a string representation of a rack, return its children.
+     * @param loc a path-like string representation of a rack
+     * @return a newly allocated list with all the node's children
+     */
+    public List&lt;Node&gt; getDatanodesInRack(String loc) {
+<span class="nc" id="L471">        netlock.readLock().lock();</span>
+        try {
+<span class="nc" id="L473">            loc = NodeBase.normalize(loc);</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">            if (!NodeBase.ROOT.equals(loc)) {</span>
+<span class="nc" id="L475">                loc = loc.substring(1);</span>
+            }
+<span class="nc" id="L477">            InnerNode rack = (InnerNode) clusterMap.getLoc(loc);</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">            if (rack == null) {</span>
+<span class="nc" id="L479">                return null;</span>
+            }
+<span class="nc" id="L481">            return new ArrayList&lt;Node&gt;(rack.getChildren());</span>
+        } finally {
+<span class="nc" id="L483">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    /**
+     * Remove a node.
+     * Update node counter and rack counter if necessary.
+     *
+     * @param node node to be removed; can be null
+     */
+    @Override
+    public void remove(Node node) {
+<span class="nc bnc" id="L495" title="All 2 branches missed.">        if (node == null) {</span>
+<span class="nc" id="L496">            return;</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        } else if (node instanceof InnerNode) {</span>
+<span class="nc" id="L498">            throw new IllegalArgumentException(&quot;Not allow to remove an inner node: &quot; + NodeBase.getPath(node));</span>
+        }
+<span class="nc" id="L500">        LOG.info(&quot;Removing a node: &quot; + NodeBase.getPath(node));</span>
+<span class="nc" id="L501">        netlock.writeLock().lock();</span>
+        try {
+<span class="nc bnc" id="L503" title="All 2 branches missed.">            if (clusterMap.remove(node)) {</span>
+<span class="nc" id="L504">                InnerNode rack = (InnerNode) getNode(node.getNetworkLocation());</span>
+<span class="nc bnc" id="L505" title="All 2 branches missed.">                if (rack == null) {</span>
+<span class="nc" id="L506">                    numOfRacks--;</span>
+                }
+<span class="nc bnc" id="L508" title="All 2 branches missed.">                if (clusterMap.numOfLeaves == 0) {</span>
+<span class="nc" id="L509">                    depthOfAllLeaves = -1;</span>
+                }
+            }
+<span class="nc bnc" id="L512" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L513">                LOG.debug(&quot;NetworkTopology became:\n&quot; + this);</span>
+            }
+        } finally {
+<span class="nc" id="L516">            netlock.writeLock().unlock();</span>
+        }
+<span class="nc" id="L518">    }</span>
+
+    /**
+     * Check if the tree contains node &lt;i&gt;node&lt;/i&gt;.
+     *
+     * @param node a node
+     * @return true if &lt;i&gt;node&lt;/i&gt; is already in the tree; false otherwise
+     */
+    @Override
+    public boolean contains(Node node) {
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        if (node == null) {</span>
+<span class="nc" id="L529">            return false;</span>
+        }
+<span class="nc" id="L531">        netlock.readLock().lock();</span>
+        try {
+<span class="nc" id="L533">            Node parent = node.getParent();</span>
+<span class="nc bnc" id="L534" title="All 4 branches missed.">            for (int level = node.getLevel(); parent != null &amp;&amp; level &gt; 0; parent = parent.getParent(), level--) {</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">                if (parent == clusterMap) {</span>
+<span class="nc" id="L536">                    return true;</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L540">            netlock.readLock().unlock();</span>
+        }
+<span class="nc" id="L542">        return false;</span>
+    }
+
+    /**
+     * Given a string representation of a node, return its reference.
+     *
+     * @param loc
+     *          a path-like string representation of a node
+     * @return a reference to the node; null if the node is not in the tree
+     */
+    @Override
+    public Node getNode(String loc) {
+<span class="nc" id="L554">        netlock.readLock().lock();</span>
+        try {
+<span class="nc" id="L556">            loc = NodeBase.normalize(loc);</span>
+<span class="nc bnc" id="L557" title="All 2 branches missed.">            if (!NodeBase.ROOT.equals(loc)) {</span>
+<span class="nc" id="L558">                loc = loc.substring(1);</span>
+            }
+<span class="nc" id="L560">            return clusterMap.getLoc(loc);</span>
+        } finally {
+<span class="nc" id="L562">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    /**
+     * Given a string representation of a rack for a specific network location.
+     *
+     * &lt;p&gt;To be overridden in subclasses for specific NetworkTopology
+     * implementations, as alternative to overriding the full
+     * {@link #getRack(String)} method.
+     * @param loc
+     *          a path-like string representation of a network location
+     * @return a rack string
+     */
+    public String getRack(String loc) {
+<span class="nc" id="L577">        return loc;</span>
+    }
+
+    /** @return the total number of racks */
+    @Override
+    public int getNumOfRacks() {
+<span class="nc" id="L583">        netlock.readLock().lock();</span>
+        try {
+<span class="nc" id="L585">            return numOfRacks;</span>
+        } finally {
+<span class="nc" id="L587">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    /** @return the total number of leaf nodes */
+    public int getNumOfLeaves() {
+<span class="nc" id="L593">        netlock.readLock().lock();</span>
+        try {
+<span class="nc" id="L595">            return clusterMap.getNumOfLeaves();</span>
+        } finally {
+<span class="nc" id="L597">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    /**
+     * Return the distance between two nodes.
+     *
+     * &lt;p&gt;It is assumed that the distance from one node to its parent is 1
+     * The distance between two nodes is calculated by summing up their distances
+     * to their closest common ancestor.
+     * @param node1 one node
+     * @param node2 another node
+     * @return the distance between node1 and node2 which is zero if they are the same
+     *  or {@link Integer#MAX_VALUE} if node1 or node2 do not belong to the cluster
+     */
+    public int getDistance(Node node1, Node node2) {
+<span class="nc bnc" id="L613" title="All 2 branches missed.">        if (node1 == node2) {</span>
+<span class="nc" id="L614">            return 0;</span>
+        }
+<span class="nc" id="L616">        Node n1 = node1, n2 = node2;</span>
+<span class="nc" id="L617">        int dis = 0;</span>
+<span class="nc" id="L618">        netlock.readLock().lock();</span>
+        try {
+<span class="nc" id="L620">            int level1 = node1.getLevel(), level2 = node2.getLevel();</span>
+<span class="nc bnc" id="L621" title="All 4 branches missed.">            while (n1 != null &amp;&amp; level1 &gt; level2) {</span>
+<span class="nc" id="L622">                n1 = n1.getParent();</span>
+<span class="nc" id="L623">                level1--;</span>
+<span class="nc" id="L624">                dis++;</span>
+            }
+<span class="nc bnc" id="L626" title="All 4 branches missed.">            while (n2 != null &amp;&amp; level2 &gt; level1) {</span>
+<span class="nc" id="L627">                n2 = n2.getParent();</span>
+<span class="nc" id="L628">                level2--;</span>
+<span class="nc" id="L629">                dis++;</span>
+            }
+<span class="nc bnc" id="L631" title="All 6 branches missed.">            while (n1 != null &amp;&amp; n2 != null &amp;&amp; n1.getParent() != n2.getParent()) {</span>
+<span class="nc" id="L632">                n1 = n1.getParent();</span>
+<span class="nc" id="L633">                n2 = n2.getParent();</span>
+<span class="nc" id="L634">                dis += 2;</span>
+            }
+        } finally {
+<span class="nc" id="L637">            netlock.readLock().unlock();</span>
+        }
+<span class="nc bnc" id="L639" title="All 2 branches missed.">        if (n1 == null) {</span>
+<span class="nc" id="L640">            LOG.warn(&quot;The cluster does not contain node: {}&quot;, NodeBase.getPath(node1));</span>
+<span class="nc" id="L641">            return Integer.MAX_VALUE;</span>
+        }
+<span class="nc bnc" id="L643" title="All 2 branches missed.">        if (n2 == null) {</span>
+<span class="nc" id="L644">            LOG.warn(&quot;The cluster does not contain node: {}&quot;, NodeBase.getPath(node2));</span>
+<span class="nc" id="L645">            return Integer.MAX_VALUE;</span>
+        }
+<span class="nc" id="L647">        return dis + 2;</span>
+    }
+
+    /**
+     * Check if two nodes are on the same rack.
+     * @param node1 one node (can be null)
+     * @param node2 another node (can be null)
+     * @return true if node1 and node2 are on the same rack; false otherwise
+     * @exception IllegalArgumentException when either node1 or node2 is null, or
+     * node1 or node2 do not belong to the cluster
+     */
+    public boolean isOnSameRack(Node node1, Node node2) {
+<span class="nc bnc" id="L659" title="All 4 branches missed.">        if (node1 == null || node2 == null) {</span>
+<span class="nc" id="L660">            return false;</span>
+        }
+
+<span class="nc" id="L663">        netlock.readLock().lock();</span>
+        try {
+<span class="nc" id="L665">            return isSameParents(node1, node2);</span>
+        } finally {
+<span class="nc" id="L667">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    /**
+     * Check if network topology is aware of NodeGroup.
+     */
+    public boolean isNodeGroupAware() {
+<span class="nc" id="L675">        return false;</span>
+    }
+
+    /**
+     * Return false directly as not aware of NodeGroup, to be override in sub-class.
+     */
+    public boolean isOnSameNodeGroup(Node node1, Node node2) {
+<span class="nc" id="L682">        return false;</span>
+    }
+
+    /**
+     * Compare the parents of each node for equality.
+     *
+     * &lt;p&gt;To be overridden in subclasses for specific NetworkTopology
+     * implementations, as alternative to overriding the full
+     * {@link #isOnSameRack(Node, Node)} method.
+     *
+     * @param node1 the first node to compare
+     * @param node2 the second node to compare
+     * @return true if their parents are equal, false otherwise
+     *
+     * @see #isOnSameRack(Node, Node)
+     */
+    protected boolean isSameParents(Node node1, Node node2) {
+<span class="nc bnc" id="L699" title="All 2 branches missed.">        return node1.getParent() == node2.getParent();</span>
+    }
+
+<span class="nc" id="L702">    private static final Random r = new Random();</span>
+
+    /**
+     * Randomly choose one node from &lt;i&gt;scope&lt;/i&gt;.
+     *
+     * &lt;p&gt;If scope starts with ~, choose one from the all nodes except for the
+     * ones in &lt;i&gt;scope&lt;/i&gt;; otherwise, choose one from &lt;i&gt;scope&lt;/i&gt;.
+     * @param scope range of nodes from which a node will be chosen
+     * @return the chosen node
+     */
+    public Node chooseRandom(String scope) {
+<span class="nc" id="L713">        netlock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L715" title="All 2 branches missed.">            if (scope.startsWith(INVERSE)) {</span>
+<span class="nc" id="L716">                return chooseRandom(NodeBase.ROOT, scope.substring(1));</span>
+            } else {
+<span class="nc" id="L718">                return chooseRandom(scope, null);</span>
+            }
+        } finally {
+<span class="nc" id="L721">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    private Node chooseRandom(String scope, String excludedScope) {
+<span class="nc bnc" id="L726" title="All 2 branches missed.">        if (excludedScope != null) {</span>
+<span class="nc bnc" id="L727" title="All 2 branches missed.">            if (scope.startsWith(excludedScope)) {</span>
+<span class="nc" id="L728">                return null;</span>
+            }
+<span class="nc bnc" id="L730" title="All 2 branches missed.">            if (!excludedScope.startsWith(scope)) {</span>
+<span class="nc" id="L731">                excludedScope = null;</span>
+            }
+        }
+<span class="nc" id="L734">        Node node = getNode(scope);</span>
+<span class="nc bnc" id="L735" title="All 2 branches missed.">        if (!(node instanceof InnerNode)) {</span>
+<span class="nc" id="L736">            return node;</span>
+        }
+<span class="nc" id="L738">        InnerNode innerNode = (InnerNode) node;</span>
+<span class="nc" id="L739">        int numOfDatanodes = innerNode.getNumOfLeaves();</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">        if (excludedScope == null) {</span>
+<span class="nc" id="L741">            node = null;</span>
+        } else {
+<span class="nc" id="L743">            node = getNode(excludedScope);</span>
+<span class="nc bnc" id="L744" title="All 2 branches missed.">            if (!(node instanceof InnerNode)) {</span>
+<span class="nc" id="L745">                numOfDatanodes -= 1;</span>
+            } else {
+<span class="nc" id="L747">                numOfDatanodes -= ((InnerNode) node).getNumOfLeaves();</span>
+            }
+        }
+<span class="nc" id="L750">        int leaveIndex = r.nextInt(numOfDatanodes);</span>
+<span class="nc" id="L751">        return innerNode.getLeaf(leaveIndex, node);</span>
+    }
+
+    /**
+     * Return leaves in &lt;i&gt;scope&lt;/i&gt;.
+     * @param scope a path string
+     * @return leaves nodes under specific scope
+     */
+    private Set&lt;Node&gt; doGetLeaves(String scope) {
+<span class="nc" id="L760">        Node node = getNode(scope);</span>
+<span class="nc" id="L761">        Set&lt;Node&gt; leafNodes = new HashSet&lt;Node&gt;();</span>
+<span class="nc bnc" id="L762" title="All 2 branches missed.">        if (node == null) {</span>
+<span class="nc" id="L763">            return leafNodes;</span>
+        }
+
+<span class="nc bnc" id="L766" title="All 2 branches missed.">        if (!(node instanceof InnerNode)) {</span>
+<span class="nc" id="L767">            leafNodes.add(node);</span>
+        } else {
+<span class="nc" id="L769">            InnerNode innerNode = (InnerNode) node;</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">            for (int i = 0; i &lt; innerNode.getNumOfLeaves(); i++) {</span>
+<span class="nc" id="L771">                leafNodes.add(innerNode.getLeaf(i, null));</span>
+            }
+        }
+<span class="nc" id="L774">        return leafNodes;</span>
+    }
+
+    @Override
+    public Set&lt;Node&gt; getLeaves(String scope) {
+<span class="nc" id="L779">        netlock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L781" title="All 2 branches missed.">            if (scope.startsWith(INVERSE)) {</span>
+<span class="nc" id="L782">                Set&lt;Node&gt; allNodes = doGetLeaves(NodeBase.ROOT);</span>
+<span class="nc" id="L783">                String[] excludeScopes = scope.substring(1).split(NODE_SEPARATOR);</span>
+<span class="nc" id="L784">                Set&lt;Node&gt; excludeNodes = new HashSet&lt;Node&gt;();</span>
+<span class="nc" id="L785">                Arrays.stream(excludeScopes).forEach((excludeScope) -&gt; {</span>
+<span class="nc" id="L786">                    excludeNodes.addAll(doGetLeaves(excludeScope));</span>
+<span class="nc" id="L787">                });</span>
+<span class="nc" id="L788">                allNodes.removeAll(excludeNodes);</span>
+<span class="nc" id="L789">                return allNodes;</span>
+            } else {
+<span class="nc" id="L791">                return doGetLeaves(scope);</span>
+            }
+        } finally {
+<span class="nc" id="L794">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    @Override
+    public int countNumOfAvailableNodes(String scope, Collection&lt;Node&gt; excludedNodes) {
+<span class="nc" id="L800">        boolean isExcluded = false;</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">        if (scope.startsWith(INVERSE)) {</span>
+<span class="nc" id="L802">            isExcluded = true;</span>
+<span class="nc" id="L803">            scope = scope.substring(1);</span>
+        }
+<span class="nc" id="L805">        scope = NodeBase.normalize(scope);</span>
+<span class="nc" id="L806">        int count = 0; // the number of nodes in both scope &amp; excludedNodes</span>
+<span class="nc" id="L807">        netlock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L809" title="All 2 branches missed.">            for (Node node : excludedNodes) {</span>
+<span class="nc bnc" id="L810" title="All 2 branches missed.">                if ((NodeBase.getPath(node) + NodeBase.PATH_SEPARATOR_STR).startsWith(scope</span>
+                        + NodeBase.PATH_SEPARATOR_STR)) {
+<span class="nc" id="L812">                    count++;</span>
+                }
+<span class="nc" id="L814">            }</span>
+<span class="nc" id="L815">            Node n = getNode(scope);</span>
+<span class="nc" id="L816">            int scopeNodeCount = 0;</span>
+<span class="nc bnc" id="L817" title="All 2 branches missed.">            if (n instanceof InnerNode) {</span>
+<span class="nc" id="L818">                scopeNodeCount = ((InnerNode) n).getNumOfLeaves();</span>
+            }
+<span class="nc bnc" id="L820" title="All 2 branches missed.">            if (isExcluded) {</span>
+<span class="nc" id="L821">                return clusterMap.getNumOfLeaves() - scopeNodeCount - excludedNodes.size() + count;</span>
+            } else {
+<span class="nc" id="L823">                return scopeNodeCount - count;</span>
+            }
+        } finally {
+<span class="nc" id="L826">            netlock.readLock().unlock();</span>
+        }
+    }
+
+    /**
+     * Convert a network tree to a string.
+     */
+    @Override
+    public String toString() {
+        // print the number of racks
+<span class="nc" id="L836">        StringBuilder tree = new StringBuilder();</span>
+<span class="nc" id="L837">        tree.append(&quot;Number of racks: &quot;);</span>
+<span class="nc" id="L838">        tree.append(numOfRacks);</span>
+<span class="nc" id="L839">        tree.append(&quot;\n&quot;);</span>
+        // print the number of leaves
+<span class="nc" id="L841">        int numOfLeaves = getNumOfLeaves();</span>
+<span class="nc" id="L842">        tree.append(&quot;Expected number of leaves:&quot;);</span>
+<span class="nc" id="L843">        tree.append(numOfLeaves);</span>
+<span class="nc" id="L844">        tree.append(&quot;\n&quot;);</span>
+        // print nodes
+<span class="nc bnc" id="L846" title="All 2 branches missed.">        for (int i = 0; i &lt; numOfLeaves; i++) {</span>
+<span class="nc" id="L847">            tree.append(NodeBase.getPath(clusterMap.getLeaf(i, null)));</span>
+<span class="nc" id="L848">            tree.append(&quot;\n&quot;);</span>
+        }
+<span class="nc" id="L850">        return tree.toString();</span>
+    }
+
+    /**
+     * Divide networklocation string into two parts by last separator, and get
+     * the first part here.
+     *
+     * @param networkLocation
+     * @return
+     */
+    public static String getFirstHalf(String networkLocation) {
+<span class="nc" id="L861">        int index = networkLocation.lastIndexOf(NodeBase.PATH_SEPARATOR_STR);</span>
+<span class="nc" id="L862">        return networkLocation.substring(0, index);</span>
+    }
+
+    /**
+     * Divide networklocation string into two parts by last separator, and get
+     * the second part here.
+     *
+     * @param networkLocation
+     * @return
+     */
+    public static String getLastHalf(String networkLocation) {
+<span class="nc" id="L873">        int index = networkLocation.lastIndexOf(NodeBase.PATH_SEPARATOR_STR);</span>
+<span class="nc" id="L874">        return networkLocation.substring(index);</span>
+    }
+
+    /**
+     * Swap two array items.
+     */
+    protected static void swap(Node[] nodes, int i, int j) {
+        Node tempNode;
+<span class="nc" id="L882">        tempNode = nodes[j];</span>
+<span class="nc" id="L883">        nodes[j] = nodes[i];</span>
+<span class="nc" id="L884">        nodes[i] = tempNode;</span>
+<span class="nc" id="L885">    }</span>
+
+    /** Sort nodes array by their distances to &lt;i&gt;reader&lt;/i&gt;
+     * It linearly scans the array, if a local node is found, swap it with
+     * the first element of the array.
+     * If a local rack node is found, swap it with the first element following
+     * the local node.
+     * If neither local node or local rack node is found, put a random replica
+     * location at position 0.
+     * It leaves the rest nodes untouched.
+     * @param reader the node that wishes to read a block from one of the nodes
+     * @param nodes the list of nodes containing data for the reader
+     */
+    public void pseudoSortByDistance(Node reader, Node[] nodes) {
+<span class="nc" id="L899">        int tempIndex = 0;</span>
+<span class="nc" id="L900">        int localRackNode = -1;</span>
+<span class="nc bnc" id="L901" title="All 2 branches missed.">        if (reader != null) {</span>
+            //scan the array to find the local node &amp; local rack node
+<span class="nc bnc" id="L903" title="All 2 branches missed.">            for (int i = 0; i &lt; nodes.length; i++) {</span>
+<span class="nc bnc" id="L904" title="All 4 branches missed.">                if (tempIndex == 0 &amp;&amp; reader == nodes[i]) { //local node</span>
+                    //swap the local node and the node at position 0
+<span class="nc bnc" id="L906" title="All 2 branches missed.">                    if (i != 0) {</span>
+<span class="nc" id="L907">                        swap(nodes, tempIndex, i);</span>
+                    }
+<span class="nc" id="L909">                    tempIndex = 1;</span>
+<span class="nc bnc" id="L910" title="All 2 branches missed.">                    if (localRackNode != -1) {</span>
+<span class="nc bnc" id="L911" title="All 2 branches missed.">                        if (localRackNode == 0) {</span>
+<span class="nc" id="L912">                            localRackNode = i;</span>
+                        }
+                        break;
+                    }
+<span class="nc bnc" id="L916" title="All 4 branches missed.">                } else if (localRackNode == -1 &amp;&amp; isOnSameRack(reader, nodes[i])) {</span>
+                    //local rack
+<span class="nc" id="L918">                    localRackNode = i;</span>
+<span class="nc bnc" id="L919" title="All 2 branches missed.">                    if (tempIndex != 0) {</span>
+<span class="nc" id="L920">                        break;</span>
+                    }
+                }
+            }
+
+            // swap the local rack node and the node at position tempIndex
+<span class="nc bnc" id="L926" title="All 4 branches missed.">            if (localRackNode != -1 &amp;&amp; localRackNode != tempIndex) {</span>
+<span class="nc" id="L927">                swap(nodes, tempIndex, localRackNode);</span>
+<span class="nc" id="L928">                tempIndex++;</span>
+            }
+        }
+
+        // put a random node at position 0 if it is not a local/local-rack node
+<span class="nc bnc" id="L933" title="All 6 branches missed.">        if (tempIndex == 0 &amp;&amp; localRackNode == -1 &amp;&amp; nodes.length != 0) {</span>
+<span class="nc" id="L934">            swap(nodes, 0, r.nextInt(nodes.length));</span>
+        }
+<span class="nc" id="L936">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SaslServerState.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.sasl</a> &gt; <span class="el_source">SaslServerState.java</span></div><h1>SaslServerState.java</h1><pre class="source lang-java linenums">/*
+ Licensed to Diennea S.r.l. under one
+ or more contributor license agreements. See the NOTICE file
+ distributed with this work for additional information
+ regarding copyright ownership. Diennea S.r.l. licenses this file
+ to you under the Apache License, Version 2.0 (the
+ &quot;License&quot;); you may not use this file except in compliance
+ with the License.  You may obtain a copy of the License at
+
+ http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing,
+ software distributed under the License is distributed on an
+ &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ KIND, either express or implied.  See the License for the
+ specific language governing permissions and limitations
+ under the License.
+
+ */
+package org.apache.bookkeeper.sasl;
+
+import java.io.IOException;
+import java.security.Principal;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.regex.Pattern;
+import javax.security.auth.Subject;
+import javax.security.auth.callback.Callback;
+import javax.security.auth.callback.CallbackHandler;
+import javax.security.auth.callback.NameCallback;
+import javax.security.auth.callback.PasswordCallback;
+import javax.security.auth.callback.UnsupportedCallbackException;
+import javax.security.auth.login.AppConfigurationEntry;
+import javax.security.auth.login.Configuration;
+import javax.security.auth.login.LoginException;
+import javax.security.sasl.AuthorizeCallback;
+import javax.security.sasl.RealmCallback;
+import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslException;
+import javax.security.sasl.SaslServer;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.zookeeper.server.auth.KerberosName;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Server side Sasl implementation.
+ */
+public class SaslServerState {
+
+<span class="nc" id="L52">    private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(SaslServerState.class);</span>
+
+    private final SaslServer saslServer;
+    private final Pattern allowedIdsPattern;
+
+    public SaslServerState(
+        ServerConfiguration serverConfiguration, Subject subject, Pattern allowedIdsPattern)
+<span class="nc" id="L59">        throws IOException, SaslException, LoginException {</span>
+<span class="nc" id="L60">        this.allowedIdsPattern = allowedIdsPattern;</span>
+<span class="nc" id="L61">        saslServer = createSaslServer(subject, serverConfiguration);</span>
+<span class="nc" id="L62">    }</span>
+
+    private SaslServer createSaslServer(final Subject subject, ServerConfiguration serverConfiguration)
+        throws SaslException, IOException {
+
+<span class="nc" id="L67">        SaslServerCallbackHandler callbackHandler = new SaslServerCallbackHandler(Configuration.getConfiguration(),</span>
+            serverConfiguration);
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        if (subject.getPrincipals().size() &gt; 0) {</span>
+            try {
+<span class="nc" id="L71">                final Object[] principals = subject.getPrincipals().toArray();</span>
+<span class="nc" id="L72">                final Principal servicePrincipal = (Principal) principals[0];</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L74">                    LOG.debug(&quot;Authentication will use SASL/JAAS/Kerberos, servicePrincipal is {}&quot;, servicePrincipal);</span>
+                }
+
+<span class="nc" id="L77">                final String servicePrincipalNameAndHostname = servicePrincipal.getName();</span>
+<span class="nc" id="L78">                int indexOf = servicePrincipalNameAndHostname.indexOf(&quot;/&quot;);</span>
+<span class="nc" id="L79">                final String serviceHostnameAndKerbDomain = servicePrincipalNameAndHostname.substring(indexOf + 1);</span>
+<span class="nc" id="L80">                int indexOfAt = serviceHostnameAndKerbDomain.indexOf(&quot;@&quot;);</span>
+
+                final String servicePrincipalName, serviceHostname;
+<span class="nc bnc" id="L83" title="All 2 branches missed.">                if (indexOf &gt; 0) {</span>
+<span class="nc" id="L84">                    servicePrincipalName = servicePrincipalNameAndHostname.substring(0, indexOf);</span>
+<span class="nc" id="L85">                    serviceHostname = serviceHostnameAndKerbDomain.substring(0, indexOfAt);</span>
+                } else {
+<span class="nc" id="L87">                    servicePrincipalName = servicePrincipalNameAndHostname.substring(0, indexOfAt);</span>
+<span class="nc" id="L88">                    serviceHostname = null;</span>
+                }
+
+                try {
+<span class="nc" id="L92">                    return Subject.doAs(subject, new PrivilegedExceptionAction&lt;SaslServer&gt;() {</span>
+                        @Override
+                        public SaslServer run() {
+                            try {
+                                SaslServer saslServer;
+<span class="nc" id="L97">                                saslServer = Sasl.createSaslServer(&quot;GSSAPI&quot;, servicePrincipalName, serviceHostname,</span>
+                                        null, callbackHandler);
+<span class="nc" id="L99">                                return saslServer;</span>
+<span class="nc" id="L100">                            } catch (SaslException e) {</span>
+<span class="nc" id="L101">                                throw new RuntimeException(e);</span>
+                            }
+                        }
+                    }
+                    );
+<span class="nc" id="L106">                } catch (PrivilegedActionException e) {</span>
+<span class="nc" id="L107">                    throw new SaslException(&quot;error on GSSAPI boot&quot;, e.getCause());</span>
+                }
+<span class="nc" id="L109">            } catch (IndexOutOfBoundsException e) {</span>
+<span class="nc" id="L110">                throw new SaslException(&quot;error on GSSAPI boot&quot;, e);</span>
+            }
+        } else {
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L114">                LOG.debug(&quot;Authentication will use SASL/JAAS/DIGEST-MD5&quot;);</span>
+            }
+<span class="nc" id="L116">            return Sasl.createSaslServer(&quot;DIGEST-MD5&quot;, SaslConstants.SASL_BOOKKEEPER_PROTOCOL,</span>
+                SaslConstants.SASL_MD5_DUMMY_HOSTNAME, null, callbackHandler);
+        }
+    }
+
+    public boolean isComplete() {
+<span class="nc" id="L122">        return saslServer.isComplete();</span>
+    }
+
+    public String getUserName() {
+<span class="nc" id="L126">        return saslServer.getAuthorizationID();</span>
+    }
+
+    public byte[] response(byte[] token) throws SaslException {
+        try {
+<span class="nc" id="L131">            byte[] retval = saslServer.evaluateResponse(token);</span>
+<span class="nc" id="L132">            return retval;</span>
+<span class="nc" id="L133">        } catch (SaslException e) {</span>
+<span class="nc" id="L134">            LOG.error(&quot;response: Failed to evaluate client token&quot;, e);</span>
+<span class="nc" id="L135">            throw e;</span>
+        }
+    }
+
+    private class SaslServerCallbackHandler implements CallbackHandler {
+
+        private static final String USER_PREFIX = &quot;user_&quot;;
+
+        private String userName;
+<span class="nc" id="L144">        private final Map&lt;String, String&gt; credentials = new HashMap&lt;&gt;();</span>
+
+        public SaslServerCallbackHandler(Configuration configuration, ServerConfiguration serverConfiguration)
+<span class="nc" id="L147">                throws IOException {</span>
+<span class="nc" id="L148">            String configurationEntry = serverConfiguration.getString(SaslConstants.JAAS_BOOKIE_SECTION_NAME,</span>
+                SaslConstants.JAAS_DEFAULT_BOOKIE_SECTION_NAME);
+<span class="nc" id="L150">            AppConfigurationEntry[] configurationEntries = configuration.getAppConfigurationEntry(configurationEntry);</span>
+
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (configurationEntries == null) {</span>
+<span class="nc" id="L153">                String errorMessage = &quot;Could not find a '&quot; + configurationEntry</span>
+                    + &quot;' entry in this configuration: Server cannot start.&quot;;
+
+<span class="nc" id="L156">                throw new IOException(errorMessage);</span>
+            }
+<span class="nc" id="L158">            credentials.clear();</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            for (AppConfigurationEntry entry : configurationEntries) {</span>
+<span class="nc" id="L160">                Map&lt;String, ?&gt; options = entry.getOptions();</span>
+                // Populate DIGEST-MD5 user -&gt; password map with JAAS configuration entries from the &quot;Server&quot; section.
+                // Usernames are distinguished from other options by prefixing the username with a &quot;user_&quot; prefix.
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                for (Map.Entry&lt;String, ?&gt; pair : options.entrySet()) {</span>
+<span class="nc" id="L164">                    String key = pair.getKey();</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                    if (key.startsWith(USER_PREFIX)) {</span>
+<span class="nc" id="L166">                        String userName = key.substring(USER_PREFIX.length());</span>
+<span class="nc" id="L167">                        credentials.put(userName, (String) pair.getValue());</span>
+                    }
+<span class="nc" id="L169">                }</span>
+            }
+<span class="nc" id="L171">        }</span>
+
+        @Override
+        public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            for (Callback callback : callbacks) {</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                if (callback instanceof NameCallback) {</span>
+<span class="nc" id="L177">                    handleNameCallback((NameCallback) callback);</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                } else if (callback instanceof PasswordCallback) {</span>
+<span class="nc" id="L179">                    handlePasswordCallback((PasswordCallback) callback);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                } else if (callback instanceof RealmCallback) {</span>
+<span class="nc" id="L181">                    handleRealmCallback((RealmCallback) callback);</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">                } else if (callback instanceof AuthorizeCallback) {</span>
+<span class="nc" id="L183">                    handleAuthorizeCallback((AuthorizeCallback) callback);</span>
+                }
+            }
+<span class="nc" id="L186">        }</span>
+
+        private void handleNameCallback(NameCallback nc) {
+            // check to see if this user is in the user password database.
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            if (credentials.get(nc.getDefaultName()) == null) {</span>
+<span class="nc" id="L191">                LOG.error(&quot;User '&quot; + nc.getDefaultName() + &quot;' not found in list of JAAS DIGEST-MD5 users.&quot;);</span>
+<span class="nc" id="L192">                return;</span>
+            }
+<span class="nc" id="L194">            nc.setName(nc.getDefaultName());</span>
+<span class="nc" id="L195">            userName = nc.getDefaultName();</span>
+<span class="nc" id="L196">        }</span>
+
+        private void handlePasswordCallback(PasswordCallback pc) {
+<span class="nc bnc" id="L199" title="All 2 branches missed.">            if (credentials.containsKey(userName)) {</span>
+<span class="nc" id="L200">                pc.setPassword(credentials.get(userName).toCharArray());</span>
+            } else {
+<span class="nc" id="L202">                LOG.info(&quot;No password found for user: &quot; + userName);</span>
+            }
+<span class="nc" id="L204">        }</span>
+
+        private void handleRealmCallback(RealmCallback rc) {
+<span class="nc bnc" id="L207" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L208">                LOG.debug(&quot;client supplied realm: &quot; + rc.getDefaultText());</span>
+            }
+<span class="nc" id="L210">            rc.setText(rc.getDefaultText());</span>
+<span class="nc" id="L211">        }</span>
+
+        private void handleAuthorizeCallback(AuthorizeCallback ac) {
+<span class="nc" id="L214">            String authenticationID = ac.getAuthenticationID();</span>
+<span class="nc" id="L215">            String authorizationID = ac.getAuthorizationID();</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (!authenticationID.equals(authorizationID)) {</span>
+<span class="nc" id="L217">                ac.setAuthorized(false);</span>
+<span class="nc" id="L218">                LOG.info(&quot;Forbidden access to client: authenticationID=&quot; + authenticationID</span>
+                    + &quot; is different from authorizationID=&quot; + authorizationID + &quot;.&quot;);
+<span class="nc" id="L220">                return;</span>
+            }
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (!allowedIdsPattern.matcher(authenticationID).matches()) {</span>
+<span class="nc" id="L223">                ac.setAuthorized(false);</span>
+<span class="nc" id="L224">                LOG.info(&quot;Forbidden access to client: authenticationID=&quot; + authenticationID</span>
+                    + &quot; is not allowed (see &quot; + SaslConstants.JAAS_CLIENT_ALLOWED_IDS + &quot; property)&quot;);
+<span class="nc" id="L226">                return;</span>
+            }
+<span class="nc" id="L228">            ac.setAuthorized(true);</span>
+
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L231">                LOG.debug(&quot;Successfully authenticated client: authenticationID=&quot; + authenticationID</span>
+                        + &quot;;  authorizationID=&quot; + authorizationID + &quot;.&quot;);
+            }
+
+<span class="nc" id="L235">            KerberosName kerberosName = new KerberosName(authenticationID);</span>
+            try {
+<span class="nc" id="L237">                StringBuilder userNameBuilder = new StringBuilder(kerberosName.getShortName());</span>
+<span class="nc" id="L238">                userNameBuilder.append(&quot;/&quot;).append(kerberosName.getHostName());</span>
+<span class="nc" id="L239">                userNameBuilder.append(&quot;@&quot;).append(kerberosName.getRealm());</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L241">                    LOG.debug(&quot;Setting authorizedID: &quot; + userNameBuilder);</span>
+                }
+<span class="nc" id="L243">                ac.setAuthorizedID(userNameBuilder.toString());</span>
+<span class="nc" id="L244">            } catch (IOException e) {</span>
+<span class="nc" id="L245">                LOG.error(&quot;Failed to set name based on Kerberos authentication rules.&quot;);</span>
+<span class="nc" id="L246">            }</span>
+<span class="nc" id="L247">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

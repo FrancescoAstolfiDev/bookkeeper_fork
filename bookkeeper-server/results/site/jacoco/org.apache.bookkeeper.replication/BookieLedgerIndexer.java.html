@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BookieLedgerIndexer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">BookieLedgerIndexer.java</span></div><h1>BookieLedgerIndexer.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.replication;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.replication.ReplicationException.BKAuditException;
+import org.apache.zookeeper.AsyncCallback;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Preparing bookie vs its corresponding ledgers. This will always look up the
+ * ledgermanager for ledger metadata and will generate indexes.
+ */
+public class BookieLedgerIndexer {
+
+<span class="nc" id="L43">    private static final Logger LOG = LoggerFactory.getLogger(BookieLedgerIndexer.class);</span>
+    private final LedgerManager ledgerManager;
+
+<span class="nc" id="L46">    public BookieLedgerIndexer(LedgerManager ledgerManager) {</span>
+<span class="nc" id="L47">        this.ledgerManager = ledgerManager;</span>
+<span class="nc" id="L48">    }</span>
+
+    /**
+     * Generating bookie vs its ledgers map by reading all the ledgers in each
+     * bookie and parsing its metadata.
+     *
+     * @return bookie2ledgersMap map of bookie vs ledgers
+     * @throws BKAuditException
+     *             exception while getting bookie-ledgers
+     */
+    public Map&lt;String, Set&lt;Long&gt;&gt; getBookieToLedgerIndex()
+            throws BKAuditException {
+        // bookie vs ledgers map
+<span class="nc" id="L61">        final ConcurrentHashMap&lt;String, Set&lt;Long&gt;&gt; bookie2ledgersMap = new ConcurrentHashMap&lt;String, Set&lt;Long&gt;&gt;();</span>
+<span class="nc" id="L62">        final CountDownLatch ledgerCollectorLatch = new CountDownLatch(1);</span>
+
+<span class="nc" id="L64">        Processor&lt;Long&gt; ledgerProcessor = new Processor&lt;Long&gt;() {</span>
+                @Override
+                public void process(Long ledgerId, AsyncCallback.VoidCallback iterCallback) {
+<span class="nc" id="L67">                    ledgerManager.readLedgerMetadata(ledgerId).whenComplete((metadata, exception) -&gt; {</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">                                if (exception == null) {</span>
+                                    for (Map.Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; ensemble
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                                             : metadata.getValue().getAllEnsembles().entrySet()) {</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">                                        for (BookieId bookie : ensemble.getValue()) {</span>
+<span class="nc" id="L72">                                            putLedger(bookie2ledgersMap, bookie.toString(), ledgerId);</span>
+<span class="nc" id="L73">                                        }</span>
+<span class="nc" id="L74">                                    }</span>
+<span class="nc" id="L75">                                    iterCallback.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">                                } else if (BKException.getExceptionCode(exception)</span>
+                                           == BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {
+<span class="nc" id="L78">                                    LOG.info(&quot;Ignoring replication of already deleted ledger {}&quot;, ledgerId);</span>
+<span class="nc" id="L79">                                    iterCallback.processResult(BKException.Code.OK, null, null);</span>
+                                } else {
+<span class="nc" id="L81">                                    LOG.warn(&quot;Unable to read the ledger: {} information&quot;, ledgerId);</span>
+<span class="nc" id="L82">                                    iterCallback.processResult(BKException.getExceptionCode(exception), null, null);</span>
+                                }
+<span class="nc" id="L84">                            });</span>
+<span class="nc" id="L85">                }</span>
+            };
+        // Reading the result after processing all the ledgers
+<span class="nc" id="L88">        final List&lt;Integer&gt; resultCode = new ArrayList&lt;Integer&gt;(1);</span>
+<span class="nc" id="L89">        ledgerManager.asyncProcessLedgers(ledgerProcessor,</span>
+<span class="nc" id="L90">                new AsyncCallback.VoidCallback() {</span>
+
+                    @Override
+                    public void processResult(int rc, String s, Object obj) {
+<span class="nc" id="L94">                        resultCode.add(rc);</span>
+<span class="nc" id="L95">                        ledgerCollectorLatch.countDown();</span>
+<span class="nc" id="L96">                    }</span>
+                }, null, BKException.Code.OK, BKException.Code.ReadException);
+        try {
+<span class="nc" id="L99">            ledgerCollectorLatch.await();</span>
+<span class="nc" id="L100">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L101">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L102">            throw new BKAuditException(</span>
+                    &quot;Exception while getting the bookie-ledgers&quot;, e);
+<span class="nc" id="L104">        }</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (!resultCode.contains(BKException.Code.OK)) {</span>
+<span class="nc" id="L106">            throw new BKAuditException(</span>
+                    &quot;Exception while getting the bookie-ledgers&quot;, BKException
+<span class="nc" id="L108">                            .create(resultCode.get(0)));</span>
+        }
+<span class="nc" id="L110">        return bookie2ledgersMap;</span>
+    }
+
+    private void putLedger(ConcurrentHashMap&lt;String, Set&lt;Long&gt;&gt; bookie2ledgersMap,
+            String bookie, long ledgerId) {
+<span class="nc" id="L115">        Set&lt;Long&gt; ledgers = bookie2ledgersMap.get(bookie);</span>
+        // creates an empty list and add to bookie for keeping its ledgers
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (ledgers == null) {</span>
+<span class="nc" id="L118">            ledgers = Collections.synchronizedSet(new HashSet&lt;Long&gt;());</span>
+<span class="nc" id="L119">            Set&lt;Long&gt; oldLedgers = bookie2ledgersMap.putIfAbsent(bookie, ledgers);</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">            if (oldLedgers != null) {</span>
+<span class="nc" id="L121">                ledgers = oldLedgers;</span>
+            }
+        }
+<span class="nc" id="L124">        ledgers.add(ledgerId);</span>
+<span class="nc" id="L125">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

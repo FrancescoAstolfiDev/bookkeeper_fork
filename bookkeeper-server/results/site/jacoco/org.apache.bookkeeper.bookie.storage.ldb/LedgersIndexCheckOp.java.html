@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgersIndexCheckOp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">LedgersIndexCheckOp.java</span></div><h1>LedgersIndexCheckOp.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.FileSystems;
+import java.nio.file.Path;
+import java.util.Base64;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.storage.ldb.KeyValueStorageFactory.DbConfigType;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.commons.lang3.time.DurationFormatUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Scan the ledgers index to make sure it is readable.
+ */
+public class LedgersIndexCheckOp {
+<span class="nc" id="L41">    private static final Logger LOG = LoggerFactory.getLogger(LedgersIndexCheckOp.class);</span>
+
+    private final ServerConfiguration conf;
+    private final boolean verbose;
+    private static final String LedgersSubPath = &quot;ledgers&quot;;
+
+<span class="nc" id="L47">    public LedgersIndexCheckOp(ServerConfiguration conf, boolean verbose) {</span>
+<span class="nc" id="L48">        this.conf = conf;</span>
+<span class="nc" id="L49">        this.verbose = verbose;</span>
+<span class="nc" id="L50">    }</span>
+
+    public boolean initiate() throws IOException {
+<span class="nc" id="L53">        File[] indexDirs = conf.getIndexDirs();</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">        if (indexDirs == null) {</span>
+<span class="nc" id="L55">            indexDirs = conf.getLedgerDirs();</span>
+        }
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        if (indexDirs.length != conf.getLedgerDirs().length) {</span>
+<span class="nc" id="L58">            throw new IOException(&quot;ledger and index dirs size not matched&quot;);</span>
+        }
+<span class="nc" id="L60">        long startTime = System.nanoTime();</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        for (int i = 0; i &lt; conf.getLedgerDirs().length; i++) {</span>
+<span class="nc" id="L62">            File indexDir = indexDirs[i];</span>
+
+<span class="nc" id="L64">            String iBasePath = BookieImpl.getCurrentDirectory(indexDir).toString();</span>
+<span class="nc" id="L65">            Path indexCurrentPath = FileSystems.getDefault().getPath(iBasePath, LedgersSubPath);</span>
+
+<span class="nc" id="L67">            LOG.info(&quot;Loading ledgers index from {}&quot;, indexCurrentPath);</span>
+<span class="nc" id="L68">            LOG.info(&quot;Starting index scan&quot;);</span>
+
+            try {
+<span class="nc" id="L71">                KeyValueStorage index = new KeyValueStorageRocksDB(iBasePath, LedgersSubPath,</span>
+                        DbConfigType.Default, conf, true);
+                // Read all ledgers from db
+<span class="nc" id="L74">                KeyValueStorage.CloseableIterator&lt;Map.Entry&lt;byte[], byte[]&gt;&gt; iterator = index.iterator();</span>
+<span class="nc" id="L75">                int ctr = 0;</span>
+                try {
+<span class="nc bnc" id="L77" title="All 2 branches missed.">                    while (iterator.hasNext()) {</span>
+<span class="nc" id="L78">                        ctr++;</span>
+<span class="nc" id="L79">                        Map.Entry&lt;byte[], byte[]&gt; entry = iterator.next();</span>
+<span class="nc" id="L80">                        long ledgerId = ArrayUtil.getLong(entry.getKey(), 0);</span>
+<span class="nc" id="L81">                        DbLedgerStorageDataFormats.LedgerData ledgerData =</span>
+<span class="nc" id="L82">                                DbLedgerStorageDataFormats.LedgerData.parseFrom(entry.getValue());</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">                        if (verbose) {</span>
+<span class="nc" id="L84">                            LOG.info(</span>
+                                    &quot;Scanned: {}, ledger: {}, exists: {}, isFenced: {}, masterKey: {}, explicitLAC: {}&quot;,
+<span class="nc" id="L86">                                    ctr,</span>
+<span class="nc" id="L87">                                    ledgerId,</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                                    (ledgerData.hasExists() ? ledgerData.getExists() : &quot;-&quot;),</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                                    (ledgerData.hasFenced() ? ledgerData.getFenced() : &quot;-&quot;),</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                                    (ledgerData.hasMasterKey()</span>
+<span class="nc" id="L91">                                            ? Base64.getEncoder()</span>
+<span class="nc" id="L92">                                            .encodeToString(ledgerData.getMasterKey().toByteArray())</span>
+<span class="nc" id="L93">                                            : &quot;-&quot;),</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                                    (ledgerData.hasExplicitLac() ? ledgerData.getExplicitLac() : &quot;-&quot;));</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                        } else if (ctr % 100 == 0) {</span>
+<span class="nc" id="L96">                            LOG.info(&quot;Scanned {} ledgers&quot;, ctr);</span>
+                        }
+<span class="nc" id="L98">                    }</span>
+                } finally {
+<span class="nc" id="L100">                    iterator.close();</span>
+                }
+<span class="nc" id="L102">                LOG.info(&quot;Scanned {} ledgers&quot;, ctr);</span>
+<span class="nc" id="L103">            } catch (Throwable t) {</span>
+<span class="nc" id="L104">                LOG.error(&quot;Index scan has failed with error&quot;, t);</span>
+<span class="nc" id="L105">                return false;</span>
+<span class="nc" id="L106">            }</span>
+        }
+<span class="nc" id="L108">        LOG.info(&quot;Index scan has completed successfully. Total time: {}&quot;,</span>
+<span class="nc" id="L109">                DurationFormatUtils.formatDurationHMS(</span>
+<span class="nc" id="L110">                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)));</span>
+<span class="nc" id="L111">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

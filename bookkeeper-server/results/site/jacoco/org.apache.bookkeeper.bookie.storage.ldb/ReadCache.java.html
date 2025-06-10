@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReadCache.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">ReadCache.java</span></div><h1>ReadCache.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import static org.apache.bookkeeper.bookie.storage.ldb.WriteCache.align64;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
+import io.netty.util.ReferenceCountUtil;
+import java.io.Closeable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.apache.bookkeeper.util.collections.ConcurrentLongLongPairHashMap;
+import org.apache.bookkeeper.util.collections.ConcurrentLongLongPairHashMap.LongPair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Read cache implementation.
+ *
+ * &lt;p&gt;Uses the specified amount of memory and pairs it with a hashmap.
+ *
+ * &lt;p&gt;The memory is split in multiple segments that are used in a
+ * ring-buffer fashion. When the read cache is full, the oldest segment
+ * is cleared and rotated to make space for new entries to be added to
+ * the read cache.
+ */
+public class ReadCache implements Closeable {
+<span class="nc" id="L50">    private static final Logger log = LoggerFactory.getLogger(ReadCache.class);</span>
+
+    private static final int DEFAULT_MAX_SEGMENT_SIZE = 1 * 1024 * 1024 * 1024;
+
+    private final List&lt;ByteBuf&gt; cacheSegments;
+    private final List&lt;ConcurrentLongLongPairHashMap&gt; cacheIndexes;
+
+    private int currentSegmentIdx;
+<span class="nc" id="L58">    private final AtomicInteger currentSegmentOffset = new AtomicInteger(0);</span>
+
+    private final int segmentSize;
+
+    private ByteBufAllocator allocator;
+<span class="nc" id="L63">    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();</span>
+
+    public ReadCache(ByteBufAllocator allocator, long maxCacheSize) {
+<span class="nc" id="L66">        this(allocator, maxCacheSize, DEFAULT_MAX_SEGMENT_SIZE);</span>
+<span class="nc" id="L67">    }</span>
+
+<span class="nc" id="L69">    public ReadCache(ByteBufAllocator allocator, long maxCacheSize, int maxSegmentSize) {</span>
+<span class="nc" id="L70">        this.allocator = allocator;</span>
+<span class="nc" id="L71">        int segmentsCount = Math.max(2, (int) (maxCacheSize / maxSegmentSize));</span>
+<span class="nc" id="L72">        segmentSize = (int) (maxCacheSize / segmentsCount);</span>
+
+<span class="nc" id="L74">        cacheSegments = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L75">        cacheIndexes = new ArrayList&lt;&gt;();</span>
+
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        for (int i = 0; i &lt; segmentsCount; i++) {</span>
+<span class="nc" id="L78">            cacheSegments.add(Unpooled.directBuffer(segmentSize, segmentSize));</span>
+<span class="nc" id="L79">            ConcurrentLongLongPairHashMap concurrentLongLongPairHashMap = ConcurrentLongLongPairHashMap.newBuilder()</span>
+<span class="nc" id="L80">                    .expectedItems(4096)</span>
+<span class="nc" id="L81">                    .concurrencyLevel(2 * Runtime.getRuntime().availableProcessors())</span>
+<span class="nc" id="L82">                    .build();</span>
+<span class="nc" id="L83">            cacheIndexes.add(concurrentLongLongPairHashMap);</span>
+        }
+<span class="nc" id="L85">    }</span>
+
+    @Override
+    public void close() {
+<span class="nc" id="L89">        cacheSegments.forEach(ReferenceCountUtil::safeRelease);</span>
+<span class="nc" id="L90">    }</span>
+
+    public void put(long ledgerId, long entryId, ByteBuf entry) {
+<span class="nc" id="L93">        int entrySize = entry.readableBytes();</span>
+<span class="nc" id="L94">        int alignedSize = align64(entrySize);</span>
+
+<span class="nc" id="L96">        lock.readLock().lock();</span>
+
+        try {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (entrySize &gt; segmentSize) {</span>
+<span class="nc" id="L100">                log.warn(&quot;entrySize {} &gt; segmentSize {}, skip update read cache!&quot;, entrySize, segmentSize);</span>
+<span class="nc" id="L101">                return;</span>
+            }
+<span class="nc" id="L103">            int offset = currentSegmentOffset.getAndAdd(alignedSize);</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (offset + entrySize &gt; segmentSize) {</span>
+                // Roll-over the segment (outside the read-lock)
+            } else {
+                // Copy entry into read cache segment
+<span class="nc" id="L108">                cacheSegments.get(currentSegmentIdx).setBytes(offset, entry, entry.readerIndex(),</span>
+<span class="nc" id="L109">                        entry.readableBytes());</span>
+<span class="nc" id="L110">                cacheIndexes.get(currentSegmentIdx).put(ledgerId, entryId, offset, entrySize);</span>
+<span class="nc" id="L111">                return;</span>
+            }
+        } finally {
+<span class="nc" id="L114">            lock.readLock().unlock();</span>
+        }
+
+        // We could not insert in segment, we to get the write lock and roll-over to
+        // next segment
+<span class="nc" id="L119">        lock.writeLock().lock();</span>
+
+        try {
+<span class="nc" id="L122">            int offset = currentSegmentOffset.getAndAdd(entrySize);</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (offset + entrySize &gt; segmentSize) {</span>
+                // Rollover to next segment
+<span class="nc" id="L125">                currentSegmentIdx = (currentSegmentIdx + 1) % cacheSegments.size();</span>
+<span class="nc" id="L126">                currentSegmentOffset.set(alignedSize);</span>
+<span class="nc" id="L127">                cacheIndexes.get(currentSegmentIdx).clear();</span>
+<span class="nc" id="L128">                offset = 0;</span>
+            }
+
+            // Copy entry into read cache segment
+<span class="nc" id="L132">            cacheSegments.get(currentSegmentIdx).setBytes(offset, entry, entry.readerIndex(), entry.readableBytes());</span>
+<span class="nc" id="L133">            cacheIndexes.get(currentSegmentIdx).put(ledgerId, entryId, offset, entrySize);</span>
+        } finally {
+<span class="nc" id="L135">            lock.writeLock().unlock();</span>
+        }
+<span class="nc" id="L137">    }</span>
+
+    public ByteBuf get(long ledgerId, long entryId) {
+<span class="nc" id="L140">        lock.readLock().lock();</span>
+
+        try {
+            // We need to check all the segments, starting from the current one and looking
+            // backward to minimize the
+            // checks for recently inserted entries
+<span class="nc" id="L146">            int size = cacheSegments.size();</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L148">                int segmentIdx = (currentSegmentIdx + (size - i)) % size;</span>
+
+<span class="nc" id="L150">                LongPair res = cacheIndexes.get(segmentIdx).get(ledgerId, entryId);</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                if (res != null) {</span>
+<span class="nc" id="L152">                    int entryOffset = (int) res.first;</span>
+<span class="nc" id="L153">                    int entryLen = (int) res.second;</span>
+
+<span class="nc" id="L155">                    ByteBuf entry = allocator.buffer(entryLen, entryLen);</span>
+<span class="nc" id="L156">                    entry.writeBytes(cacheSegments.get(segmentIdx), entryOffset, entryLen);</span>
+<span class="nc" id="L157">                    return entry;</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L161">            lock.readLock().unlock();</span>
+        }
+
+        // Entry not found in any segment
+<span class="nc" id="L165">        return null;</span>
+    }
+
+    public boolean hasEntry(long ledgerId, long entryId) {
+<span class="nc" id="L169">        lock.readLock().lock();</span>
+
+        try {
+<span class="nc" id="L172">            int size = cacheSegments.size();</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L174">                int segmentIdx = (currentSegmentIdx + (size - i)) % size;</span>
+
+<span class="nc" id="L176">                LongPair res = cacheIndexes.get(segmentIdx).get(ledgerId, entryId);</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                if (res != null) {</span>
+<span class="nc" id="L178">                    return true;</span>
+                }
+            }
+        } finally {
+<span class="nc" id="L182">            lock.readLock().unlock();</span>
+        }
+
+        // Entry not found in any segment
+<span class="nc" id="L186">        return false;</span>
+    }
+
+    /**
+     * @return the total size of cached entries
+     */
+    public long size() {
+<span class="nc" id="L193">        lock.readLock().lock();</span>
+
+        try {
+<span class="nc" id="L196">            long size = 0;</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">            for (int i = 0; i &lt; cacheIndexes.size(); i++) {</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                if (i == currentSegmentIdx) {</span>
+<span class="nc" id="L199">                    size += currentSegmentOffset.get();</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                } else if (!cacheIndexes.get(i).isEmpty()) {</span>
+<span class="nc" id="L201">                    size += segmentSize;</span>
+                } else {
+                    // the segment is empty
+                }
+            }
+
+<span class="nc" id="L207">            return size;</span>
+        } finally {
+<span class="nc" id="L209">            lock.readLock().unlock();</span>
+        }
+    }
+
+    /**
+     * @return the total number of cached entries
+     */
+    public long count() {
+<span class="nc" id="L217">        lock.readLock().lock();</span>
+
+        try {
+<span class="nc" id="L220">            long count = 0;</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            for (int i = 0; i &lt; cacheIndexes.size(); i++) {</span>
+<span class="nc" id="L222">                count += cacheIndexes.get(i).size();</span>
+            }
+
+<span class="nc" id="L225">            return count;</span>
+        } finally {
+<span class="nc" id="L227">            lock.readLock().unlock();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

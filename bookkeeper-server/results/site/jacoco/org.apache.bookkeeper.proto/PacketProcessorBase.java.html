@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PacketProcessorBase.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">PacketProcessorBase.java</span></div><h1>PacketProcessorBase.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.proto;
+
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelPromise;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.proto.BookieProtocol.Request;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A base class for bookeeper packet processors.
+ */
+<span class="nc" id="L35">abstract class PacketProcessorBase&lt;T extends Request&gt; implements Runnable {</span>
+<span class="nc" id="L36">    private static final Logger logger = LoggerFactory.getLogger(PacketProcessorBase.class);</span>
+    T request;
+    BookieRequestHandler requestHandler;
+    BookieRequestProcessor requestProcessor;
+    long enqueueNanos;
+
+    protected void init(T request, BookieRequestHandler requestHandler, BookieRequestProcessor requestProcessor) {
+<span class="nc" id="L43">        this.request = request;</span>
+<span class="nc" id="L44">        this.requestHandler = requestHandler;</span>
+<span class="nc" id="L45">        this.requestProcessor = requestProcessor;</span>
+<span class="nc" id="L46">        this.enqueueNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L47">    }</span>
+
+    protected void reset() {
+<span class="nc" id="L50">        request = null;</span>
+<span class="nc" id="L51">        requestHandler = null;</span>
+<span class="nc" id="L52">        requestProcessor = null;</span>
+<span class="nc" id="L53">        enqueueNanos = -1;</span>
+<span class="nc" id="L54">    }</span>
+
+    protected boolean isVersionCompatible() {
+<span class="nc" id="L57">        byte version = request.getProtocolVersion();</span>
+<span class="nc bnc" id="L58" title="All 4 branches missed.">        if (version &lt; BookieProtocol.LOWEST_COMPAT_PROTOCOL_VERSION</span>
+                || version &gt; BookieProtocol.CURRENT_PROTOCOL_VERSION) {
+<span class="nc" id="L60">            logger.error(&quot;Invalid protocol version, expected something between &quot;</span>
+                    + BookieProtocol.LOWEST_COMPAT_PROTOCOL_VERSION
+                    + &quot; &amp; &quot; + BookieProtocol.CURRENT_PROTOCOL_VERSION
+<span class="nc" id="L63">                    + &quot;. got &quot; + request.getProtocolVersion());</span>
+<span class="nc" id="L64">            return false;</span>
+        }
+<span class="nc" id="L66">        return true;</span>
+    }
+
+    protected void sendWriteReqResponse(int rc, Object response, OpStatsLogger statsLogger) {
+<span class="nc" id="L70">        sendResponse(rc, response, statsLogger);</span>
+<span class="nc" id="L71">        requestProcessor.onAddRequestFinish();</span>
+<span class="nc" id="L72">    }</span>
+
+    protected void sendReadReqResponse(int rc, Object response, OpStatsLogger statsLogger, boolean throttle) {
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (throttle) {</span>
+<span class="nc" id="L76">            sendResponseAndWait(rc, response, statsLogger);</span>
+        } else {
+<span class="nc" id="L78">            sendResponse(rc, response, statsLogger);</span>
+        }
+<span class="nc" id="L80">        requestProcessor.onReadRequestFinish();</span>
+<span class="nc" id="L81">    }</span>
+
+    protected void sendResponse(int rc, Object response, OpStatsLogger statsLogger) {
+<span class="nc" id="L84">        final long writeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L85">        final long timeOut = requestProcessor.getWaitTimeoutOnBackpressureMillis();</span>
+
+<span class="nc" id="L87">        Channel channel = requestHandler.ctx().channel();</span>
+
+<span class="nc bnc" id="L89" title="All 4 branches missed.">        if (timeOut &gt;= 0 &amp;&amp; !channel.isWritable()) {</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">            if (!requestProcessor.isBlacklisted(channel)) {</span>
+<span class="nc" id="L91">                synchronized (channel) {</span>
+<span class="nc bnc" id="L92" title="All 4 branches missed.">                    if (!channel.isWritable() &amp;&amp; !requestProcessor.isBlacklisted(channel)) {</span>
+<span class="nc" id="L93">                        final long waitUntilNanos = writeNanos + TimeUnit.MILLISECONDS.toNanos(timeOut);</span>
+<span class="nc bnc" id="L94" title="All 4 branches missed.">                        while (!channel.isWritable() &amp;&amp; MathUtils.nowInNano() &lt; waitUntilNanos) {</span>
+                            try {
+<span class="nc" id="L96">                                TimeUnit.MILLISECONDS.sleep(1);</span>
+<span class="nc" id="L97">                            } catch (InterruptedException e) {</span>
+<span class="nc" id="L98">                                break;</span>
+<span class="nc" id="L99">                            }</span>
+                        }
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                        if (!channel.isWritable()) {</span>
+<span class="nc" id="L102">                            requestProcessor.blacklistChannel(channel);</span>
+<span class="nc" id="L103">                            requestProcessor.handleNonWritableChannel(channel);</span>
+                        }
+                    }
+<span class="nc" id="L106">                }</span>
+            }
+
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (!channel.isWritable()) {</span>
+<span class="nc" id="L110">                logger.warn(&quot;cannot write response to non-writable channel {} for request {}&quot;, channel,</span>
+<span class="nc" id="L111">                    StringUtils.requestToString(request));</span>
+<span class="nc" id="L112">                requestProcessor.getRequestStats().getChannelWriteStats()</span>
+<span class="nc" id="L113">                    .registerFailedEvent(MathUtils.elapsedNanos(writeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L114">                statsLogger.registerFailedEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                if (response instanceof BookieProtocol.Response) {</span>
+<span class="nc" id="L116">                    ((BookieProtocol.Response) response).release();</span>
+                }
+<span class="nc" id="L118">                return;</span>
+            } else {
+<span class="nc" id="L120">                requestProcessor.invalidateBlacklist(channel);</span>
+            }
+        }
+
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (channel.isActive()) {</span>
+            final ChannelPromise promise;
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L127">                promise = channel.newPromise().addListener(future -&gt; {</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                    if (!future.isSuccess()) {</span>
+<span class="nc" id="L129">                        logger.debug(&quot;Netty channel write exception. &quot;, future.cause());</span>
+                    }
+<span class="nc" id="L131">                });</span>
+            } else {
+<span class="nc" id="L133">                promise = channel.voidPromise();</span>
+            }
+<span class="nc" id="L135">            channel.writeAndFlush(response, promise);</span>
+<span class="nc" id="L136">        } else {</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">            if (response instanceof BookieProtocol.Response) {</span>
+<span class="nc" id="L138">                ((BookieProtocol.Response) response).release();</span>
+            }
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L141">            logger.debug(&quot;Netty channel {} is inactive, &quot;</span>
+                    + &quot;hence bypassing netty channel writeAndFlush during sendResponse&quot;, channel);
+            }
+        }
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (BookieProtocol.EOK == rc) {</span>
+<span class="nc" id="L146">            statsLogger.registerSuccessfulEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L148">            statsLogger.registerFailedEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc" id="L150">    }</span>
+
+    /**
+     * Write on the channel and wait until the write is completed.
+     *
+     * &lt;p&gt;That will make the thread to get blocked until we're able to
+     * write everything on the TCP stack, providing auto-throttling
+     * and avoiding using too much memory when handling read-requests.
+     */
+    protected void sendResponseAndWait(int rc, Object response, OpStatsLogger statsLogger) {
+        try {
+<span class="nc" id="L161">            Channel channel = requestHandler.ctx().channel();</span>
+<span class="nc" id="L162">            ChannelFuture future = channel.writeAndFlush(response);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (!channel.eventLoop().inEventLoop()) {</span>
+<span class="nc" id="L164">                future.get();</span>
+            }
+<span class="nc" id="L166">        } catch (ExecutionException | InterruptedException e) {</span>
+<span class="nc" id="L167">            logger.debug(&quot;Netty channel write exception. &quot;, e);</span>
+<span class="nc" id="L168">            return;</span>
+<span class="nc" id="L169">        }</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (BookieProtocol.EOK == rc) {</span>
+<span class="nc" id="L171">            statsLogger.registerSuccessfulEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L173">            statsLogger.registerFailedEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc" id="L175">    }</span>
+
+    @Override
+    public void run() {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (request instanceof BookieProtocol.ReadRequest) {</span>
+<span class="nc" id="L180">            requestProcessor.getRequestStats().getReadEntrySchedulingDelayStats()</span>
+<span class="nc" id="L181">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        if (request instanceof BookieProtocol.ParsedAddRequest) {</span>
+<span class="nc" id="L184">            requestProcessor.getRequestStats().getWriteThreadQueuedLatency()</span>
+<span class="nc" id="L185">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        }
+
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (!isVersionCompatible()) {</span>
+<span class="nc" id="L189">            sendResponse(BookieProtocol.EBADVERSION,</span>
+<span class="nc" id="L190">                         ResponseBuilder.buildErrorResponse(BookieProtocol.EBADVERSION, request),</span>
+<span class="nc" id="L191">                         requestProcessor.getRequestStats().getReadRequestStats());</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">            if (request instanceof BookieProtocol.ReadRequest) {</span>
+<span class="nc" id="L193">                requestProcessor.onReadRequestFinish();</span>
+            }
+<span class="nc bnc" id="L195" title="All 2 branches missed.">            if (request instanceof BookieProtocol.ParsedAddRequest) {</span>
+<span class="nc" id="L196">                ((BookieProtocol.ParsedAddRequest) request).release();</span>
+<span class="nc" id="L197">                request.recycle();</span>
+<span class="nc" id="L198">                requestProcessor.onAddRequestFinish();</span>
+            }
+<span class="nc" id="L200">            return;</span>
+        }
+<span class="nc" id="L202">        processPacket();</span>
+<span class="nc" id="L203">    }</span>
+
+    protected abstract void processPacket();
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

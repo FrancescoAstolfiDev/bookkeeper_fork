@@ -1,0 +1,723 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>IndexPersistenceMgr.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">IndexPersistenceMgr.java</span></div><h1>IndexPersistenceMgr.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.RemovalListener;
+import com.google.common.cache.RemovalNotification;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import io.netty.buffer.ByteBuf;
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.bookie.FileInfoBackingCache.CachedFileInfo;
+import org.apache.bookkeeper.bookie.LedgerDirsManager.NoWritableLedgerDirException;
+import org.apache.bookkeeper.bookie.stats.IndexPersistenceMgrStats;
+import org.apache.bookkeeper.common.util.Watcher;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.SnapshotMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A {@code IndexPersistenceMgr} is responsible for managing the persistence state for the index in a bookie.
+ */
+public class IndexPersistenceMgr {
+<span class="nc" id="L53">    private static final Logger LOG = LoggerFactory.getLogger(IndexPersistenceMgr.class);</span>
+
+    private static final String IDX = &quot;.idx&quot;;
+    static final String RLOC = &quot;.rloc&quot;;
+
+    @VisibleForTesting
+    public static final String getLedgerName(long ledgerId) {
+<span class="nc" id="L60">        int parent = (int) (ledgerId &amp; 0xff);</span>
+<span class="nc" id="L61">        int grandParent = (int) ((ledgerId &amp; 0xff00) &gt;&gt; 8);</span>
+<span class="nc" id="L62">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L63">        sb.append(Integer.toHexString(grandParent));</span>
+<span class="nc" id="L64">        sb.append('/');</span>
+<span class="nc" id="L65">        sb.append(Integer.toHexString(parent));</span>
+<span class="nc" id="L66">        sb.append('/');</span>
+<span class="nc" id="L67">        sb.append(Long.toHexString(ledgerId));</span>
+<span class="nc" id="L68">        sb.append(IDX);</span>
+<span class="nc" id="L69">        return sb.toString();</span>
+    }
+
+    // use two separate cache for write and read
+    final Cache&lt;Long, CachedFileInfo&gt; writeFileInfoCache;
+    final Cache&lt;Long, CachedFileInfo&gt; readFileInfoCache;
+    final FileInfoBackingCache fileInfoBackingCache;
+
+    final int openFileLimit;
+    final int pageSize;
+    final int entriesPerPage;
+
+    // Manage all active ledgers in LedgerManager
+    // so LedgerManager has knowledge to garbage collect inactive/deleted ledgers
+    final SnapshotMap&lt;Long, Boolean&gt; activeLedgers;
+    final LedgerDirsManager ledgerDirsManager;
+
+    private final IndexPersistenceMgrStats persistenceMgrStats;
+
+    public IndexPersistenceMgr(int pageSize,
+                               int entriesPerPage,
+                               ServerConfiguration conf,
+                               SnapshotMap&lt;Long, Boolean&gt; activeLedgers,
+                               LedgerDirsManager ledgerDirsManager,
+<span class="nc" id="L93">                               StatsLogger statsLogger) throws IOException {</span>
+<span class="nc" id="L94">        this.openFileLimit = conf.getOpenFileLimit();</span>
+<span class="nc" id="L95">        this.activeLedgers = activeLedgers;</span>
+<span class="nc" id="L96">        this.ledgerDirsManager = ledgerDirsManager;</span>
+<span class="nc" id="L97">        this.pageSize = pageSize;</span>
+<span class="nc" id="L98">        this.entriesPerPage = entriesPerPage;</span>
+<span class="nc" id="L99">        LOG.info(&quot;openFileLimit = {}&quot;, openFileLimit);</span>
+        // Retrieve all of the active ledgers.
+<span class="nc" id="L101">        getActiveLedgers();</span>
+
+        // build the file info cache
+<span class="nc" id="L104">        int concurrencyLevel = Math.max(1, Math.max(conf.getNumAddWorkerThreads(), conf.getNumReadWorkerThreads()));</span>
+<span class="nc" id="L105">        fileInfoBackingCache = new FileInfoBackingCache(this::createFileInfoBackingFile,</span>
+<span class="nc" id="L106">                conf.getFileInfoFormatVersionToWrite());</span>
+<span class="nc" id="L107">        RemovalListener&lt;Long, CachedFileInfo&gt; fileInfoEvictionListener = this::handleLedgerEviction;</span>
+<span class="nc" id="L108">        writeFileInfoCache = buildCache(</span>
+            concurrencyLevel,
+<span class="nc" id="L110">            conf.getFileInfoCacheInitialCapacity(),</span>
+            openFileLimit,
+<span class="nc" id="L112">            conf.getFileInfoMaxIdleTime(),</span>
+            fileInfoEvictionListener);
+<span class="nc" id="L114">        readFileInfoCache = buildCache(</span>
+            concurrencyLevel,
+<span class="nc" id="L116">            2 * conf.getFileInfoCacheInitialCapacity(),</span>
+            2 * openFileLimit,
+<span class="nc" id="L118">            conf.getFileInfoMaxIdleTime(),</span>
+            fileInfoEvictionListener);
+
+        // Expose Stats
+<span class="nc" id="L122">        persistenceMgrStats = new IndexPersistenceMgrStats(</span>
+            statsLogger,
+<span class="nc" id="L124">            () -&gt; writeFileInfoCache.size(),</span>
+<span class="nc" id="L125">            () -&gt; readFileInfoCache.size()</span>
+        );
+<span class="nc" id="L127">    }</span>
+
+    private static Cache&lt;Long, CachedFileInfo&gt; buildCache(int concurrencyLevel,
+                                                          int initialCapacity,
+                                                          int maximumSize,
+                                                          long expireAfterAccessSeconds,
+                                                          RemovalListener&lt;Long, CachedFileInfo&gt; removalListener) {
+<span class="nc" id="L134">        CacheBuilder&lt;Long, CachedFileInfo&gt; builder = CacheBuilder.newBuilder()</span>
+<span class="nc" id="L135">            .concurrencyLevel(concurrencyLevel)</span>
+<span class="nc" id="L136">            .initialCapacity(initialCapacity)</span>
+<span class="nc" id="L137">            .maximumSize(maximumSize)</span>
+<span class="nc" id="L138">            .removalListener(removalListener);</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        if (expireAfterAccessSeconds &gt; 0) {</span>
+<span class="nc" id="L140">            builder.expireAfterAccess(expireAfterAccessSeconds, TimeUnit.SECONDS);</span>
+        }
+<span class="nc" id="L142">        return builder.build();</span>
+    }
+
+    private File createFileInfoBackingFile(long ledger, boolean createIfMissing) throws IOException {
+<span class="nc" id="L146">        File lf = findIndexFile(ledger);</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (null == lf) {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (!createIfMissing) {</span>
+<span class="nc" id="L149">                throw new Bookie.NoLedgerException(ledger);</span>
+            }
+            // We don't have a ledger index file on disk or in cache, so create it.
+<span class="nc" id="L152">            lf = getNewLedgerIndexFile(ledger, null);</span>
+        }
+<span class="nc" id="L154">        return lf;</span>
+    }
+
+    /**
+     * When a ledger is evicted, we need to make sure there's no other thread
+     * trying to get FileInfo for that ledger at the same time when we close
+     * the FileInfo.
+     */
+    private void handleLedgerEviction(RemovalNotification&lt;Long, CachedFileInfo&gt; notification) {
+<span class="nc" id="L163">        CachedFileInfo fileInfo = notification.getValue();</span>
+<span class="nc bnc" id="L164" title="All 4 branches missed.">        if (null == fileInfo || null == notification.getKey()) {</span>
+<span class="nc" id="L165">            return;</span>
+        }
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (notification.wasEvicted()) {</span>
+<span class="nc" id="L168">            persistenceMgrStats.getEvictedLedgersCounter().inc();</span>
+        }
+<span class="nc" id="L170">        fileInfo.release();</span>
+<span class="nc" id="L171">    }</span>
+
+    /**
+     * Get the FileInfo and increase reference count.
+     * When we get FileInfo from cache, we need to make sure it is synchronized
+     * with eviction, otherwise there might be a race condition as we get
+     * the FileInfo from cache, that FileInfo is then evicted and closed before we
+     * could even increase the reference counter.
+     */
+    CachedFileInfo getFileInfo(final Long ledger, final byte[] masterKey) throws IOException {
+        try {
+            CachedFileInfo fi;
+<span class="nc" id="L183">            persistenceMgrStats.getPendingGetFileInfoCounter().inc();</span>
+<span class="nc" id="L184">            Callable&lt;CachedFileInfo&gt; loader = () -&gt; {</span>
+<span class="nc" id="L185">                CachedFileInfo fileInfo = fileInfoBackingCache.loadFileInfo(ledger, masterKey);</span>
+<span class="nc" id="L186">                activeLedgers.put(ledger, true);</span>
+<span class="nc" id="L187">                return fileInfo;</span>
+            };
+            do {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (null != masterKey) {</span>
+<span class="nc" id="L191">                    fi = writeFileInfoCache.get(ledger, loader);</span>
+                } else {
+<span class="nc" id="L193">                    fi = readFileInfoCache.get(ledger, loader);</span>
+                }
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                if (!fi.tryRetain()) {</span>
+                    // defensively ensure that dead fileinfo objects don't exist in the
+                    // cache. They shouldn't if refcounting is correct, but if someone
+                    // does a double release, the fileinfo will be cleaned up, while
+                    // remaining in the cache, which could cause a tight loop in this method.
+<span class="nc" id="L200">                    boolean inWriteMap = writeFileInfoCache.asMap().remove(ledger, fi);</span>
+<span class="nc" id="L201">                    boolean inReadMap = readFileInfoCache.asMap().remove(ledger, fi);</span>
+<span class="nc bnc" id="L202" title="All 4 branches missed.">                    if (inWriteMap || inReadMap) {</span>
+<span class="nc" id="L203">                        LOG.error(&quot;Dead fileinfo({}) forced out of cache (write:{}, read:{}). &quot;</span>
+                                  + &quot;It must have been double-released somewhere.&quot;,
+<span class="nc" id="L205">                                  fi, inWriteMap, inReadMap);</span>
+                    }
+<span class="nc" id="L207">                    fi = null;</span>
+                }
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            } while (fi == null);</span>
+
+<span class="nc" id="L211">            return fi;</span>
+<span class="nc" id="L212">        } catch (ExecutionException | UncheckedExecutionException ee) {</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">            if (ee.getCause() instanceof IOException) {</span>
+<span class="nc" id="L214">                throw (IOException) ee.getCause();</span>
+            } else {
+<span class="nc" id="L216">                throw new LedgerCache.NoIndexForLedgerException(&quot;Failed to load file info for ledger &quot; + ledger, ee);</span>
+            }
+        } finally {
+<span class="nc" id="L219">            persistenceMgrStats.getPendingGetFileInfoCounter().dec();</span>
+        }
+    }
+
+    /**
+     * Get a new index file for ledger excluding directory &lt;code&gt;excludedDir&lt;/code&gt;.
+     *
+     * @param ledger
+     *          Ledger id.
+     * @param excludedDir
+     *          The ledger directory to exclude.
+     * @return new index file object.
+     * @throws NoWritableLedgerDirException if there is no writable dir available.
+     */
+    private File getNewLedgerIndexFile(Long ledger, File excludedDir)
+                    throws NoWritableLedgerDirException {
+<span class="nc" id="L235">        File dir = ledgerDirsManager.pickRandomWritableDirForNewIndexFile(excludedDir);</span>
+<span class="nc" id="L236">        String ledgerName = getLedgerName(ledger);</span>
+<span class="nc" id="L237">        return new File(dir, ledgerName);</span>
+    }
+
+    /**
+     * This method will look within the ledger directories for the ledger index
+     * files. That will comprise the set of active ledgers this particular
+     * BookieServer knows about that have not yet been deleted by the BookKeeper
+     * Client. This is called only once during initialization.
+     */
+    private void getActiveLedgers() throws IOException {
+        // Ledger index files are stored in a file hierarchy with a parent and
+        // grandParent directory. We'll have to go two levels deep into these
+        // directories to find the index files.
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        for (File ledgerDirectory : ledgerDirsManager.getAllLedgerDirs()) {</span>
+<span class="nc" id="L251">            File[] grandParents = ledgerDirectory.listFiles();</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">            if (grandParents == null) {</span>
+<span class="nc" id="L253">                continue;</span>
+            }
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            for (File grandParent : grandParents) {</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                if (grandParent.isDirectory()) {</span>
+<span class="nc" id="L257">                    File[] parents = grandParent.listFiles();</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                    if (parents == null) {</span>
+<span class="nc" id="L259">                        continue;</span>
+                    }
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                    for (File parent : parents) {</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                        if (parent.isDirectory()) {</span>
+<span class="nc" id="L263">                            File[] indexFiles = parent.listFiles();</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                            if (indexFiles == null) {</span>
+<span class="nc" id="L265">                                continue;</span>
+                            }
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                            for (File index : indexFiles) {</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">                                if (!index.isFile()</span>
+<span class="nc bnc" id="L269" title="All 4 branches missed.">                                        || (!index.getName().endsWith(IDX) &amp;&amp; !index.getName().endsWith(RLOC))) {</span>
+<span class="nc" id="L270">                                    continue;</span>
+                                }
+
+                                // We've found a ledger index file. The file
+                                // name is the HexString representation of the
+                                // ledgerId.
+<span class="nc" id="L276">                                String ledgerIdInHex = index.getName().replace(RLOC, &quot;&quot;).replace(IDX, &quot;&quot;);</span>
+<span class="nc" id="L277">                                long ledgerId = Long.parseLong(ledgerIdInHex, 16);</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">                                if (index.getName().endsWith(RLOC)) {</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">                                    if (findIndexFile(ledgerId) != null) {</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                                        if (!index.delete()) {</span>
+<span class="nc" id="L281">                                            LOG.warn(&quot;Deleting the rloc file &quot; + index + &quot; failed&quot;);</span>
+                                        }
+                                        continue;
+                                    } else {
+<span class="nc" id="L285">                                        File dest = new File(index.getParentFile(), ledgerIdInHex + IDX);</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">                                        if (!index.renameTo(dest)) {</span>
+<span class="nc" id="L287">                                            throw new IOException(&quot;Renaming rloc file &quot; + index</span>
+                                                    + &quot; to index file has failed&quot;);
+                                        }
+                                    }
+                                }
+<span class="nc" id="L292">                                activeLedgers.put(ledgerId, true);</span>
+                            }
+                        }
+                    }
+                }
+            }
+<span class="nc" id="L298">        }</span>
+<span class="nc" id="L299">    }</span>
+
+    /**
+     * This method is called whenever a ledger is deleted by the BookKeeper Client
+     * and we want to remove all relevant data for it stored in the LedgerCache.
+     */
+    void removeLedger(Long ledgerId) throws IOException {
+        // Delete the ledger's index file and close the FileInfo
+<span class="nc" id="L307">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L309">            fi = getFileInfo(ledgerId, null);</span>
+            // Don't force flush. There's no need since we're deleting the ledger
+            // anyway, and recreating the file at this point, although safe, will
+            // force the garbage collector to do more work later.
+<span class="nc" id="L313">            fi.close(false);</span>
+<span class="nc" id="L314">            fi.delete();</span>
+        } finally {
+<span class="nc bnc" id="L316" title="All 2 branches missed.">            if (fi != null) {</span>
+                // should release use count
+<span class="nc" id="L318">                fi.release();</span>
+                // Remove it from the active ledger manager
+<span class="nc" id="L320">                activeLedgers.remove(ledgerId);</span>
+                // Now remove it from cache
+<span class="nc" id="L322">                writeFileInfoCache.invalidate(ledgerId);</span>
+<span class="nc" id="L323">                readFileInfoCache.invalidate(ledgerId);</span>
+            }
+        }
+<span class="nc" id="L326">    }</span>
+
+    private File findIndexFile(long ledgerId) throws IOException {
+<span class="nc" id="L329">        String ledgerName = getLedgerName(ledgerId);</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        for (File d : ledgerDirsManager.getAllLedgerDirs()) {</span>
+<span class="nc" id="L331">            File lf = new File(d, ledgerName);</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            if (lf.exists()) {</span>
+<span class="nc" id="L333">                return lf;</span>
+            }
+<span class="nc" id="L335">        }</span>
+<span class="nc" id="L336">        return null;</span>
+    }
+
+    boolean ledgerExists(long ledgerId) throws IOException {
+<span class="nc" id="L340">        return activeLedgers.containsKey(ledgerId);</span>
+    }
+
+    void close() throws IOException {
+        // Don't force create the file. We may have many dirty ledgers and file create/flush
+        // can be quite expensive as a result. We can use this optimization in this case
+        // because metadata will be recovered from the journal when we restart anyway.
+<span class="nc" id="L347">        fileInfoBackingCache.closeAllWithoutFlushing();</span>
+<span class="nc" id="L348">        writeFileInfoCache.invalidateAll();</span>
+<span class="nc" id="L349">        readFileInfoCache.invalidateAll();</span>
+<span class="nc" id="L350">    }</span>
+
+    Long getLastAddConfirmed(long ledgerId) throws IOException {
+<span class="nc" id="L353">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L355">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L356">            return fi.getLastAddConfirmed();</span>
+        } finally {
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L359">                fi.release();</span>
+            }
+        }
+    }
+
+    boolean waitForLastAddConfirmedUpdate(long ledgerId,
+                                          long previousLAC,
+                                          Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher) throws IOException {
+<span class="nc" id="L367">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L369">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L370">            return fi.waitForLastAddConfirmedUpdate(previousLAC, watcher);</span>
+        } finally {
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L373">                fi.release();</span>
+            }
+        }
+    }
+
+    void cancelWaitForLastAddConfirmedUpdate(long ledgerId,
+                                          Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher) throws IOException {
+<span class="nc" id="L380">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L382">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L383">            fi.cancelWaitForLastAddConfirmedUpdate(watcher);</span>
+        } finally {
+<span class="nc bnc" id="L385" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L386">                fi.release();</span>
+            }
+        }
+<span class="nc" id="L389">    }</span>
+
+    long updateLastAddConfirmed(long ledgerId, long lac) throws IOException {
+<span class="nc" id="L392">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L394">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L395">            return fi.setLastAddConfirmed(lac);</span>
+        } finally {
+<span class="nc bnc" id="L397" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L398">                fi.release();</span>
+            }
+        }
+    }
+
+    byte[] readMasterKey(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L404">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L406">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L407">            return fi.getMasterKey();</span>
+        } finally {
+<span class="nc bnc" id="L409" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L410">                fi.release();</span>
+            }
+        }
+    }
+
+    void setMasterKey(long ledgerId, byte[] masterKey) throws IOException {
+<span class="nc" id="L416">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L418">            fi = getFileInfo(ledgerId, masterKey);</span>
+        } finally {
+<span class="nc bnc" id="L420" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L421">                fi.release();</span>
+            }
+        }
+<span class="nc" id="L424">    }</span>
+
+    boolean setFenced(long ledgerId) throws IOException {
+<span class="nc" id="L427">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L429">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L430">            return fi.setFenced();</span>
+        } finally {
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L433">                fi.release();</span>
+            }
+        }
+    }
+
+    boolean isFenced(long ledgerId) throws IOException {
+<span class="nc" id="L439">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L441">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L442">            return fi.isFenced();</span>
+        } finally {
+<span class="nc bnc" id="L444" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L445">                fi.release();</span>
+            }
+        }
+    }
+
+    void setExplicitLac(long ledgerId, ByteBuf lac) throws IOException {
+<span class="nc" id="L451">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L453">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L454">            fi.setExplicitLac(lac);</span>
+        } finally {
+<span class="nc bnc" id="L456" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L457">                fi.release();</span>
+            }
+        }
+<span class="nc" id="L460">    }</span>
+
+    public ByteBuf getExplicitLac(long ledgerId) {
+<span class="nc" id="L463">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L465">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L466">            return fi.getExplicitLac();</span>
+<span class="nc" id="L467">        } catch (IOException e) {</span>
+<span class="nc" id="L468">            LOG.error(&quot;Exception during getLastAddConfirmed&quot;, e);</span>
+<span class="nc" id="L469">            return null;</span>
+        } finally {
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L472">                fi.release();</span>
+            }
+        }
+    }
+
+    int getOpenFileLimit() {
+<span class="nc" id="L478">        return openFileLimit;</span>
+    }
+
+    private void relocateIndexFileAndFlushHeader(long ledger, FileInfo fi) throws IOException {
+<span class="nc" id="L482">        File currentDir = getLedgerDirForLedger(fi);</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">        if (ledgerDirsManager.isDirFull(currentDir)) {</span>
+            try {
+<span class="nc" id="L485">                moveLedgerIndexFile(ledger, fi);</span>
+<span class="nc" id="L486">            } catch (NoWritableLedgerDirException nwe) {</span>
+                /*
+                 * if there is no other indexDir, which could accommodate new
+                 * indexFile but the current indexDir has enough space
+                 * (minUsableSizeForIndexFileCreation) for this flushHeader
+                 * operation, then it is ok to proceed without moving
+                 * LedgerIndexFile.
+                 */
+<span class="nc bnc" id="L494" title="All 2 branches missed.">                if (!ledgerDirsManager.isDirWritableForNewIndexFile(currentDir)) {</span>
+<span class="nc" id="L495">                    throw nwe;</span>
+                }
+<span class="nc" id="L497">            }</span>
+        }
+<span class="nc" id="L499">        fi.flushHeader();</span>
+<span class="nc" id="L500">    }</span>
+
+    /**
+     * Get the ledger directory that the ledger index belongs to.
+     *
+     * @param fi File info of a ledger
+     * @return ledger directory that the ledger belongs to.
+     */
+    private File getLedgerDirForLedger(FileInfo fi) {
+<span class="nc" id="L509">        return fi.getLf().getParentFile().getParentFile().getParentFile();</span>
+    }
+
+    private void moveLedgerIndexFile(Long l, FileInfo fi) throws NoWritableLedgerDirException, IOException {
+<span class="nc" id="L513">        File newLedgerIndexFile = getNewLedgerIndexFile(l, getLedgerDirForLedger(fi));</span>
+        try {
+<span class="nc" id="L515">            fi.moveToNewLocation(newLedgerIndexFile, fi.getSizeSinceLastWrite());</span>
+<span class="nc" id="L516">        } catch (FileInfo.FileInfoDeletedException fileInfoDeleted) {</span>
+            // File concurrently deleted
+<span class="nc" id="L518">            throw new Bookie.NoLedgerException(l);</span>
+<span class="nc" id="L519">        }</span>
+<span class="nc" id="L520">    }</span>
+
+    void flushLedgerHeader(long ledger) throws IOException {
+<span class="nc" id="L523">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L525">            fi = getFileInfo(ledger, null);</span>
+<span class="nc" id="L526">            relocateIndexFileAndFlushHeader(ledger, fi);</span>
+<span class="nc" id="L527">        } catch (Bookie.NoLedgerException nle) {</span>
+            // ledger has been deleted
+<span class="nc" id="L529">            LOG.info(&quot;No ledger {} found when flushing header.&quot;, ledger);</span>
+<span class="nc" id="L530">            return;</span>
+        } finally {
+<span class="nc bnc" id="L532" title="All 2 branches missed.">            if (null != fi) {</span>
+<span class="nc" id="L533">                fi.release();</span>
+            }
+        }
+<span class="nc" id="L536">    }</span>
+
+    void flushLedgerEntries(long l, List&lt;LedgerEntryPage&gt; entries) throws IOException {
+<span class="nc" id="L539">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L541">            Collections.sort(entries, new Comparator&lt;LedgerEntryPage&gt;() {</span>
+                @Override
+                public int compare(LedgerEntryPage o1, LedgerEntryPage o2) {
+<span class="nc" id="L544">                    return (int) (o1.getFirstEntry() - o2.getFirstEntry());</span>
+                }
+            });
+<span class="nc" id="L547">            int[] versions = new int[entries.size()];</span>
+            try {
+<span class="nc" id="L549">                fi = getFileInfo(l, null);</span>
+<span class="nc" id="L550">            } catch (Bookie.NoLedgerException nle) {</span>
+                // ledger has been deleted
+<span class="nc" id="L552">                LOG.info(&quot;No ledger {} found when flushing entries.&quot;, l);</span>
+<span class="nc" id="L553">                return;</span>
+<span class="nc" id="L554">            }</span>
+
+            // flush the header if necessary
+<span class="nc" id="L557">            relocateIndexFileAndFlushHeader(l, fi);</span>
+<span class="nc" id="L558">            int start = 0;</span>
+<span class="nc" id="L559">            long lastOffset = -1;</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">            for (int i = 0; i &lt; entries.size(); i++) {</span>
+<span class="nc" id="L561">                versions[i] = entries.get(i).getVersion();</span>
+<span class="nc bnc" id="L562" title="All 4 branches missed.">                if (lastOffset != -1 &amp;&amp; (entries.get(i).getFirstEntry() - lastOffset) != entriesPerPage) {</span>
+                    // send up a sequential list
+<span class="nc" id="L564">                    int count = i - start;</span>
+<span class="nc bnc" id="L565" title="All 2 branches missed.">                    if (count == 0) {</span>
+<span class="nc" id="L566">                        LOG.warn(&quot;Count cannot possibly be zero!&quot;);</span>
+                    }
+<span class="nc" id="L568">                    writeBuffers(l, entries, fi, start, count);</span>
+<span class="nc" id="L569">                    start = i;</span>
+                }
+<span class="nc" id="L571">                lastOffset = entries.get(i).getFirstEntry();</span>
+            }
+<span class="nc bnc" id="L573" title="All 4 branches missed.">            if (entries.size() - start == 0 &amp;&amp; entries.size() != 0) {</span>
+<span class="nc" id="L574">                LOG.warn(&quot;Nothing to write, but there were entries!&quot;);</span>
+            }
+<span class="nc" id="L576">            writeBuffers(l, entries, fi, start, entries.size() - start);</span>
+<span class="nc bnc" id="L577" title="All 2 branches missed.">            for (int i = 0; i &lt; entries.size(); i++) {</span>
+<span class="nc" id="L578">                LedgerEntryPage lep = entries.get(i);</span>
+<span class="nc" id="L579">                lep.setClean(versions[i]);</span>
+            }
+<span class="nc bnc" id="L581" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L582">                LOG.debug(&quot;Flushed ledger {} with {} pages.&quot;, l, entries.size());</span>
+            }
+        } finally {
+<span class="nc bnc" id="L585" title="All 2 branches missed.">            if (fi != null) {</span>
+<span class="nc" id="L586">                fi.release();</span>
+            }
+        }
+<span class="nc" id="L589">    }</span>
+
+    private void writeBuffers(Long ledger,
+                              List&lt;LedgerEntryPage&gt; entries, FileInfo fi,
+                              int start, int count) throws IOException, Bookie.NoLedgerException {
+<span class="nc bnc" id="L594" title="All 2 branches missed.">        if (LOG.isTraceEnabled()) {</span>
+<span class="nc" id="L595">            LOG.trace(&quot;Writing {} buffers of {}&quot;, count, Long.toHexString(ledger));</span>
+        }
+<span class="nc bnc" id="L597" title="All 2 branches missed.">        if (count == 0) {</span>
+<span class="nc" id="L598">            return;</span>
+        }
+<span class="nc" id="L600">        ByteBuffer[] buffs = new ByteBuffer[count];</span>
+<span class="nc bnc" id="L601" title="All 2 branches missed.">        for (int j = 0; j &lt; count; j++) {</span>
+<span class="nc" id="L602">            buffs[j] = entries.get(start + j).getPageToWrite();</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">            if (entries.get(start + j).getLedger() != ledger) {</span>
+<span class="nc" id="L604">                throw new IOException(&quot;Writing to &quot; + ledger + &quot; but page belongs to &quot;</span>
+<span class="nc" id="L605">                                + entries.get(start + j).getLedger());</span>
+            }
+        }
+<span class="nc" id="L608">        long totalWritten = 0;</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">        while (buffs[buffs.length - 1].remaining() &gt; 0) {</span>
+<span class="nc" id="L610">            long rc = 0;</span>
+            try {
+<span class="nc" id="L612">                rc = fi.write(buffs, entries.get(start + 0).getFirstEntryPosition());</span>
+<span class="nc" id="L613">            } catch (FileInfo.FileInfoDeletedException e) {</span>
+<span class="nc" id="L614">                throw new Bookie.NoLedgerException(ledger);</span>
+<span class="nc" id="L615">            }</span>
+<span class="nc bnc" id="L616" title="All 2 branches missed.">            if (rc &lt;= 0) {</span>
+<span class="nc" id="L617">                throw new IOException(&quot;Short write to ledger &quot; + ledger + &quot; rc = &quot; + rc);</span>
+            }
+<span class="nc" id="L619">            totalWritten += rc;</span>
+<span class="nc" id="L620">        }</span>
+<span class="nc bnc" id="L621" title="All 2 branches missed.">        if (totalWritten != (long) count * (long) pageSize) {</span>
+<span class="nc" id="L622">            throw new IOException(&quot;Short write to ledger &quot; + ledger + &quot; wrote &quot; + totalWritten</span>
+                            + &quot; expected &quot; + count * pageSize);
+        }
+<span class="nc" id="L625">    }</span>
+
+    /**
+     * Update the ledger entry page.
+     *
+     * @param lep
+     *          ledger entry page
+     * @return true if it is a new page, otherwise false.
+     * @throws IOException
+     */
+    boolean updatePage(LedgerEntryPage lep) throws IOException {
+<span class="nc bnc" id="L636" title="All 2 branches missed.">        if (!lep.isClean()) {</span>
+<span class="nc" id="L637">            throw new IOException(&quot;Trying to update a dirty page&quot;);</span>
+        }
+<span class="nc" id="L639">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L641">            fi = getFileInfo(lep.getLedger(), null);</span>
+<span class="nc" id="L642">            long pos = lep.getFirstEntryPosition();</span>
+<span class="nc bnc" id="L643" title="All 2 branches missed.">            if (pos &gt;= fi.size()) {</span>
+<span class="nc" id="L644">                lep.zeroPage();</span>
+<span class="nc" id="L645">                return true;</span>
+            } else {
+<span class="nc" id="L647">                lep.readPage(fi);</span>
+<span class="nc" id="L648">                return false;</span>
+            }
+        } finally {
+<span class="nc bnc" id="L651" title="All 2 branches missed.">            if (fi != null) {</span>
+<span class="nc" id="L652">                fi.release();</span>
+            }
+        }
+    }
+
+    long getPersistEntryBeyondInMem(long ledgerId, long lastEntryInMem) throws IOException {
+<span class="nc" id="L658">        CachedFileInfo fi = null;</span>
+<span class="nc" id="L659">        long lastEntry = lastEntryInMem;</span>
+        try {
+<span class="nc" id="L661">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L662">            long size = fi.size();</span>
+            // make sure the file size is aligned with index entry size
+            // otherwise we may read incorrect data
+<span class="nc bnc" id="L665" title="All 2 branches missed.">            if (0 != size % LedgerEntryPage.getIndexEntrySize()) {</span>
+<span class="nc" id="L666">                LOG.warn(&quot;Index file of ledger {} is not aligned with index entry size.&quot;, ledgerId);</span>
+<span class="nc" id="L667">                size = size - size % LedgerEntryPage.getIndexEntrySize();</span>
+            }
+            // we may not have the last entry in the cache
+<span class="nc bnc" id="L670" title="All 2 branches missed.">            if (size &gt; lastEntry * LedgerEntryPage.getIndexEntrySize()) {</span>
+<span class="nc" id="L671">                ByteBuffer bb = ByteBuffer.allocate(pageSize);</span>
+<span class="nc" id="L672">                long position = size - pageSize;</span>
+<span class="nc bnc" id="L673" title="All 2 branches missed.">                if (position &lt; 0) {</span>
+<span class="nc" id="L674">                    position = 0;</span>
+                }
+                // we read the last page from file size minus page size, so it should not encounter short read
+                // exception. if it does, it is an unexpected situation, then throw the exception and fail it
+                // immediately.
+                try {
+<span class="nc" id="L680">                    fi.read(bb, position, false);</span>
+<span class="nc" id="L681">                } catch (ShortReadException sre) {</span>
+                    // throw a more meaningful exception with ledger id
+<span class="nc" id="L683">                    throw new ShortReadException(&quot;Short read on ledger &quot; + ledgerId + &quot; : &quot;, sre);</span>
+<span class="nc" id="L684">                }</span>
+<span class="nc" id="L685">                bb.flip();</span>
+<span class="nc" id="L686">                long startingEntryId = position / LedgerEntryPage.getIndexEntrySize();</span>
+<span class="nc bnc" id="L687" title="All 2 branches missed.">                for (int i = entriesPerPage - 1; i &gt;= 0; i--) {</span>
+<span class="nc bnc" id="L688" title="All 2 branches missed.">                    if (bb.getLong(i * LedgerEntryPage.getIndexEntrySize()) != 0) {</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                        if (lastEntry &lt; startingEntryId + i) {</span>
+<span class="nc" id="L690">                            lastEntry = startingEntryId + i;</span>
+                        }
+                        break;
+                    }
+                }
+            }
+        } finally {
+<span class="nc bnc" id="L697" title="All 2 branches missed.">            if (fi != null) {</span>
+<span class="nc" id="L698">                fi.release();</span>
+            }
+        }
+<span class="nc" id="L701">        return lastEntry;</span>
+    }
+
+    /**
+     * Read ledger meta.
+     * @param ledgerId Ledger Id
+     */
+    public LedgerCache.LedgerIndexMetadata readLedgerIndexMetadata(long ledgerId) throws IOException {
+<span class="nc" id="L709">        CachedFileInfo fi = null;</span>
+        try {
+<span class="nc" id="L711">            fi = getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L712">            return new LedgerCache.LedgerIndexMetadata(</span>
+<span class="nc" id="L713">                    fi.getMasterKey(),</span>
+<span class="nc" id="L714">                    fi.size(),</span>
+<span class="nc" id="L715">                    fi.isFenced());</span>
+        } finally {
+<span class="nc bnc" id="L717" title="All 2 branches missed.">            if (fi != null) {</span>
+<span class="nc" id="L718">                fi.release();</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

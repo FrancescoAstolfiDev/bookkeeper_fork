@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JournalStats.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.stats</a> &gt; <span class="el_source">JournalStats.java</span></div><h1>JournalStats.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.bookie.stats;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ADD_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.CATEGORY_SERVER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.FORCE_LEDGER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_ADD_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_CREATION_LATENCY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_FLUSH_LATENCY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_FORCE_LEDGER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_FORCE_WRITE_BATCH_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_FORCE_WRITE_BATCH_ENTRIES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_FORCE_WRITE_ENQUEUE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_FORCE_WRITE_GROUPING_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_FORCE_WRITE_QUEUE_SIZE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_MEMORY_MAX;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_MEMORY_USED;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_NUM_FLUSH_EMPTY_QUEUE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_NUM_FLUSH_MAX_OUTSTANDING_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_NUM_FLUSH_MAX_WAIT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_PROCESS_TIME_LATENCY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_QUEUE_LATENCY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_QUEUE_SIZE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_SYNC;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.JOURNAL_WRITE_BYTES;
+
+import com.google.common.annotations.VisibleForTesting;
+import java.util.function.Supplier;
+import lombok.Getter;
+import org.apache.bookkeeper.bookie.BookKeeperServerStats;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+
+/**
+ * A umbrella class for journal related stats.
+ */
+@StatsDoc(
+    name = JOURNAL_SCOPE,
+    category = CATEGORY_SERVER,
+    help = &quot;Journal related stats&quot;
+)
+@Getter
+public class JournalStats {
+
+    @StatsDoc(
+        name = JOURNAL_ADD_ENTRY,
+        help = &quot;operation stats of recording addEntry requests in the journal&quot;,
+        parent = ADD_ENTRY
+    )
+<span class="nc" id="L72">    private final OpStatsLogger journalAddEntryStats;</span>
+    @StatsDoc(
+        name = JOURNAL_FORCE_LEDGER,
+        help = &quot;operation stats of recording forceLedger requests in the journal&quot;,
+        parent = FORCE_LEDGER
+    )
+<span class="nc" id="L78">    private final OpStatsLogger journalForceLedgerStats;</span>
+    @StatsDoc(
+        name = JOURNAL_SYNC,
+        help = &quot;operation stats of syncing data to journal disks&quot;,
+        parent = JOURNAL_ADD_ENTRY,
+        happensAfter = JOURNAL_FORCE_WRITE_ENQUEUE
+    )
+<span class="nc" id="L85">    private final OpStatsLogger journalSyncStats;</span>
+    @StatsDoc(
+        name = JOURNAL_FORCE_WRITE_ENQUEUE,
+        help = &quot;operation stats of enqueueing force write requests to force write queue&quot;,
+        parent = JOURNAL_ADD_ENTRY,
+        happensAfter = JOURNAL_PROCESS_TIME_LATENCY
+    )
+<span class="nc" id="L92">    private final OpStatsLogger fwEnqueueTimeStats;</span>
+    @StatsDoc(
+        name = JOURNAL_CREATION_LATENCY,
+        help = &quot;operation stats of creating journal files&quot;,
+        parent = JOURNAL_PROCESS_TIME_LATENCY
+    )
+<span class="nc" id="L98">    private final OpStatsLogger journalCreationStats;</span>
+    @StatsDoc(
+        name = JOURNAL_FLUSH_LATENCY,
+        help = &quot;operation stats of flushing data from memory to filesystem (but not yet fsyncing to disks)&quot;,
+        parent = JOURNAL_PROCESS_TIME_LATENCY,
+        happensAfter = JOURNAL_CREATION_LATENCY
+    )
+<span class="nc" id="L105">    private final OpStatsLogger journalFlushStats;</span>
+    @StatsDoc(
+        name = JOURNAL_PROCESS_TIME_LATENCY,
+        help = &quot;operation stats of processing requests in a journal (from dequeue an item to finish processing it)&quot;,
+        parent = JOURNAL_ADD_ENTRY,
+        happensAfter = JOURNAL_QUEUE_LATENCY
+    )
+<span class="nc" id="L112">    private final OpStatsLogger journalProcessTimeStats;</span>
+    @StatsDoc(
+        name = JOURNAL_QUEUE_LATENCY,
+        help = &quot;operation stats of enqueuing requests to a journal&quot;,
+        parent = JOURNAL_ADD_ENTRY
+    )
+<span class="nc" id="L118">    private final OpStatsLogger journalQueueStats;</span>
+    @StatsDoc(
+        name = JOURNAL_FORCE_WRITE_GROUPING_COUNT,
+        help = &quot;The distribution of number of force write requests grouped in a force write&quot;
+    )
+<span class="nc" id="L123">    private final OpStatsLogger forceWriteGroupingCountStats;</span>
+    @StatsDoc(
+        name = JOURNAL_FORCE_WRITE_BATCH_ENTRIES,
+        help = &quot;The distribution of number of entries grouped together into a force write request&quot;
+    )
+<span class="nc" id="L128">    private final OpStatsLogger forceWriteBatchEntriesStats;</span>
+    @StatsDoc(
+        name = JOURNAL_FORCE_WRITE_BATCH_BYTES,
+        help = &quot;The distribution of number of bytes grouped together into a force write request&quot;
+    )
+<span class="nc" id="L133">    private final OpStatsLogger forceWriteBatchBytesStats;</span>
+    @StatsDoc(
+        name = JOURNAL_QUEUE_SIZE,
+        help = &quot;The journal queue size&quot;
+    )
+<span class="nc" id="L138">    private final Counter journalQueueSize;</span>
+    @StatsDoc(
+        name = JOURNAL_FORCE_WRITE_QUEUE_SIZE,
+        help = &quot;The force write queue size&quot;
+    )
+<span class="nc" id="L143">    private final Counter forceWriteQueueSize;</span>
+
+    @StatsDoc(
+        name = JOURNAL_NUM_FLUSH_MAX_WAIT,
+        help = &quot;The number of journal flushes triggered by MAX_WAIT time&quot;
+    )
+<span class="nc" id="L149">    private final Counter flushMaxWaitCounter;</span>
+    @StatsDoc(
+        name = JOURNAL_NUM_FLUSH_MAX_OUTSTANDING_BYTES,
+        help = &quot;The number of journal flushes triggered by MAX_OUTSTANDING_BYTES&quot;
+    )
+<span class="nc" id="L154">    private Counter flushMaxOutstandingBytesCounter;</span>
+    @StatsDoc(
+        name = JOURNAL_NUM_FLUSH_EMPTY_QUEUE,
+        help = &quot;The number of journal flushes triggered when journal queue becomes empty&quot;
+    )
+<span class="nc" id="L159">    private final Counter flushEmptyQueueCounter;</span>
+    @StatsDoc(
+        name = JOURNAL_WRITE_BYTES,
+        help = &quot;The number of bytes appended to the journal&quot;
+    )
+<span class="nc" id="L164">    private final Counter journalWriteBytes;</span>
+    @StatsDoc(
+            name = JOURNAL_MEMORY_MAX,
+            help = &quot;The max amount of memory in bytes that can be used by the bookie journal&quot;
+    )
+<span class="nc" id="L169">    private final Gauge&lt;Long&gt; journalMemoryMaxStats;</span>
+    @StatsDoc(
+            name = JOURNAL_MEMORY_USED,
+            help = &quot;The actual amount of memory in bytes currently used by the bookie journal&quot;
+    )
+<span class="nc" id="L174">    private final Gauge&lt;Long&gt; journalMemoryUsedStats;</span>
+
+    public JournalStats(StatsLogger statsLogger, final long maxJournalMemoryBytes,
+<span class="nc" id="L177">                        Supplier&lt;Long&gt; currentJournalMemoryBytes) {</span>
+<span class="nc" id="L178">        journalAddEntryStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_ADD_ENTRY);</span>
+<span class="nc" id="L179">        journalForceLedgerStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_FORCE_LEDGER);</span>
+<span class="nc" id="L180">        journalSyncStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_SYNC);</span>
+<span class="nc" id="L181">        fwEnqueueTimeStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_FORCE_WRITE_ENQUEUE);</span>
+<span class="nc" id="L182">        journalCreationStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_CREATION_LATENCY);</span>
+<span class="nc" id="L183">        journalFlushStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_FLUSH_LATENCY);</span>
+<span class="nc" id="L184">        journalQueueStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_QUEUE_LATENCY);</span>
+<span class="nc" id="L185">        journalProcessTimeStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_PROCESS_TIME_LATENCY);</span>
+<span class="nc" id="L186">        forceWriteGroupingCountStats =</span>
+<span class="nc" id="L187">                statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_FORCE_WRITE_GROUPING_COUNT);</span>
+<span class="nc" id="L188">        forceWriteBatchEntriesStats =</span>
+<span class="nc" id="L189">                statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_FORCE_WRITE_BATCH_ENTRIES);</span>
+<span class="nc" id="L190">        forceWriteBatchBytesStats = statsLogger.getOpStatsLogger(BookKeeperServerStats.JOURNAL_FORCE_WRITE_BATCH_BYTES);</span>
+<span class="nc" id="L191">        journalQueueSize = statsLogger.getCounter(BookKeeperServerStats.JOURNAL_QUEUE_SIZE);</span>
+<span class="nc" id="L192">        forceWriteQueueSize = statsLogger.getCounter(BookKeeperServerStats.JOURNAL_FORCE_WRITE_QUEUE_SIZE);</span>
+<span class="nc" id="L193">        flushMaxWaitCounter = statsLogger.getCounter(BookKeeperServerStats.JOURNAL_NUM_FLUSH_MAX_WAIT);</span>
+<span class="nc" id="L194">        flushMaxOutstandingBytesCounter =</span>
+<span class="nc" id="L195">                statsLogger.getCounter(BookKeeperServerStats.JOURNAL_NUM_FLUSH_MAX_OUTSTANDING_BYTES);</span>
+<span class="nc" id="L196">        flushEmptyQueueCounter = statsLogger.getCounter(BookKeeperServerStats.JOURNAL_NUM_FLUSH_EMPTY_QUEUE);</span>
+<span class="nc" id="L197">        journalWriteBytes = statsLogger.getCounter(BookKeeperServerStats.JOURNAL_WRITE_BYTES);</span>
+
+<span class="nc" id="L199">        journalMemoryMaxStats = new Gauge&lt;Long&gt;() {</span>
+            @Override
+            public Long getDefaultValue() {
+<span class="nc" id="L202">                return maxJournalMemoryBytes;</span>
+            }
+
+            @Override
+            public Long getSample() {
+<span class="nc" id="L207">                return maxJournalMemoryBytes;</span>
+            }
+        };
+<span class="nc" id="L210">        statsLogger.registerGauge(JOURNAL_MEMORY_MAX, journalMemoryMaxStats);</span>
+
+<span class="nc" id="L212">        journalMemoryUsedStats = new Gauge&lt;Long&gt;() {</span>
+            @Override
+            public Long getDefaultValue() {
+<span class="nc" id="L215">                return -1L;</span>
+            }
+
+            @Override
+            public Long getSample() {
+<span class="nc" id="L220">                return currentJournalMemoryBytes.get();</span>
+            }
+        };
+<span class="nc" id="L223">        statsLogger.registerGauge(JOURNAL_MEMORY_USED, journalMemoryUsedStats);</span>
+<span class="nc" id="L224">    }</span>
+
+    @VisibleForTesting
+    public void setFlushMaxOutstandingBytesCounter(Counter flushMaxOutstandingBytesCounter) {
+<span class="nc" id="L228">        this.flushMaxOutstandingBytesCounter = flushMaxOutstandingBytesCounter;</span>
+<span class="nc" id="L229">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

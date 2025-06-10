@@ -1,0 +1,311 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BookieServer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">BookieServer.java</span></div><h1>BookieServer.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.proto;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SERVER_SCOPE;
+import static org.apache.bookkeeper.conf.AbstractConfiguration.PERMITTED_STARTUP_USERS;
+
+import com.google.common.annotations.VisibleForTesting;
+import io.netty.buffer.ByteBufAllocator;
+import java.io.IOException;
+import java.lang.Thread.UncaughtExceptionHandler;
+import java.net.UnknownHostException;
+import java.util.Arrays;
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.BookieCriticalThread;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.ExitCode;
+import org.apache.bookkeeper.bookie.UncleanShutdownDetection;
+import org.apache.bookkeeper.common.util.JsonUtil.ParseJsonException;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.net.BookieSocketAddress;
+import org.apache.bookkeeper.processor.RequestProcessor;
+import org.apache.bookkeeper.replication.ReplicationException.CompatibilityException;
+import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
+import org.apache.bookkeeper.server.Main;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.tls.SecurityException;
+import org.apache.bookkeeper.tls.SecurityHandlerFactory;
+import org.apache.bookkeeper.tls.SecurityProviderFactoryFactory;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Implements the server-side part of the BookKeeper protocol.
+ *
+ */
+public class BookieServer {
+    final ServerConfiguration conf;
+    BookieNettyServer nettyServer;
+<span class="nc" id="L61">    private volatile boolean running = false;</span>
+    private final Bookie bookie;
+    DeathWatcher deathWatcher;
+    UncleanShutdownDetection uncleanShutdownDetection;
+<span class="nc" id="L65">    private static final Logger LOG = LoggerFactory.getLogger(BookieServer.class);</span>
+
+<span class="nc" id="L67">    int exitCode = ExitCode.OK;</span>
+
+    // request processor
+    private final RequestProcessor requestProcessor;
+
+    // Expose Stats
+    private final StatsLogger statsLogger;
+
+    // Exception handler
+<span class="nc" id="L76">    private volatile UncaughtExceptionHandler uncaughtExceptionHandler = null;</span>
+
+    public BookieServer(ServerConfiguration conf,
+                        Bookie bookie,
+                        StatsLogger statsLogger,
+                        ByteBufAllocator allocator,
+                        UncleanShutdownDetection uncleanShutdownDetection)
+            throws IOException, KeeperException, InterruptedException,
+<span class="nc" id="L84">            BookieException, UnavailableException, CompatibilityException, SecurityException {</span>
+<span class="nc" id="L85">        this.conf = conf;</span>
+<span class="nc" id="L86">        validateUser(conf);</span>
+        String configAsString;
+        try {
+<span class="nc" id="L89">            configAsString = conf.asJson();</span>
+<span class="nc" id="L90">            LOG.info(configAsString);</span>
+<span class="nc" id="L91">        } catch (ParseJsonException pe) {</span>
+<span class="nc" id="L92">            LOG.error(&quot;Got ParseJsonException while converting Config to JSONString&quot;, pe);</span>
+<span class="nc" id="L93">        }</span>
+
+<span class="nc" id="L95">        this.statsLogger = statsLogger;</span>
+<span class="nc" id="L96">        this.bookie = bookie;</span>
+<span class="nc" id="L97">        this.nettyServer = new BookieNettyServer(this.conf, null, allocator);</span>
+<span class="nc" id="L98">        this.uncleanShutdownDetection = uncleanShutdownDetection;</span>
+
+        final SecurityHandlerFactory shFactory;
+
+<span class="nc" id="L102">        shFactory = SecurityProviderFactoryFactory</span>
+<span class="nc" id="L103">                .getSecurityProviderFactory(conf.getTLSProviderFactoryClass());</span>
+
+<span class="nc" id="L105">        this.requestProcessor = new BookieRequestProcessor(conf, bookie,</span>
+<span class="nc" id="L106">                statsLogger.scope(SERVER_SCOPE), shFactory, allocator, nettyServer.allChannels);</span>
+<span class="nc" id="L107">        this.nettyServer.setRequestProcessor(this.requestProcessor);</span>
+<span class="nc" id="L108">    }</span>
+
+    @VisibleForTesting
+    public static BookieServer newBookieServer(ServerConfiguration conf,
+                                               Bookie bookie,
+                                               StatsLogger statsLogger,
+                                               ByteBufAllocator allocator,
+                                               UncleanShutdownDetection uncleanShutdownDetection)
+            throws CompatibilityException, UnavailableException, SecurityException, IOException,
+            InterruptedException, KeeperException, BookieException {
+<span class="nc" id="L118">        return new BookieServer(conf, bookie, statsLogger, allocator, uncleanShutdownDetection);</span>
+    }
+
+    /**
+     * Currently the uncaught exception handler is used for DeathWatcher to notify
+     * lifecycle management that a bookie is dead for some reasons.
+     *
+     * &lt;p&gt;in future, we can register this &lt;tt&gt;exceptionHandler&lt;/tt&gt; to critical threads
+     * so when those threads are dead, it will automatically trigger lifecycle management
+     * to shutdown the process.
+     */
+    public void setExceptionHandler(UncaughtExceptionHandler exceptionHandler) {
+<span class="nc" id="L130">        this.uncaughtExceptionHandler = exceptionHandler;</span>
+<span class="nc" id="L131">    }</span>
+
+    public void start() throws InterruptedException, IOException {
+<span class="nc" id="L134">        this.bookie.start();</span>
+
+        // fail fast, when bookie startup is not successful
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (!this.bookie.isRunning()) {</span>
+<span class="nc" id="L138">            exitCode = bookie.getExitCode();</span>
+<span class="nc" id="L139">            this.requestProcessor.close();</span>
+<span class="nc" id="L140">            return;</span>
+        }
+
+<span class="nc" id="L143">        this.uncleanShutdownDetection.registerStartUp();</span>
+<span class="nc" id="L144">        this.nettyServer.start();</span>
+
+<span class="nc" id="L146">        running = true;</span>
+<span class="nc" id="L147">        deathWatcher = new DeathWatcher(conf);</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (null != uncaughtExceptionHandler) {</span>
+<span class="nc" id="L149">            deathWatcher.setUncaughtExceptionHandler(uncaughtExceptionHandler);</span>
+        }
+<span class="nc" id="L151">        deathWatcher.start();</span>
+<span class="nc" id="L152">    }</span>
+
+    @VisibleForTesting
+    public BookieSocketAddress getLocalAddress() throws UnknownHostException {
+<span class="nc" id="L156">        return BookieImpl.getBookieAddress(conf);</span>
+    }
+
+    @VisibleForTesting
+    public BookieId getBookieId() throws UnknownHostException {
+<span class="nc" id="L161">        return BookieImpl.getBookieId(conf);</span>
+    }
+
+    @VisibleForTesting
+    public Bookie getBookie() {
+<span class="nc" id="L166">        return bookie;</span>
+    }
+
+    @VisibleForTesting
+    public BookieRequestProcessor getBookieRequestProcessor() {
+<span class="nc" id="L171">        return (BookieRequestProcessor) requestProcessor;</span>
+    }
+
+    /**
+     * Suspend processing of requests in the bookie (for testing).
+     */
+    @VisibleForTesting
+    public void suspendProcessing() {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L180">            LOG.debug(&quot;Suspending bookie server, port is {}&quot;, conf.getBookiePort());</span>
+        }
+<span class="nc" id="L182">        nettyServer.suspendProcessing();</span>
+<span class="nc" id="L183">    }</span>
+
+    /**
+     * Resume processing requests in the bookie (for testing).
+     */
+    @VisibleForTesting
+    public void resumeProcessing() {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L191">            LOG.debug(&quot;Resuming bookie server, port is {}&quot;, conf.getBookiePort());</span>
+        }
+<span class="nc" id="L193">        nettyServer.resumeProcessing();</span>
+<span class="nc" id="L194">    }</span>
+
+    public synchronized void shutdown() {
+<span class="nc" id="L197">        LOG.info(&quot;Shutting down BookieServer&quot;);</span>
+<span class="nc" id="L198">        this.nettyServer.shutdown();</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        if (!running) {</span>
+<span class="nc" id="L200">            return;</span>
+        }
+<span class="nc" id="L202">        this.requestProcessor.close();</span>
+<span class="nc" id="L203">        exitCode = bookie.shutdown();</span>
+<span class="nc" id="L204">        uncleanShutdownDetection.registerCleanShutdown();</span>
+<span class="nc" id="L205">        running = false;</span>
+<span class="nc" id="L206">    }</span>
+
+    /**
+     * Ensure the current user can start-up the process if it's restricted.
+     */
+    private void validateUser(ServerConfiguration conf) throws BookieException {
+<span class="nc bnc" id="L212" title="All 2 branches missed.">        if (conf.containsKey(PERMITTED_STARTUP_USERS)) {</span>
+<span class="nc" id="L213">            String currentUser = System.getProperty(&quot;user.name&quot;);</span>
+<span class="nc" id="L214">            String[] propertyValue = conf.getPermittedStartupUsers();</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            for (String s : propertyValue) {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                if (s.equals(currentUser)) {</span>
+<span class="nc" id="L217">                    return;</span>
+                }
+            }
+<span class="nc" id="L220">            String errorMsg =</span>
+                    &quot;System cannot start because current user isn't in permittedStartupUsers.&quot;
+                            + &quot; Current user: &quot; + currentUser + &quot; permittedStartupUsers: &quot;
+<span class="nc" id="L223">                            + Arrays.toString(propertyValue);</span>
+<span class="nc" id="L224">            LOG.error(errorMsg);</span>
+<span class="nc" id="L225">            throw new BookieException.BookieUnauthorizedAccessException(errorMsg);</span>
+        }
+<span class="nc" id="L227">    }</span>
+
+
+    public boolean isRunning() {
+<span class="nc bnc" id="L231" title="All 6 branches missed.">        return bookie.isRunning() &amp;&amp; nettyServer.isRunning() &amp;&amp; running;</span>
+    }
+
+    /**
+     * Whether bookie is running?
+     *
+     * @return true if bookie is running, otherwise return false
+     */
+    public boolean isBookieRunning() {
+<span class="nc" id="L240">        return bookie.isRunning();</span>
+    }
+
+    public void join() throws InterruptedException {
+<span class="nc" id="L244">        bookie.join();</span>
+<span class="nc" id="L245">    }</span>
+
+    public int getExitCode() {
+<span class="nc" id="L248">        return exitCode;</span>
+    }
+
+    /**
+     * A thread to watch whether bookie and nioserver are still alive.
+     */
+    private class DeathWatcher extends BookieCriticalThread {
+
+        private final int watchInterval;
+
+<span class="nc" id="L258">        DeathWatcher(ServerConfiguration conf) {</span>
+<span class="nc" id="L259">            super(&quot;BookieDeathWatcher-&quot; + conf.getBookiePort());</span>
+<span class="nc" id="L260">            watchInterval = conf.getDeathWatchInterval();</span>
+            // set a default uncaught exception handler to shutdown the bookie server
+            // when it notices the bookie is not running any more.
+<span class="nc" id="L263">            setUncaughtExceptionHandler((thread, cause) -&gt; {</span>
+<span class="nc" id="L264">                LOG.info(&quot;BookieDeathWatcher exited loop due to uncaught exception from thread {}&quot;,</span>
+<span class="nc" id="L265">                    thread.getName(), cause);</span>
+<span class="nc" id="L266">                shutdown();</span>
+<span class="nc" id="L267">            });</span>
+<span class="nc" id="L268">        }</span>
+
+        @Override
+        public void run() {
+            while (true) {
+                try {
+<span class="nc" id="L274">                    Thread.sleep(watchInterval);</span>
+<span class="nc" id="L275">                } catch (InterruptedException ie) {</span>
+                    // do nothing
+<span class="nc" id="L277">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L278">                }</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">                if (!isBookieRunning()) {</span>
+<span class="nc" id="L280">                    LOG.info(&quot;BookieDeathWatcher noticed the bookie is not running any more, exiting the watch loop!&quot;);</span>
+                    // death watcher has noticed that bookie is not running any more
+                    // throw an exception to fail the death watcher thread and it will
+                    // trigger the uncaught exception handler to handle this &quot;bookie not running&quot; situation.
+<span class="nc" id="L284">                    throw new RuntimeException(&quot;Bookie is not running any more&quot;);</span>
+                }
+            }
+        }
+    }
+
+
+    /**
+     * Legacy Method to run bookie server.
+     */
+    public static void main(String[] args) {
+<span class="nc" id="L295">        Main.main(args);</span>
+<span class="nc" id="L296">    }</span>
+
+    @Override
+    public  String toString() {
+<span class="nc" id="L300">        String addr = &quot;UNKNOWN&quot;;</span>
+<span class="nc" id="L301">        String id = &quot;?&quot;;</span>
+        try {
+<span class="nc" id="L303">            addr = BookieImpl.getBookieAddress(conf).toString();</span>
+<span class="nc" id="L304">            id = getBookieId().toString();</span>
+<span class="nc" id="L305">        } catch (UnknownHostException e) {</span>
+            //Ignored...
+<span class="nc" id="L307">        }</span>
+<span class="nc" id="L308">        return &quot;Bookie Server listening on &quot; + addr + &quot; with id &quot; + id;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

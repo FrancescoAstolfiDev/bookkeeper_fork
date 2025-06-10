@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BookieStateReadOnlyService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">BookieStateReadOnlyService.java</span></div><h1>BookieStateReadOnlyService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.StateManager;
+import org.apache.bookkeeper.common.util.JsonUtil;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+
+/**
+ * HttpEndpointService that handles readOnly state related http requests.
+ * The GET method will get the current readOnly state of the bookie.
+ * The PUT method will change the current readOnly state of the bookie if the desired state is
+ * different from the current. The request body could be {&quot;readOnly&quot;:true/false}. The current
+ * or the updated state will be included in the response.
+ */
+public class BookieStateReadOnlyService implements HttpEndpointService {
+    private final Bookie bookie;
+
+<span class="nc" id="L44">    public BookieStateReadOnlyService(Bookie bookie) {</span>
+<span class="nc" id="L45">        this.bookie = checkNotNull(bookie);</span>
+<span class="nc" id="L46">    }</span>
+
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L50">        HttpServiceResponse response = new HttpServiceResponse();</span>
+<span class="nc" id="L51">        StateManager stateManager = this.bookie.getStateManager();</span>
+
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        if (HttpServer.Method.PUT.equals(request.getMethod())) {</span>
+<span class="nc" id="L54">            ReadOnlyState inState = JsonUtil.fromJson(request.getBody(), ReadOnlyState.class);</span>
+<span class="nc bnc" id="L55" title="All 4 branches missed.">            if (stateManager.isReadOnly() &amp;&amp; !inState.isReadOnly()) {</span>
+<span class="nc bnc" id="L56" title="All 2 branches missed.">                if (stateManager.isForceReadOnly()) {</span>
+<span class="nc" id="L57">                    response.setCode(HttpServer.StatusCode.BAD_REQUEST);</span>
+<span class="nc" id="L58">                    response.setBody(&quot;Bookie is in forceReadOnly mode, cannot transit to writable mode&quot;);</span>
+<span class="nc" id="L59">                    return response;</span>
+                }
+<span class="nc" id="L61">                stateManager.transitionToWritableMode().get();</span>
+<span class="nc bnc" id="L62" title="All 4 branches missed.">            } else if (!stateManager.isReadOnly() &amp;&amp; inState.isReadOnly()) {</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">                if (!stateManager.isReadOnlyModeEnabled()) {</span>
+<span class="nc" id="L64">                    response.setCode(HttpServer.StatusCode.BAD_REQUEST);</span>
+<span class="nc" id="L65">                    response.setBody(&quot;Bookie is disabled ReadOnly mode, cannot transit to readOnly mode&quot;);</span>
+<span class="nc" id="L66">                    return response;</span>
+                }
+<span class="nc" id="L68">                stateManager.transitionToReadOnlyMode().get();</span>
+            }
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        } else if (!HttpServer.Method.GET.equals(request.getMethod())) {</span>
+<span class="nc" id="L71">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L72">            response.setBody(&quot;Unsupported method. Should be GET or PUT method&quot;);</span>
+<span class="nc" id="L73">            return response;</span>
+        }
+
+<span class="nc" id="L76">        ReadOnlyState outState = new ReadOnlyState(stateManager.isReadOnly());</span>
+<span class="nc" id="L77">        response.setBody(JsonUtil.toJson(outState));</span>
+<span class="nc" id="L78">        response.setCode(HttpServer.StatusCode.OK);</span>
+
+<span class="nc" id="L80">        return response;</span>
+    }
+
+    /**
+     * The object represent the readOnly state.
+     */
+<span class="nc" id="L86">    @AllArgsConstructor</span>
+<span class="nc" id="L87">    @NoArgsConstructor</span>
+<span class="nc bnc" id="L88" title="All 10 branches missed.">    @Data</span>
+    public static class ReadOnlyState {
+<span class="nc" id="L90">        private boolean readOnly;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

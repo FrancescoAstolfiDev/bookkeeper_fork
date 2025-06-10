@@ -1,0 +1,400 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>NullMetadataBookieDriver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">NullMetadataBookieDriver.java</span></div><h1>NullMetadataBookieDriver.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import java.io.IOException;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.BookieServiceInfo;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.LedgerMetadataListener;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.replication.ReplicationException;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.zookeeper.AsyncCallback;
+
+/**
+ * A no-op implementation of MetadataBookieDriver.
+ */
+<span class="nc" id="L48">public class NullMetadataBookieDriver implements MetadataBookieDriver {</span>
+    @Override
+    public MetadataBookieDriver initialize(ServerConfiguration conf,
+            StatsLogger statsLogger) {
+<span class="nc" id="L52">        return this;</span>
+    }
+
+    @Override
+    public String getScheme() {
+<span class="nc" id="L57">        return &quot;null&quot;;</span>
+    }
+
+    @Override
+    public RegistrationManager createRegistrationManager() {
+<span class="nc" id="L62">        return new NullRegistrationManager();</span>
+    }
+
+    @Override
+    public LedgerManagerFactory getLedgerManagerFactory() {
+<span class="nc" id="L67">        return new NullLedgerManagerFactory();</span>
+    }
+
+    @Override
+    public LayoutManager getLayoutManager() {
+<span class="nc" id="L72">        return new NullLayoutManager();</span>
+    }
+
+    @Override
+<span class="nc" id="L76">    public void close() {}</span>
+
+    /**
+     * A no-op implementation of LedgerManagerFactory.
+     */
+<span class="nc" id="L81">    public static class NullLedgerManagerFactory implements LedgerManagerFactory {</span>
+        @Override
+        public int getCurrentVersion() {
+<span class="nc" id="L84">            return 1;</span>
+        }
+        @Override
+        public LedgerManagerFactory initialize(AbstractConfiguration conf,
+                                               LayoutManager layoutManager,
+                                               int factoryVersion) {
+<span class="nc" id="L90">            return this;</span>
+        }
+        @Override
+<span class="nc" id="L93">        public void close() {}</span>
+        @Override
+        public LedgerIdGenerator newLedgerIdGenerator() {
+<span class="nc" id="L96">            return new NullLedgerIdGenerator();</span>
+        }
+
+        @Override
+        public LedgerManager newLedgerManager() {
+<span class="nc" id="L101">            return new NullLedgerManager();</span>
+        }
+
+        @Override
+        public LedgerUnderreplicationManager newLedgerUnderreplicationManager() {
+<span class="nc" id="L106">            return new NullLedgerUnderreplicationManager();</span>
+        }
+
+        @Override
+        public LedgerAuditorManager newLedgerAuditorManager() throws IOException, InterruptedException {
+<span class="nc" id="L111">            return new NullLedgerAuditorManager();</span>
+        }
+
+        @Override
+<span class="nc" id="L115">        public void format(AbstractConfiguration&lt;?&gt; conf, LayoutManager lm) {}</span>
+        @Override
+        public boolean validateAndNukeExistingCluster(AbstractConfiguration&lt;?&gt; conf,
+                                                      LayoutManager lm) {
+<span class="nc" id="L119">            return false;</span>
+        }
+    }
+
+    /**
+     * A no-op implementation of LedgerAuditorManager.
+     */
+<span class="nc" id="L126">    public static class NullLedgerAuditorManager implements LedgerAuditorManager {</span>
+
+        @Override
+        public void tryToBecomeAuditor(String bookieId, Consumer&lt;AuditorEvent&gt; listener)
+                throws IOException, InterruptedException {
+            // no-op
+<span class="nc" id="L132">        }</span>
+
+        @Override
+        public BookieId getCurrentAuditor() throws IOException, InterruptedException {
+<span class="nc" id="L136">            return BookieId.parse(&quot;127.0.0.1:3181&quot;);</span>
+        }
+
+        @Override
+        public void close() throws Exception {
+            // no-op
+<span class="nc" id="L142">        }</span>
+    }
+
+    /**
+     * A no-op implementation of LayoutManager.
+     */
+<span class="nc" id="L148">    public static class NullLayoutManager implements LayoutManager {</span>
+        @Override
+        public LedgerLayout readLedgerLayout() {
+<span class="nc" id="L151">            return new LedgerLayout(&quot;null&quot;, -1);</span>
+        }
+
+        @Override
+<span class="nc" id="L155">        public void storeLedgerLayout(LedgerLayout layout) { }</span>
+
+        @Override
+<span class="nc" id="L158">        public void deleteLedgerLayout() { }</span>
+    }
+
+    /**
+     * A no-op implementation of RegistrationManager.
+     */
+<span class="nc" id="L164">    public static class NullRegistrationManager implements RegistrationManager {</span>
+        @Override
+<span class="nc" id="L166">        public void close() {}</span>
+
+        @Override
+        public String getClusterInstanceId() {
+<span class="nc" id="L170">            return &quot;null&quot;;</span>
+        }
+
+        @Override
+<span class="nc" id="L174">        public void registerBookie(BookieId bookieId, boolean readOnly, BookieServiceInfo bookieService) {}</span>
+
+        @Override
+<span class="nc" id="L177">        public void unregisterBookie(BookieId bookieId, boolean readOnly) {}</span>
+
+        @Override
+        public boolean isBookieRegistered(BookieId bookieId) {
+<span class="nc" id="L181">            return false;</span>
+        }
+
+        @Override
+        public void writeCookie(BookieId bookieId, Versioned&lt;byte[]&gt; cookieData) throws BookieException {
+
+<span class="nc" id="L187">        }</span>
+
+        @Override
+        public Versioned&lt;byte[]&gt; readCookie(BookieId bookieId) throws BookieException {
+<span class="nc" id="L191">            return null;</span>
+        }
+
+        @Override
+<span class="nc" id="L195">        public void removeCookie(BookieId bookieId, Version version) {}</span>
+
+        @Override
+        public boolean prepareFormat() {
+<span class="nc" id="L199">            return false;</span>
+        }
+
+        @Override
+        public boolean initNewCluster() {
+<span class="nc" id="L204">            return false;</span>
+        }
+
+        @Override
+        public boolean format() {
+<span class="nc" id="L209">            return false;</span>
+        }
+
+        @Override
+        public boolean nukeExistingCluster() {
+<span class="nc" id="L214">            return false;</span>
+        }
+
+        @Override
+<span class="nc" id="L218">        public void addRegistrationListener(RegistrationListener listener) {}</span>
+    }
+
+    /**
+     * A no-op implementation of LedgerIdGenerator.
+     */
+<span class="nc" id="L224">    public static class NullLedgerIdGenerator implements LedgerIdGenerator {</span>
+        @Override
+<span class="nc" id="L226">        public void close() {}</span>
+        @Override
+        public void generateLedgerId(GenericCallback&lt;Long&gt; cb) {
+<span class="nc" id="L229">            cb.operationComplete(BKException.Code.IllegalOpException, null);</span>
+<span class="nc" id="L230">        }</span>
+    }
+
+    /**
+     * A no-op implementation of LedgerManager.
+     */
+<span class="nc" id="L236">    public static class NullLedgerManager implements LedgerManager {</span>
+        private CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; illegalOp() {
+<span class="nc" id="L238">            CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L239">            promise.completeExceptionally(new BKException.BKIllegalOpException());</span>
+<span class="nc" id="L240">            return promise;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; createLedgerMetadata(long ledgerId,
+                                                                                 LedgerMetadata metadata) {
+<span class="nc" id="L246">            return illegalOp();</span>
+        }
+        @Override
+        public CompletableFuture&lt;Void&gt; removeLedgerMetadata(long ledgerId, Version version) {
+<span class="nc" id="L250">            CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L251">            promise.completeExceptionally(new BKException.BKIllegalOpException());</span>
+<span class="nc" id="L252">            return promise;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; readLedgerMetadata(long ledgerId) {
+<span class="nc" id="L257">            return illegalOp();</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; writeLedgerMetadata(
+                long ledgerId, LedgerMetadata metadata, Version currentVersion) {
+<span class="nc" id="L263">            return illegalOp();</span>
+        }
+
+        @Override
+        public void registerLedgerMetadataListener(long ledgerId,
+<span class="nc" id="L268">                                                   LedgerMetadataListener listener) {}</span>
+        @Override
+        public void unregisterLedgerMetadataListener(long ledgerId,
+<span class="nc" id="L271">                                                     LedgerMetadataListener listener) {}</span>
+        @Override
+        public void asyncProcessLedgers(Processor&lt;Long&gt; processor,
+                                        AsyncCallback.VoidCallback finalCb,
+<span class="nc" id="L275">                                        Object context, int successRc, int failureRc) {}</span>
+        @Override
+        public LedgerRangeIterator getLedgerRanges(long zkOpTimeOutMs) {
+<span class="nc" id="L278">            return new LedgerRangeIterator() {</span>
+                @Override
+                public boolean hasNext() {
+<span class="nc" id="L281">                    return false;</span>
+                }
+                @Override
+                public LedgerRange next() {
+<span class="nc" id="L285">                    throw new NoSuchElementException();</span>
+                }
+            };
+        }
+
+        @Override
+<span class="nc" id="L291">        public void close() {}</span>
+    }
+
+    /**
+     * A no-op implementation of LedgerUnderreplicationManager.
+     */
+<span class="nc" id="L297">    public static class NullLedgerUnderreplicationManager implements LedgerUnderreplicationManager {</span>
+        @Override
+        public boolean isLedgerBeingReplicated(long ledgerId) throws ReplicationException {
+<span class="nc" id="L300">            return false;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Void&gt; markLedgerUnderreplicatedAsync(long ledgerId,
+                                                                      Collection&lt;String&gt; missingReplicas) {
+<span class="nc" id="L306">            CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L307">            promise.completeExceptionally(new ReplicationException.UnavailableException(&quot;null&quot;));</span>
+<span class="nc" id="L308">            return promise;</span>
+        }
+        @Override
+        public void markLedgerReplicated(long ledgerId)
+                throws ReplicationException.UnavailableException {
+<span class="nc" id="L313">            throw new ReplicationException.UnavailableException(&quot;null&quot;);</span>
+        }
+        @Override
+        public UnderreplicatedLedger getLedgerUnreplicationInfo(long ledgerId)
+                throws ReplicationException.UnavailableException {
+<span class="nc" id="L318">            throw new ReplicationException.UnavailableException(&quot;null&quot;);</span>
+        }
+        @Override
+        public Iterator&lt;UnderreplicatedLedger&gt; listLedgersToRereplicate(Predicate&lt;List&lt;String&gt;&gt; predicate) {
+<span class="nc" id="L322">            return new Iterator&lt;UnderreplicatedLedger&gt;() {</span>
+                @Override
+                public boolean hasNext() {
+<span class="nc" id="L325">                    return false;</span>
+                }
+                @Override
+                public UnderreplicatedLedger next() {
+<span class="nc" id="L329">                    throw new NoSuchElementException();</span>
+                }
+            };
+        }
+        @Override
+        public long getLedgerToRereplicate() throws ReplicationException.UnavailableException {
+<span class="nc" id="L335">            throw new ReplicationException.UnavailableException(&quot;null&quot;);</span>
+        }
+        @Override
+        public long pollLedgerToRereplicate() throws ReplicationException.UnavailableException {
+<span class="nc" id="L339">            throw new ReplicationException.UnavailableException(&quot;null&quot;);</span>
+        }
+
+        @Override
+        public void acquireUnderreplicatedLedger(long ledgerId) throws ReplicationException {
+            // no-op
+<span class="nc" id="L345">        }</span>
+
+        @Override
+<span class="nc" id="L348">        public void releaseUnderreplicatedLedger(long ledgerId) {}</span>
+        @Override
+<span class="nc" id="L350">        public void close() {}</span>
+        @Override
+<span class="nc" id="L352">        public void disableLedgerReplication() {}</span>
+        @Override
+<span class="nc" id="L354">        public void enableLedgerReplication() {}</span>
+        @Override
+        public boolean isLedgerReplicationEnabled() {
+<span class="nc" id="L357">            return false;</span>
+        }
+        @Override
+<span class="nc" id="L360">        public void notifyLedgerReplicationEnabled(GenericCallback&lt;Void&gt; cb) {}</span>
+        @Override
+        public boolean initializeLostBookieRecoveryDelay(int lostBookieRecoveryDelay) {
+<span class="nc" id="L363">            return false;</span>
+        }
+        @Override
+<span class="nc" id="L366">        public void setLostBookieRecoveryDelay(int lostBookieRecoveryDelay) {}</span>
+        @Override
+        public int getLostBookieRecoveryDelay() {
+<span class="nc" id="L369">            return Integer.MAX_VALUE;</span>
+        }
+        @Override
+<span class="nc" id="L372">        public void setCheckAllLedgersCTime(long checkAllLedgersCTime) {}</span>
+        @Override
+        public long getCheckAllLedgersCTime() {
+<span class="nc" id="L375">            return Integer.MAX_VALUE;</span>
+        }
+        @Override
+<span class="nc" id="L378">        public void setPlacementPolicyCheckCTime(long placementPolicyCheckCTime) {}</span>
+        @Override
+        public long getPlacementPolicyCheckCTime() {
+<span class="nc" id="L381">            return Long.MAX_VALUE;</span>
+        }
+        @Override
+<span class="nc" id="L384">        public void setReplicasCheckCTime(long replicasCheckCTime) {}</span>
+        @Override
+        public long getReplicasCheckCTime() {
+<span class="nc" id="L387">            return Long.MAX_VALUE;</span>
+        }
+        @Override
+<span class="nc" id="L390">        public void notifyLostBookieRecoveryDelayChanged(GenericCallback&lt;Void&gt; cb) {}</span>
+        @Override
+        public String getReplicationWorkerIdRereplicatingLedger(long ledgerId)
+                throws ReplicationException.UnavailableException {
+<span class="nc" id="L394">            throw new ReplicationException.UnavailableException(&quot;null&quot;);</span>
+        }
+        @Override
+<span class="nc" id="L397">        public void notifyUnderReplicationLedgerChanged(GenericCallback&lt;Void&gt; cb) {}</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

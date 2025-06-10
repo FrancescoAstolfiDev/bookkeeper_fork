@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SuspendCompactionService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">SuspendCompactionService.java</span></div><h1>SuspendCompactionService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.bookkeeper.common.util.JsonUtil;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.apache.bookkeeper.proto.BookieServer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class SuspendCompactionService implements HttpEndpointService {
+
+<span class="nc" id="L36">    static final Logger LOG = LoggerFactory.getLogger(SuspendCompactionService.class);</span>
+
+    protected BookieServer bookieServer;
+
+<span class="nc" id="L40">    public SuspendCompactionService(BookieServer bookieServer) {</span>
+<span class="nc" id="L41">        checkNotNull(bookieServer);</span>
+<span class="nc" id="L42">        this.bookieServer = bookieServer;</span>
+<span class="nc" id="L43">    }</span>
+
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L47">        HttpServiceResponse response = new HttpServiceResponse();</span>
+
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        if (HttpServer.Method.PUT == request.getMethod()) {</span>
+<span class="nc" id="L50">            String requestBody = request.getBody();</span>
+<span class="nc bnc" id="L51" title="All 2 branches missed.">            if (null == requestBody) {</span>
+<span class="nc" id="L52">                return new HttpServiceResponse(&quot;Empty request body&quot;, HttpServer.StatusCode.BAD_REQUEST);</span>
+            } else {
+                @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L55">                Map&lt;String, Object&gt; configMap = JsonUtil.fromJson(requestBody, HashMap.class);</span>
+<span class="nc" id="L56">                Boolean suspendMajor = (Boolean) configMap.get(&quot;suspendMajor&quot;);</span>
+<span class="nc" id="L57">                Boolean suspendMinor = (Boolean) configMap.get(&quot;suspendMinor&quot;);</span>
+<span class="nc bnc" id="L58" title="All 4 branches missed.">                if (suspendMajor == null &amp;&amp; suspendMinor == null) {</span>
+<span class="nc" id="L59">                    return new HttpServiceResponse(&quot;No suspendMajor or suspendMinor params found&quot;,</span>
+                            HttpServer.StatusCode.BAD_REQUEST);
+                }
+<span class="nc" id="L62">                String output = &quot;&quot;;</span>
+<span class="nc bnc" id="L63" title="All 4 branches missed.">                if (suspendMajor != null  &amp;&amp; suspendMajor) {</span>
+<span class="nc" id="L64">                    output = &quot;Suspend majorGC on BookieServer: &quot; + bookieServer.toString();</span>
+<span class="nc" id="L65">                    bookieServer.getBookie().getLedgerStorage().suspendMajorGC();</span>
+                }
+<span class="nc bnc" id="L67" title="All 4 branches missed.">                if (suspendMinor != null &amp;&amp; suspendMinor) {</span>
+<span class="nc" id="L68">                    output += &quot;, Suspend minorGC on BookieServer: &quot; + bookieServer.toString();</span>
+<span class="nc" id="L69">                    bookieServer.getBookie().getLedgerStorage().suspendMinorGC();</span>
+                }
+<span class="nc" id="L71">                String jsonResponse = JsonUtil.toJson(output);</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L73">                    LOG.debug(&quot;output body:&quot; + jsonResponse);</span>
+                }
+<span class="nc" id="L75">                response.setBody(jsonResponse);</span>
+<span class="nc" id="L76">                response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L77">                return response;</span>
+            }
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        } else if (HttpServer.Method.GET == request.getMethod()) {</span>
+<span class="nc" id="L80">            boolean isMajorGcSuspend = bookieServer.getBookie().getLedgerStorage().isMajorGcSuspended();</span>
+<span class="nc" id="L81">            boolean isMinorGcSuspend = bookieServer.getBookie().getLedgerStorage().isMinorGcSuspended();</span>
+<span class="nc" id="L82">            Map&lt;String, String&gt; output = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L83">            output.put(&quot;isMajorGcSuspended&quot;, Boolean.toString(isMajorGcSuspend));</span>
+<span class="nc" id="L84">            output.put(&quot;isMinorGcSuspended&quot;, Boolean.toString(isMinorGcSuspend));</span>
+<span class="nc" id="L85">            String jsonResponse = JsonUtil.toJson(output);</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L87">                LOG.debug(&quot;output body:&quot; + jsonResponse);</span>
+            }
+<span class="nc" id="L89">            response.setBody(jsonResponse);</span>
+<span class="nc" id="L90">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L91">            return response;</span>
+        } else {
+<span class="nc" id="L93">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L94">            response.setBody(&quot;Not found method. Should be PUT to suspend major or minor compaction, &quot;</span>
+                    + &quot;Or GET to get compaction state.&quot;);
+<span class="nc" id="L96">            return response;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

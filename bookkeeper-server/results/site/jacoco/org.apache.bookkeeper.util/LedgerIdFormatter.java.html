@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerIdFormatter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.util</a> &gt; <span class="el_source">LedgerIdFormatter.java</span></div><h1>LedgerIdFormatter.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.util;
+
+import java.util.UUID;
+import org.apache.bookkeeper.common.util.ReflectionUtils;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Formatter to format a ledgerId.
+ */
+<span class="nc" id="L33">public abstract class LedgerIdFormatter {</span>
+
+<span class="nc" id="L35">    private static final Logger LOG = LoggerFactory.getLogger(LedgerIdFormatter.class);</span>
+
+    /**
+     * Formats the LedgerId according to the type of the Formatter and return it
+     * in String format.
+     *
+     * @param ledgerId
+     * @return
+     */
+    public abstract String formatLedgerId(long ledgerId);
+
+    /**
+     * converts the ledgeridString, which is in format of the type of formatter,
+     * to the long value.
+     *
+     * @param ledgerIdString
+     * @return
+     */
+    public abstract long readLedgerId(String ledgerIdString);
+
+    // Used by BKExtentIdByteArray
+<span class="nc" id="L56">    public static final LedgerIdFormatter LONG_LEDGERID_FORMATTER = new LongLedgerIdFormatter();</span>
+
+    public static LedgerIdFormatter newLedgerIdFormatter(AbstractConfiguration&lt;?&gt; conf) {
+        LedgerIdFormatter formatter;
+        try {
+<span class="nc" id="L61">            Class&lt;? extends LedgerIdFormatter&gt; ledgerIdFormatterClass = conf.getLedgerIdFormatterClass();</span>
+<span class="nc" id="L62">            formatter = ReflectionUtils.newInstance(ledgerIdFormatterClass);</span>
+<span class="nc" id="L63">        } catch (Exception e) {</span>
+<span class="nc" id="L64">            LOG.warn(&quot;No formatter class found&quot;, e);</span>
+<span class="nc" id="L65">            LOG.warn(&quot;Using Default Long Formatter.&quot;);</span>
+<span class="nc" id="L66">            formatter = new LongLedgerIdFormatter();</span>
+<span class="nc" id="L67">        }</span>
+<span class="nc" id="L68">        return formatter;</span>
+    }
+
+    public static LedgerIdFormatter newLedgerIdFormatter(String opt, AbstractConfiguration conf) {
+        LedgerIdFormatter formatter;
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (&quot;hex&quot;.equals(opt)) {</span>
+<span class="nc" id="L74">            formatter = new HexLedgerIdFormatter();</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        } else if (&quot;uuid&quot;.equals(opt)) {</span>
+<span class="nc" id="L76">            formatter = new UUIDLedgerIdFormatter();</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        } else if (&quot;long&quot;.equals(opt)) {</span>
+<span class="nc" id="L78">            formatter = new LongLedgerIdFormatter();</span>
+        } else {
+<span class="nc" id="L80">            LOG.warn(&quot;specified unexpected ledgeridformat {}, so default LedgerIdFormatter is used&quot;, opt);</span>
+<span class="nc" id="L81">            formatter = newLedgerIdFormatter(conf);</span>
+        }
+<span class="nc" id="L83">        return formatter;</span>
+    }
+
+    /**
+     * long ledgerId formatter.
+     */
+<span class="nc" id="L89">    public static class LongLedgerIdFormatter extends LedgerIdFormatter {</span>
+
+        @Override
+        public String formatLedgerId(long ledgerId) {
+<span class="nc" id="L93">            return Long.toString(ledgerId);</span>
+        }
+
+        @Override
+        public long readLedgerId(String ledgerIdString) {
+<span class="nc" id="L98">            return Long.parseLong(ledgerIdString.trim());</span>
+        }
+    }
+
+    /**
+     * hex ledgerId formatter.
+     */
+<span class="nc" id="L105">    public static class HexLedgerIdFormatter extends LedgerIdFormatter {</span>
+
+        @Override
+        public String formatLedgerId(long ledgerId) {
+<span class="nc" id="L109">            return Long.toHexString(ledgerId);</span>
+        }
+
+        @Override
+        public long readLedgerId(String ledgerIdString) {
+<span class="nc" id="L114">            return Long.valueOf(ledgerIdString.trim(), 16);</span>
+        }
+    }
+
+    /**
+     * uuid ledgerId formatter.
+     */
+<span class="nc" id="L121">    public static class UUIDLedgerIdFormatter extends LedgerIdFormatter {</span>
+
+        @Override
+        public String formatLedgerId(long ledgerId) {
+<span class="nc" id="L125">            return (new UUID(0, ledgerId)).toString();</span>
+        }
+
+        @Override
+        public long readLedgerId(String ledgerIdString) {
+<span class="nc" id="L130">            return UUID.fromString(ledgerIdString.trim()).getLeastSignificantBits();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

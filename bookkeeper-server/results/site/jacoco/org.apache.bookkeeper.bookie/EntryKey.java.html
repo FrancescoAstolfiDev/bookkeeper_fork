@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EntryKey.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">EntryKey.java</span></div><h1>EntryKey.java</h1><pre class="source lang-java linenums">/**
+ * Copyright The Apache Software Foundation
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie;
+
+import java.io.Serializable;
+import java.util.Comparator;
+
+/**
+ * An {@code EntryKey} represents an entry in a ledger, identified by {@code ledgerId} and {@code entryId}.
+ *
+ * &lt;p&gt;This class is mainly used in {@code SortedLedgerStorage} for managing and sorting the entries in the memtable.
+ */
+public class EntryKey {
+    long ledgerId;
+    long entryId;
+
+    public EntryKey() {
+<span class="nc" id="L35">        this(0, 0);</span>
+<span class="nc" id="L36">    }</span>
+
+<span class="nc" id="L38">    public EntryKey(long ledgerId, long entryId) {</span>
+<span class="nc" id="L39">        this.ledgerId = ledgerId;</span>
+<span class="nc" id="L40">        this.entryId = entryId;</span>
+<span class="nc" id="L41">    }</span>
+
+    public long getLedgerId() {
+<span class="nc" id="L44">        return ledgerId;</span>
+    }
+
+    public long getEntryId() {
+<span class="nc" id="L48">        return entryId;</span>
+    }
+
+    /**
+    * Comparator for the key portion.
+    */
+<span class="nc" id="L54">    public static final KeyComparator COMPARATOR = new KeyComparator();</span>
+
+    // Only compares the key portion
+    @Override
+    public boolean equals(Object other) {
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if (!(other instanceof EntryKey)) {</span>
+<span class="nc" id="L60">          return false;</span>
+        }
+<span class="nc" id="L62">        EntryKey key = (EntryKey) other;</span>
+<span class="nc bnc" id="L63" title="All 4 branches missed.">        return ledgerId == key.ledgerId &amp;&amp; entryId == key.entryId;</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L68">        return (int) (ledgerId * 13 ^ entryId * 17);</span>
+    }
+}
+
+/**
+* Compare EntryKey.
+*/
+<span class="nc" id="L75">class KeyComparator implements Comparator&lt;EntryKey&gt;, Serializable {</span>
+
+    private static final long serialVersionUID = 0L;
+
+    @Override
+    public int compare(EntryKey left, EntryKey right) {
+<span class="nc" id="L81">        long ret = left.ledgerId - right.ledgerId;</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (ret == 0) {</span>
+<span class="nc" id="L83">            ret = left.entryId - right.entryId;</span>
+        }
+<span class="nc bnc" id="L85" title="All 4 branches missed.">        return (ret &lt; 0) ? -1 : ((ret &gt; 0) ? 1 : 0);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

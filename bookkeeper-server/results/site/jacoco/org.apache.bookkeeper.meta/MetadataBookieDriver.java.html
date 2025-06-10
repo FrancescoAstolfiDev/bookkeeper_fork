@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MetadataBookieDriver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">MetadataBookieDriver.java</span></div><h1>MetadataBookieDriver.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import java.util.concurrent.CompletableFuture;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.meta.exceptions.MetadataException;
+import org.apache.bookkeeper.stats.StatsLogger;
+
+/**
+ * Driver to manage all the metadata managers required by a bookie server.
+ */
+public interface MetadataBookieDriver extends AutoCloseable {
+
+    /**
+     * Initialize the metadata driver.
+     *
+     * @param conf configuration
+     * @param statsLogger stats logger
+     * @return metadata driver
+     */
+    MetadataBookieDriver initialize(ServerConfiguration conf,
+                                    StatsLogger statsLogger)
+        throws MetadataException;
+
+    /**
+     * Get the scheme of the metadata driver.
+     *
+     * @return the scheme of the metadata driver.
+     */
+    String getScheme();
+
+    /**
+     * Create the registration manager used for registering/unregistering bookies.
+     *
+     * @return the registration manager used for registering/unregistering bookies.
+     */
+    RegistrationManager createRegistrationManager();
+
+    /**
+     * Return the ledger manager factory used for accessing ledger metadata.
+     *
+     * @return the ledger manager factory used for accessing ledger metadata.
+     */
+    LedgerManagerFactory getLedgerManagerFactory()
+        throws MetadataException;
+
+    /**
+     * Return the layout manager.
+     *
+     * @return the layout manager.
+     */
+    LayoutManager getLayoutManager();
+
+    /**
+     * Return health check is enable or disable.
+     *
+     * @return true if health check is enable, otherwise false.
+     */
+    default CompletableFuture&lt;Boolean&gt;  isHealthCheckEnabled() {
+<span class="nc" id="L79">        return FutureUtils.value(true);</span>
+    }
+
+    /**
+     * Disable health check.
+     */
+    default CompletableFuture&lt;Void&gt; disableHealthCheck() {
+<span class="nc" id="L86">        CompletableFuture&lt;Void&gt; result = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L87">        result.completeExceptionally(new Exception(&quot;disableHealthCheck is not supported by this metadata driver&quot;));</span>
+<span class="nc" id="L88">        return result;</span>
+    }
+
+    /**
+     * Enable health check.
+     */
+    default CompletableFuture&lt;Void&gt;  enableHealthCheck() {
+<span class="nc" id="L95">        return FutureUtils.Void();</span>
+    }
+
+    @Override
+    void close();
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

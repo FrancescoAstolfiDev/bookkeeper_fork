@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WriteEntryProcessorV3.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">WriteEntryProcessorV3.java</span></div><h1>WriteEntryProcessorV3.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.proto;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import java.io.IOException;
+import java.util.EnumSet;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.BookieException.OperationRejectedException;
+import org.apache.bookkeeper.client.api.WriteFlag;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.AddRequest;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.AddResponse;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Request;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Response;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.StatusCode;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+class WriteEntryProcessorV3 extends PacketProcessorBaseV3 {
+<span class="nc" id="L43">    private static final Logger logger = LoggerFactory.getLogger(WriteEntryProcessorV3.class);</span>
+
+    public WriteEntryProcessorV3(Request request, BookieRequestHandler requestHandler,
+                                 BookieRequestProcessor requestProcessor) {
+<span class="nc" id="L47">        super(request, requestHandler, requestProcessor);</span>
+<span class="nc" id="L48">        requestProcessor.onAddRequestStart(requestHandler.ctx().channel());</span>
+<span class="nc" id="L49">    }</span>
+
+    // Returns null if there is no exception thrown
+    private AddResponse getAddResponse() {
+<span class="nc" id="L53">        final long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L54">        AddRequest addRequest = request.getAddRequest();</span>
+<span class="nc" id="L55">        long ledgerId = addRequest.getLedgerId();</span>
+<span class="nc" id="L56">        long entryId = addRequest.getEntryId();</span>
+
+<span class="nc" id="L58">        final AddResponse.Builder addResponse = AddResponse.newBuilder()</span>
+<span class="nc" id="L59">                .setLedgerId(ledgerId)</span>
+<span class="nc" id="L60">                .setEntryId(entryId);</span>
+
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (!isVersionCompatible()) {</span>
+<span class="nc" id="L63">            addResponse.setStatus(StatusCode.EBADVERSION);</span>
+<span class="nc" id="L64">            return addResponse.build();</span>
+        }
+
+<span class="nc bnc" id="L67" title="All 2 branches missed.">        if (requestProcessor.getBookie().isReadOnly()</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            &amp;&amp; !(RequestUtils.isHighPriority(request)</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">                    &amp;&amp; requestProcessor.getBookie().isAvailableForHighPriorityWrites())) {</span>
+<span class="nc" id="L70">            logger.warn(&quot;BookieServer is running as readonly mode, so rejecting the request from the client!&quot;);</span>
+<span class="nc" id="L71">            addResponse.setStatus(StatusCode.EREADONLY);</span>
+<span class="nc" id="L72">            return addResponse.build();</span>
+        }
+
+<span class="nc" id="L75">        BookkeeperInternalCallbacks.WriteCallback wcb = new BookkeeperInternalCallbacks.WriteCallback() {</span>
+            @Override
+            public void writeComplete(int rc, long ledgerId, long entryId,
+                                      BookieId addr, Object ctx) {
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                if (BookieProtocol.EOK == rc) {</span>
+<span class="nc" id="L80">                    requestProcessor.getRequestStats().getAddEntryStats()</span>
+<span class="nc" id="L81">                        .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+                } else {
+<span class="nc" id="L83">                    requestProcessor.getRequestStats().getAddEntryStats()</span>
+<span class="nc" id="L84">                        .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+                }
+
+                StatusCode status;
+<span class="nc bnc" id="L88" title="All 3 branches missed.">                switch (rc) {</span>
+                    case BookieProtocol.EOK:
+<span class="nc" id="L90">                        status = StatusCode.EOK;</span>
+<span class="nc" id="L91">                        break;</span>
+                    case BookieProtocol.EIO:
+<span class="nc" id="L93">                        status = StatusCode.EIO;</span>
+<span class="nc" id="L94">                        break;</span>
+                    default:
+<span class="nc" id="L96">                        status = StatusCode.EUA;</span>
+                        break;
+                }
+<span class="nc" id="L99">                addResponse.setStatus(status);</span>
+<span class="nc" id="L100">                Response.Builder response = Response.newBuilder()</span>
+<span class="nc" id="L101">                        .setHeader(getHeader())</span>
+<span class="nc" id="L102">                        .setStatus(addResponse.getStatus())</span>
+<span class="nc" id="L103">                        .setAddResponse(addResponse);</span>
+<span class="nc" id="L104">                Response resp = response.build();</span>
+<span class="nc" id="L105">                sendResponse(status, resp, requestProcessor.getRequestStats().getAddRequestStats());</span>
+<span class="nc" id="L106">            }</span>
+        };
+        final EnumSet&lt;WriteFlag&gt; writeFlags;
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if (addRequest.hasWriteFlags()) {</span>
+<span class="nc" id="L110">            writeFlags = WriteFlag.getWriteFlags(addRequest.getWriteFlags());</span>
+        } else {
+<span class="nc" id="L112">            writeFlags = WriteFlag.NONE;</span>
+        }
+<span class="nc" id="L114">        final boolean ackBeforeSync = writeFlags.contains(WriteFlag.DEFERRED_SYNC);</span>
+<span class="nc" id="L115">        StatusCode status = null;</span>
+<span class="nc" id="L116">        byte[] masterKey = addRequest.getMasterKey().toByteArray();</span>
+<span class="nc" id="L117">        ByteBuf entryToAdd = Unpooled.wrappedBuffer(addRequest.getBody().asReadOnlyByteBuffer());</span>
+        try {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            if (RequestUtils.hasFlag(addRequest, AddRequest.Flag.RECOVERY_ADD)) {</span>
+<span class="nc" id="L120">                requestProcessor.getBookie().recoveryAddEntry(entryToAdd, wcb,</span>
+<span class="nc" id="L121">                        requestHandler.ctx().channel(), masterKey);</span>
+            } else {
+<span class="nc" id="L123">                requestProcessor.getBookie().addEntry(entryToAdd, ackBeforeSync, wcb,</span>
+<span class="nc" id="L124">                        requestHandler.ctx().channel(), masterKey);</span>
+            }
+<span class="nc" id="L126">            status = StatusCode.EOK;</span>
+<span class="nc" id="L127">        } catch (OperationRejectedException e) {</span>
+<span class="nc" id="L128">            requestProcessor.getRequestStats().getAddEntryRejectedCounter().inc();</span>
+            // Avoid to log each occurrence of this exception as this can happen when the ledger storage is
+            // unable to keep up with the write rate.
+<span class="nc bnc" id="L131" title="All 2 branches missed.">            if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L132">                logger.debug(&quot;Operation rejected while writing {}&quot;, request, e);</span>
+            }
+<span class="nc" id="L134">            status = StatusCode.ETOOMANYREQUESTS;</span>
+<span class="nc" id="L135">        } catch (IOException e) {</span>
+<span class="nc" id="L136">            logger.error(&quot;Error writing entry:{} to ledger:{}&quot;,</span>
+<span class="nc" id="L137">                    entryId, ledgerId, e);</span>
+<span class="nc" id="L138">            status = StatusCode.EIO;</span>
+<span class="nc" id="L139">        } catch (BookieException.LedgerFencedException e) {</span>
+<span class="nc" id="L140">            logger.error(&quot;Ledger fenced while writing entry:{} to ledger:{}&quot;,</span>
+<span class="nc" id="L141">                    entryId, ledgerId, e);</span>
+<span class="nc" id="L142">            status = StatusCode.EFENCED;</span>
+<span class="nc" id="L143">        } catch (BookieException e) {</span>
+<span class="nc" id="L144">            logger.error(&quot;Unauthorized access to ledger:{} while writing entry:{}&quot;,</span>
+<span class="nc" id="L145">                    ledgerId, entryId, e);</span>
+<span class="nc" id="L146">            status = StatusCode.EUA;</span>
+<span class="nc" id="L147">        } catch (Throwable t) {</span>
+<span class="nc" id="L148">            logger.error(&quot;Unexpected exception while writing {}@{} : &quot;,</span>
+<span class="nc" id="L149">                    entryId, ledgerId, t);</span>
+            // some bad request which cause unexpected exception
+<span class="nc" id="L151">            status = StatusCode.EBADREQ;</span>
+<span class="nc" id="L152">        }</span>
+
+        // If everything is okay, we return null so that the calling function
+        // doesn't return a response back to the caller.
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (!status.equals(StatusCode.EOK)) {</span>
+<span class="nc" id="L157">            addResponse.setStatus(status);</span>
+<span class="nc" id="L158">            return addResponse.build();</span>
+        }
+<span class="nc" id="L160">        return null;</span>
+    }
+
+    @Override
+    public void run() {
+<span class="nc" id="L165">        requestProcessor.getRequestStats().getWriteThreadQueuedLatency()</span>
+<span class="nc" id="L166">                .registerSuccessfulEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L167">        AddResponse addResponse = getAddResponse();</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (null != addResponse) {</span>
+            // This means there was an error and we should send this back.
+<span class="nc" id="L170">            Response.Builder response = Response.newBuilder()</span>
+<span class="nc" id="L171">                    .setHeader(getHeader())</span>
+<span class="nc" id="L172">                    .setStatus(addResponse.getStatus())</span>
+<span class="nc" id="L173">                    .setAddResponse(addResponse);</span>
+<span class="nc" id="L174">            Response resp = response.build();</span>
+<span class="nc" id="L175">            sendResponse(addResponse.getStatus(), resp,</span>
+<span class="nc" id="L176">                         requestProcessor.getRequestStats().getAddRequestStats());</span>
+        }
+<span class="nc" id="L178">    }</span>
+
+    @Override
+    protected void sendResponse(StatusCode code, Object response, OpStatsLogger statsLogger) {
+<span class="nc" id="L182">        super.sendResponse(code, response, statsLogger);</span>
+<span class="nc" id="L183">        requestProcessor.onAddRequestFinish();</span>
+<span class="nc" id="L184">    }</span>
+
+    /**
+     * this toString method filters out body and masterKey from the output.
+     * masterKey contains the password of the ledger and body is customer data,
+     * so it is not appropriate to have these in logs or system output.
+     */
+    @Override
+    public String toString() {
+<span class="nc" id="L193">        return RequestUtils.toSafeString(request);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

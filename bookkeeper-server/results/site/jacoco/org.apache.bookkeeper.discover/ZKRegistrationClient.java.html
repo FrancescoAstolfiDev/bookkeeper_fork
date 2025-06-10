@@ -1,0 +1,515 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ZKRegistrationClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.discover</a> &gt; <span class="el_source">ZKRegistrationClient.java</span></div><h1>ZKRegistrationClient.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.discover;
+
+import static org.apache.bookkeeper.util.BookKeeperConstants.AVAILABLE_NODE;
+import static org.apache.bookkeeper.util.BookKeeperConstants.COOKIE_NODE;
+import static org.apache.bookkeeper.util.BookKeeperConstants.READONLY;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Sets;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BKException.ZKException;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.DataFormats.BookieServiceInfoFormat;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Version.Occurred;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.Watcher.Event.EventType;
+import org.apache.zookeeper.Watcher.Event.KeeperState;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.Stat;
+
+/**
+ * ZooKeeper based {@link RegistrationClient}.
+ */
+
+<span class="nc" id="L64">@Slf4j</span>
+public class ZKRegistrationClient implements RegistrationClient {
+
+    static final int ZK_CONNECT_BACKOFF_MS = 200;
+
+    class WatchTask
+        implements Runnable,
+                   Watcher,
+                   BiConsumer&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;, Throwable&gt;,
+                   AutoCloseable {
+
+        private final String regPath;
+        private final Set&lt;RegistrationListener&gt; listeners;
+<span class="nc" id="L77">        private volatile boolean closed = false;</span>
+<span class="nc" id="L78">        private Set&lt;BookieId&gt; bookies = null;</span>
+<span class="nc" id="L79">        private Version version = Version.NEW;</span>
+        private final CompletableFuture&lt;Void&gt; firstRunFuture;
+
+<span class="nc" id="L82">        WatchTask(String regPath, CompletableFuture&lt;Void&gt; firstRunFuture) {</span>
+<span class="nc" id="L83">            this.regPath = regPath;</span>
+<span class="nc" id="L84">            this.listeners = new CopyOnWriteArraySet&lt;&gt;();</span>
+<span class="nc" id="L85">            this.firstRunFuture = firstRunFuture;</span>
+<span class="nc" id="L86">        }</span>
+
+        public int getNumListeners() {
+<span class="nc" id="L89">            return listeners.size();</span>
+        }
+
+        public boolean addListener(RegistrationListener listener) {
+<span class="nc bnc" id="L93" title="All 2 branches missed.">            if (listeners.add(listener)) {</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                if (null != bookies) {</span>
+<span class="nc" id="L95">                    scheduler.execute(() -&gt; {</span>
+<span class="nc" id="L96">                            listener.onBookiesChanged(</span>
+                                    new Versioned&lt;&gt;(bookies, version));
+<span class="nc" id="L98">                        });</span>
+                }
+            }
+<span class="nc" id="L101">            return true;</span>
+        }
+
+        public boolean removeListener(RegistrationListener listener) {
+<span class="nc" id="L105">            return listeners.remove(listener);</span>
+        }
+
+        void watch() {
+<span class="nc" id="L109">            scheduleWatchTask(0L);</span>
+<span class="nc" id="L110">        }</span>
+
+        private void scheduleWatchTask(long delayMs) {
+            try {
+<span class="nc" id="L114">                scheduler.schedule(this, delayMs, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L115">            } catch (RejectedExecutionException ree) {</span>
+<span class="nc" id="L116">                log.warn(&quot;Failed to schedule watch bookies task&quot;, ree);</span>
+<span class="nc" id="L117">            }</span>
+<span class="nc" id="L118">        }</span>
+
+        @Override
+        public void run() {
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            if (isClosed()) {</span>
+<span class="nc" id="L123">                return;</span>
+            }
+
+<span class="nc" id="L126">            getChildren(regPath, this)</span>
+<span class="nc" id="L127">                .whenCompleteAsync(this, scheduler);</span>
+<span class="nc" id="L128">        }</span>
+
+        @Override
+        public void accept(Versioned&lt;Set&lt;BookieId&gt;&gt; bookieSet, Throwable throwable) {
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if (throwable != null) {</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                if (firstRunFuture.isDone()) {</span>
+<span class="nc" id="L134">                    scheduleWatchTask(ZK_CONNECT_BACKOFF_MS);</span>
+                } else {
+<span class="nc" id="L136">                    firstRunFuture.completeExceptionally(throwable);</span>
+                }
+<span class="nc" id="L138">                return;</span>
+            }
+
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (this.version.compare(bookieSet.getVersion()) == Occurred.BEFORE) {</span>
+<span class="nc" id="L142">                this.version = bookieSet.getVersion();</span>
+<span class="nc" id="L143">                this.bookies = bookieSet.getValue();</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                if (!listeners.isEmpty()) {</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                    for (RegistrationListener listener : listeners) {</span>
+<span class="nc" id="L146">                        listener.onBookiesChanged(bookieSet);</span>
+<span class="nc" id="L147">                    }</span>
+                }
+            }
+<span class="nc" id="L150">            FutureUtils.complete(firstRunFuture, null);</span>
+<span class="nc" id="L151">        }</span>
+
+        @Override
+        public void process(WatchedEvent event) {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            if (EventType.None == event.getType()) {</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                if (KeeperState.Expired == event.getState()) {</span>
+<span class="nc" id="L157">                    scheduleWatchTask(ZK_CONNECT_BACKOFF_MS);</span>
+                }
+<span class="nc" id="L159">                return;</span>
+            }
+
+            // re-read the bookie list
+<span class="nc" id="L163">            scheduleWatchTask(0L);</span>
+<span class="nc" id="L164">        }</span>
+
+        boolean isClosed() {
+<span class="nc" id="L167">            return closed;</span>
+        }
+
+        @Override
+        public void close() {
+<span class="nc" id="L172">            closed = true;</span>
+<span class="nc" id="L173">        }</span>
+    }
+
+    private final ZooKeeper zk;
+    private final ScheduledExecutorService scheduler;
+<span class="nc" id="L178">    @Getter(AccessLevel.PACKAGE)</span>
+    private WatchTask watchWritableBookiesTask = null;
+<span class="nc" id="L180">    @Getter(AccessLevel.PACKAGE)</span>
+    private WatchTask watchReadOnlyBookiesTask = null;
+<span class="nc" id="L182">    private final ConcurrentHashMap&lt;BookieId, Versioned&lt;BookieServiceInfo&gt;&gt; bookieServiceInfoCache =</span>
+                                                                            new ConcurrentHashMap&lt;&gt;();
+    private final Watcher bookieServiceInfoCacheInvalidation;
+    private final boolean bookieAddressTracking;
+    // registration paths
+    private final String bookieRegistrationPath;
+    private final String bookieAllRegistrationPath;
+    private final String bookieReadonlyRegistrationPath;
+
+    public ZKRegistrationClient(ZooKeeper zk,
+                                String ledgersRootPath,
+                                ScheduledExecutorService scheduler,
+<span class="nc" id="L194">                                boolean bookieAddressTracking) {</span>
+<span class="nc" id="L195">        this.zk = zk;</span>
+<span class="nc" id="L196">        this.scheduler = scheduler;</span>
+        // Following Bookie Network Address Changes is an expensive operation
+        // as it requires additional ZooKeeper watches
+        // we can disable this feature, in case the BK cluster has only
+        // static addresses
+<span class="nc" id="L201">        this.bookieAddressTracking = bookieAddressTracking;</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        this.bookieServiceInfoCacheInvalidation = bookieAddressTracking</span>
+<span class="nc" id="L203">                                                    ? new BookieServiceInfoCacheInvalidationWatcher() : null;</span>
+<span class="nc" id="L204">        this.bookieRegistrationPath = ledgersRootPath + &quot;/&quot; + AVAILABLE_NODE;</span>
+<span class="nc" id="L205">        this.bookieAllRegistrationPath = ledgersRootPath + &quot;/&quot; + COOKIE_NODE;</span>
+<span class="nc" id="L206">        this.bookieReadonlyRegistrationPath = this.bookieRegistrationPath + &quot;/&quot; + READONLY;</span>
+<span class="nc" id="L207">    }</span>
+
+    @Override
+    public void close() {
+        // no-op
+<span class="nc" id="L212">    }</span>
+
+    public boolean isBookieAddressTracking() {
+<span class="nc" id="L215">        return bookieAddressTracking;</span>
+    }
+
+    public ZooKeeper getZk() {
+<span class="nc" id="L219">        return zk;</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; getWritableBookies() {
+<span class="nc" id="L224">        return getChildren(bookieRegistrationPath, null);</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; getAllBookies() {
+<span class="nc" id="L229">        return getChildren(bookieAllRegistrationPath, null);</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; getReadOnlyBookies() {
+<span class="nc" id="L234">        return getChildren(bookieReadonlyRegistrationPath, null);</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Versioned&lt;BookieServiceInfo&gt;&gt; getBookieServiceInfo(BookieId bookieId) {
+        // we can only serve data from cache here,
+        // because it can happen than this method is called inside the main
+        // zookeeper client event loop thread
+<span class="nc" id="L242">        Versioned&lt;BookieServiceInfo&gt; resultFromCache = bookieServiceInfoCache.get(bookieId);</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L244">            log.debug(&quot;getBookieServiceInfo {} -&gt; {}&quot;, bookieId, resultFromCache);</span>
+        }
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (resultFromCache != null) {</span>
+<span class="nc" id="L247">            return CompletableFuture.completedFuture(resultFromCache);</span>
+        } else {
+<span class="nc" id="L249">            return FutureUtils.exception(new BKException.BKBookieHandleNotAvailableException());</span>
+        }
+    }
+
+    /**
+     * Read BookieServiceInfo from ZooKeeper and updates the local cache.
+     *
+     * @param bookieId
+     * @return an handle to the result of the operation.
+     */
+    private CompletableFuture&lt;Versioned&lt;BookieServiceInfo&gt;&gt; readBookieServiceInfoAsync(BookieId bookieId) {
+<span class="nc" id="L260">        String pathAsWritable = bookieRegistrationPath + &quot;/&quot; + bookieId;</span>
+<span class="nc" id="L261">        String pathAsReadonly = bookieReadonlyRegistrationPath + &quot;/&quot; + bookieId;</span>
+
+<span class="nc" id="L263">        CompletableFuture&lt;Versioned&lt;BookieServiceInfo&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L264">        zk.getData(pathAsWritable, bookieServiceInfoCacheInvalidation,</span>
+                (int rc, String path, Object o, byte[] bytes, Stat stat) -&gt; {
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (KeeperException.Code.OK.intValue() == rc) {</span>
+                try {
+<span class="nc" id="L268">                    BookieServiceInfo bookieServiceInfo = deserializeBookieServiceInfo(bookieId, bytes);</span>
+<span class="nc" id="L269">                    Versioned&lt;BookieServiceInfo&gt; result = new Versioned&lt;&gt;(bookieServiceInfo,</span>
+<span class="nc" id="L270">                            new LongVersion(stat.getCversion()));</span>
+<span class="nc" id="L271">                    log.info(&quot;Update BookieInfoCache (writable bookie) {} -&gt; {}&quot;, bookieId, result.getValue());</span>
+<span class="nc" id="L272">                    bookieServiceInfoCache.put(bookieId, result);</span>
+<span class="nc" id="L273">                    promise.complete(result);</span>
+<span class="nc" id="L274">                } catch (IOException ex) {</span>
+<span class="nc" id="L275">                    log.error(&quot;Cannot update BookieInfo for &quot;, ex);</span>
+<span class="nc" id="L276">                    promise.completeExceptionally(KeeperException.create(KeeperException.Code.get(rc), path)</span>
+<span class="nc" id="L277">                            .initCause(ex));</span>
+<span class="nc" id="L278">                    return;</span>
+<span class="nc" id="L279">                }</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">            } else if (KeeperException.Code.NONODE.intValue() == rc) {</span>
+                // not found, looking for a readonly bookie
+<span class="nc" id="L282">                zk.getData(pathAsReadonly, bookieServiceInfoCacheInvalidation,</span>
+                        (int rc2, String path2, Object o2, byte[] bytes2, Stat stat2) -&gt; {
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                    if (KeeperException.Code.OK.intValue() == rc2) {</span>
+                        try {
+<span class="nc" id="L286">                            BookieServiceInfo bookieServiceInfo = deserializeBookieServiceInfo(bookieId, bytes2);</span>
+<span class="nc" id="L287">                            Versioned&lt;BookieServiceInfo&gt; result =</span>
+<span class="nc" id="L288">                                    new Versioned&lt;&gt;(bookieServiceInfo, new LongVersion(stat2.getCversion()));</span>
+<span class="nc" id="L289">                            log.info(&quot;Update BookieInfoCache (readonly bookie) {} -&gt; {}&quot;, bookieId, result.getValue());</span>
+<span class="nc" id="L290">                            bookieServiceInfoCache.put(bookieId, result);</span>
+<span class="nc" id="L291">                            promise.complete(result);</span>
+<span class="nc" id="L292">                        } catch (IOException ex) {</span>
+<span class="nc" id="L293">                            log.error(&quot;Cannot update BookieInfo for &quot;, ex);</span>
+<span class="nc" id="L294">                            promise.completeExceptionally(KeeperException.create(KeeperException.Code.get(rc2), path2)</span>
+<span class="nc" id="L295">                                    .initCause(ex));</span>
+<span class="nc" id="L296">                            return;</span>
+<span class="nc" id="L297">                        }</span>
+                    } else {
+                        // not found as writable and readonly, the bookie is offline
+<span class="nc" id="L300">                        promise.completeExceptionally(BKException.create(BKException.Code.NoBookieAvailableException));</span>
+                    }
+<span class="nc" id="L302">                }, null);</span>
+            } else {
+<span class="nc" id="L304">                promise.completeExceptionally(KeeperException.create(KeeperException.Code.get(rc), path));</span>
+            }
+<span class="nc" id="L306">        }, null);</span>
+<span class="nc" id="L307">        return promise;</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @VisibleForTesting
+    static BookieServiceInfo deserializeBookieServiceInfo(BookieId bookieId, byte[] bookieServiceInfo)
+            throws IOException {
+<span class="nc bnc" id="L314" title="All 4 branches missed.">        if (bookieServiceInfo == null || bookieServiceInfo.length == 0) {</span>
+<span class="nc" id="L315">            return BookieServiceInfoUtils.buildLegacyBookieServiceInfo(bookieId.toString());</span>
+        }
+
+<span class="nc" id="L318">        BookieServiceInfoFormat builder = BookieServiceInfoFormat.parseFrom(bookieServiceInfo);</span>
+<span class="nc" id="L319">        BookieServiceInfo bsi = new BookieServiceInfo();</span>
+<span class="nc" id="L320">        List&lt;BookieServiceInfo.Endpoint&gt; endpoints = builder.getEndpointsList().stream()</span>
+<span class="nc" id="L321">                .map(e -&gt; {</span>
+<span class="nc" id="L322">                    BookieServiceInfo.Endpoint endpoint = new BookieServiceInfo.Endpoint();</span>
+<span class="nc" id="L323">                    endpoint.setId(e.getId());</span>
+<span class="nc" id="L324">                    endpoint.setPort(e.getPort());</span>
+<span class="nc" id="L325">                    endpoint.setHost(e.getHost());</span>
+<span class="nc" id="L326">                    endpoint.setProtocol(e.getProtocol());</span>
+<span class="nc" id="L327">                    endpoint.setAuth(e.getAuthList());</span>
+<span class="nc" id="L328">                    endpoint.setExtensions(e.getExtensionsList());</span>
+<span class="nc" id="L329">                    return endpoint;</span>
+                })
+<span class="nc" id="L331">                .collect(Collectors.toList());</span>
+
+<span class="nc" id="L333">        bsi.setEndpoints(endpoints);</span>
+<span class="nc" id="L334">        bsi.setProperties(builder.getPropertiesMap());</span>
+
+<span class="nc" id="L336">        return bsi;</span>
+    }
+
+    /**
+     * Reads the list of bookies at the given path and eagerly caches the BookieServiceInfo
+     * structure.
+     *
+     * @param regPath the path on ZooKeeper
+     * @param watcher an optional watcher
+     * @return an handle to the operation
+     */
+    private CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; getChildren(String regPath, Watcher watcher) {
+<span class="nc" id="L348">        CompletableFuture&lt;Versioned&lt;Set&lt;BookieId&gt;&gt;&gt; future = FutureUtils.createFuture();</span>
+<span class="nc" id="L349">        zk.getChildren(regPath, watcher, (rc, path, ctx, children, stat) -&gt; {</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">            if (KeeperException.Code.OK.intValue() != rc) {</span>
+<span class="nc" id="L351">                ZKException zke = new ZKException(KeeperException.create(KeeperException.Code.get(rc), path));</span>
+<span class="nc" id="L352">                future.completeExceptionally(zke.fillInStackTrace());</span>
+<span class="nc" id="L353">                return;</span>
+            }
+
+<span class="nc" id="L356">            Version version = new LongVersion(stat.getCversion());</span>
+<span class="nc" id="L357">            Set&lt;BookieId&gt; bookies = convertToBookieAddresses(children);</span>
+<span class="nc" id="L358">            List&lt;CompletableFuture&lt;Versioned&lt;BookieServiceInfo&gt;&gt;&gt; bookieInfoUpdated = new ArrayList&lt;&gt;(bookies.size());</span>
+<span class="nc bnc" id="L359" title="All 2 branches missed.">            for (BookieId id : bookies) {</span>
+                // update the cache for new bookies
+<span class="nc bnc" id="L361" title="All 2 branches missed.">                if (!bookieServiceInfoCache.containsKey(id)) {</span>
+<span class="nc" id="L362">                    bookieInfoUpdated.add(readBookieServiceInfoAsync(id));</span>
+                }
+<span class="nc" id="L364">            }</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            if (bookieInfoUpdated.isEmpty()) {</span>
+<span class="nc" id="L366">                future.complete(new Versioned&lt;&gt;(bookies, version));</span>
+            } else {
+<span class="nc" id="L368">                FutureUtils</span>
+<span class="nc" id="L369">                        .collect(bookieInfoUpdated)</span>
+<span class="nc" id="L370">                        .whenComplete((List&lt;Versioned&lt;BookieServiceInfo&gt;&gt; info, Throwable error) -&gt; {</span>
+                            // we are ignoring errors intentionally
+                            // there could be bookies that publish unparsable information
+                            // or other temporary/permanent errors
+<span class="nc" id="L374">                            future.complete(new Versioned&lt;&gt;(bookies, version));</span>
+<span class="nc" id="L375">                        });</span>
+            }
+<span class="nc" id="L377">        }, null);</span>
+<span class="nc" id="L378">        return future;</span>
+    }
+
+
+    @Override
+    public synchronized CompletableFuture&lt;Void&gt; watchWritableBookies(RegistrationListener listener) {
+        CompletableFuture&lt;Void&gt; f;
+<span class="nc bnc" id="L385" title="All 2 branches missed.">        if (null == watchWritableBookiesTask) {</span>
+<span class="nc" id="L386">            f = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L387">            watchWritableBookiesTask = new WatchTask(bookieRegistrationPath, f);</span>
+<span class="nc" id="L388">            f = f.whenComplete((value, cause) -&gt; {</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">                if (null != cause) {</span>
+<span class="nc" id="L390">                    unwatchWritableBookies(listener);</span>
+                }
+<span class="nc" id="L392">            });</span>
+        } else {
+<span class="nc" id="L394">            f = watchWritableBookiesTask.firstRunFuture;</span>
+        }
+
+<span class="nc" id="L397">        watchWritableBookiesTask.addListener(listener);</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (watchWritableBookiesTask.getNumListeners() == 1) {</span>
+<span class="nc" id="L399">            watchWritableBookiesTask.watch();</span>
+        }
+<span class="nc" id="L401">        return f;</span>
+    }
+
+    @Override
+    public synchronized void unwatchWritableBookies(RegistrationListener listener) {
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if (null == watchWritableBookiesTask) {</span>
+<span class="nc" id="L407">            return;</span>
+        }
+
+<span class="nc" id="L410">        watchWritableBookiesTask.removeListener(listener);</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">        if (watchWritableBookiesTask.getNumListeners() == 0) {</span>
+<span class="nc" id="L412">            watchWritableBookiesTask.close();</span>
+<span class="nc" id="L413">            watchWritableBookiesTask = null;</span>
+        }
+<span class="nc" id="L415">    }</span>
+
+    @Override
+    public synchronized CompletableFuture&lt;Void&gt; watchReadOnlyBookies(RegistrationListener listener) {
+        CompletableFuture&lt;Void&gt; f;
+<span class="nc bnc" id="L420" title="All 2 branches missed.">        if (null == watchReadOnlyBookiesTask) {</span>
+<span class="nc" id="L421">            f = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L422">            watchReadOnlyBookiesTask = new WatchTask(bookieReadonlyRegistrationPath, f);</span>
+<span class="nc" id="L423">            f = f.whenComplete((value, cause) -&gt; {</span>
+<span class="nc bnc" id="L424" title="All 2 branches missed.">                if (null != cause) {</span>
+<span class="nc" id="L425">                    unwatchReadOnlyBookies(listener);</span>
+                }
+<span class="nc" id="L427">            });</span>
+        } else {
+<span class="nc" id="L429">            f = watchReadOnlyBookiesTask.firstRunFuture;</span>
+        }
+
+<span class="nc" id="L432">        watchReadOnlyBookiesTask.addListener(listener);</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        if (watchReadOnlyBookiesTask.getNumListeners() == 1) {</span>
+<span class="nc" id="L434">            watchReadOnlyBookiesTask.watch();</span>
+        }
+<span class="nc" id="L436">        return f;</span>
+    }
+
+    @Override
+    public synchronized void unwatchReadOnlyBookies(RegistrationListener listener) {
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        if (null == watchReadOnlyBookiesTask) {</span>
+<span class="nc" id="L442">            return;</span>
+        }
+
+<span class="nc" id="L445">        watchReadOnlyBookiesTask.removeListener(listener);</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">        if (watchReadOnlyBookiesTask.getNumListeners() == 0) {</span>
+<span class="nc" id="L447">            watchReadOnlyBookiesTask.close();</span>
+<span class="nc" id="L448">            watchReadOnlyBookiesTask = null;</span>
+        }
+<span class="nc" id="L450">    }</span>
+
+    private static HashSet&lt;BookieId&gt; convertToBookieAddresses(List&lt;String&gt; children) {
+        // Read the bookie addresses into a set for efficient lookup
+<span class="nc" id="L454">        HashSet&lt;BookieId&gt; newBookieAddrs = Sets.newHashSet();</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">        for (String bookieAddrString : children) {</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">            if (READONLY.equals(bookieAddrString)) {</span>
+<span class="nc" id="L457">                continue;</span>
+            }
+<span class="nc" id="L459">            BookieId bookieAddr = BookieId.parse(bookieAddrString);</span>
+<span class="nc" id="L460">            newBookieAddrs.add(bookieAddr);</span>
+<span class="nc" id="L461">        }</span>
+<span class="nc" id="L462">        return newBookieAddrs;</span>
+    }
+
+    private static BookieId stripBookieIdFromPath(String path) {
+<span class="nc bnc" id="L466" title="All 2 branches missed.">        if (path == null) {</span>
+<span class="nc" id="L467">            return null;</span>
+        }
+<span class="nc" id="L469">        final int slash = path.lastIndexOf('/');</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">        if (slash &gt;= 0) {</span>
+            try {
+<span class="nc" id="L472">                return BookieId.parse(path.substring(slash + 1));</span>
+<span class="nc" id="L473">            } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L474">                log.warn(&quot;Cannot decode bookieId from {}&quot;, path, e);</span>
+            }
+        }
+<span class="nc" id="L477">        return null;</span>
+    }
+
+<span class="nc" id="L480">    private class BookieServiceInfoCacheInvalidationWatcher implements Watcher {</span>
+
+        @Override
+        public void process(WatchedEvent we) {
+<span class="nc bnc" id="L484" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L485">                log.debug(&quot;zk event {} for {} state {}&quot;, we.getType(), we.getPath(), we.getState());</span>
+            }
+<span class="nc bnc" id="L487" title="All 2 branches missed.">            if (we.getState() == KeeperState.Expired) {</span>
+<span class="nc" id="L488">                log.info(&quot;zk session expired, invalidating cache&quot;);</span>
+<span class="nc" id="L489">                bookieServiceInfoCache.clear();</span>
+<span class="nc" id="L490">                return;</span>
+            }
+<span class="nc" id="L492">            BookieId bookieId = stripBookieIdFromPath(we.getPath());</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">            if (bookieId == null) {</span>
+<span class="nc" id="L494">                return;</span>
+            }
+<span class="nc bnc" id="L496" title="All 3 branches missed.">            switch (we.getType()) {</span>
+                case NodeDeleted:
+<span class="nc" id="L498">                    log.info(&quot;Invalidate cache for {}&quot;, bookieId);</span>
+<span class="nc" id="L499">                    bookieServiceInfoCache.remove(bookieId);</span>
+<span class="nc" id="L500">                    break;</span>
+                case NodeDataChanged:
+<span class="nc" id="L502">                    log.info(&quot;refresh cache for {}&quot;, bookieId);</span>
+<span class="nc" id="L503">                    readBookieServiceInfoAsync(bookieId);</span>
+<span class="nc" id="L504">                    break;</span>
+                default:
+<span class="nc bnc" id="L506" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L507">                        log.debug(&quot;ignore cache event {} for {}&quot;, we.getType(), bookieId);</span>
+                    }
+                    break;
+            }
+<span class="nc" id="L511">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,1304 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleDirectoryDbLedgerStorage.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">SingleDirectoryDbLedgerStorage.java</span></div><h1>SingleDirectoryDbLedgerStorage.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.protobuf.ByteString;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
+import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.DefaultThreadFactory;
+import java.io.File;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.PrimitiveIterator.OfLong;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.StampedLock;
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.Bookie.NoEntryException;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.BookieException.OperationRejectedException;
+import org.apache.bookkeeper.bookie.CheckpointSource;
+import org.apache.bookkeeper.bookie.CheckpointSource.Checkpoint;
+import org.apache.bookkeeper.bookie.Checkpointer;
+import org.apache.bookkeeper.bookie.CompactableLedgerStorage;
+import org.apache.bookkeeper.bookie.EntryLocation;
+import org.apache.bookkeeper.bookie.GarbageCollectionStatus;
+import org.apache.bookkeeper.bookie.GarbageCollectorThread;
+import org.apache.bookkeeper.bookie.LastAddConfirmedUpdateNotification;
+import org.apache.bookkeeper.bookie.LedgerCache;
+import org.apache.bookkeeper.bookie.LedgerDirsManager;
+import org.apache.bookkeeper.bookie.LedgerDirsManager.LedgerDirsListener;
+import org.apache.bookkeeper.bookie.LedgerEntryPage;
+import org.apache.bookkeeper.bookie.StateManager;
+import org.apache.bookkeeper.bookie.storage.EntryLogger;
+import org.apache.bookkeeper.bookie.storage.ldb.DbLedgerStorageDataFormats.LedgerData;
+import org.apache.bookkeeper.bookie.storage.ldb.KeyValueStorage.Batch;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.common.util.Watcher;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.proto.BookieProtocol;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.ThreadRegistry;
+import org.apache.bookkeeper.util.collections.ConcurrentLongHashMap;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.mutable.MutableLong;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Single directory implementation of LedgerStorage that uses RocksDB to keep the indexes for entries stored in
+ * EntryLogs.
+ *
+ * &lt;p&gt;This is meant only to be used from {@link DbLedgerStorage}.
+ */
+public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage {
+    private final EntryLogger entryLogger;
+
+    private final LedgerMetadataIndex ledgerIndex;
+    private final EntryLocationIndex entryLocationIndex;
+
+    private final ConcurrentLongHashMap&lt;TransientLedgerInfo&gt; transientLedgerInfoCache;
+
+    private final GarbageCollectorThread gcThread;
+
+    // Write cache where all new entries are inserted into
+    protected volatile WriteCache writeCache;
+
+    // Write cache that is used to swap with writeCache during flushes
+    protected volatile WriteCache writeCacheBeingFlushed;
+
+    // Cache where we insert entries for speculative reading
+    private final ReadCache readCache;
+
+<span class="nc" id="L111">    private final StampedLock writeCacheRotationLock = new StampedLock();</span>
+
+<span class="nc" id="L113">    protected final ReentrantLock flushMutex = new ReentrantLock();</span>
+
+<span class="nc" id="L115">    protected final AtomicBoolean hasFlushBeenTriggered = new AtomicBoolean(false);</span>
+<span class="nc" id="L116">    private final AtomicBoolean isFlushOngoing = new AtomicBoolean(false);</span>
+
+<span class="nc" id="L118">    private static String dbStoragerExecutorName = &quot;db-storage&quot;;</span>
+<span class="nc" id="L119">    private final ExecutorService executor = Executors.newSingleThreadExecutor(</span>
+<span class="nc" id="L120">            new DefaultThreadFactory(dbStoragerExecutorName) {</span>
+                @Override
+                protected Thread newThread(Runnable r, String name) {
+<span class="nc" id="L123">                    return super.newThread(ThreadRegistry.registerThread(r, dbStoragerExecutorName), name);</span>
+                }
+            });
+
+    // Executor used to for db index cleanup
+<span class="nc" id="L128">    private final ScheduledExecutorService cleanupExecutor = Executors</span>
+<span class="nc" id="L129">            .newSingleThreadScheduledExecutor(new DefaultThreadFactory(&quot;db-storage-cleanup&quot;));</span>
+
+<span class="nc" id="L131">    private final CopyOnWriteArrayList&lt;LedgerDeletionListener&gt; ledgerDeletionListeners = Lists</span>
+<span class="nc" id="L132">            .newCopyOnWriteArrayList();</span>
+
+<span class="nc" id="L134">    private CheckpointSource checkpointSource = CheckpointSource.DEFAULT;</span>
+<span class="nc" id="L135">    private Checkpoint lastCheckpoint = Checkpoint.MIN;</span>
+
+    private final long writeCacheMaxSize;
+    private final long readCacheMaxSize;
+    private final int readAheadCacheBatchSize;
+    private final long readAheadCacheBatchBytesSize;
+
+    private final long maxThrottleTimeNanos;
+
+    private final DbLedgerStorageStats dbLedgerStorageStats;
+
+<span class="nc" id="L146">    private static final long DEFAULT_MAX_THROTTLE_TIME_MILLIS = TimeUnit.SECONDS.toMillis(10);</span>
+
+    private final long maxReadAheadBytesSize;
+
+    private final Counter flushExecutorTime;
+    private final boolean singleLedgerDirs;
+
+    public SingleDirectoryDbLedgerStorage(ServerConfiguration conf, LedgerManager ledgerManager,
+                                          LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager,
+                                          EntryLogger entryLogger, StatsLogger statsLogger, ByteBufAllocator allocator,
+                                          long writeCacheSize, long readCacheSize, int readAheadCacheBatchSize,
+                                          long readAheadCacheBatchBytesSize)
+<span class="nc" id="L158">            throws IOException {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">        checkArgument(ledgerDirsManager.getAllLedgerDirs().size() == 1,</span>
+                &quot;Db implementation only allows for one storage dir&quot;);
+
+<span class="nc" id="L162">        String ledgerBaseDir = ledgerDirsManager.getAllLedgerDirs().get(0).getPath();</span>
+        // indexBaseDir default use ledgerBaseDir
+<span class="nc" id="L164">        String indexBaseDir = ledgerBaseDir;</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (CollectionUtils.isEmpty(indexDirsManager.getAllLedgerDirs())</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                || ledgerBaseDir.equals(indexDirsManager.getAllLedgerDirs().get(0).getPath())) {</span>
+<span class="nc" id="L167">            log.info(&quot;indexDir is equals ledgerBaseDir, creating single directory db ledger storage on {}&quot;,</span>
+                    indexBaseDir);
+        } else {
+            // if indexDir is specified, set new value
+<span class="nc" id="L171">            indexBaseDir = indexDirsManager.getAllLedgerDirs().get(0).getPath();</span>
+<span class="nc" id="L172">            log.info(&quot;indexDir is specified a separate dir, creating single directory db ledger storage on {}&quot;,</span>
+                    indexBaseDir);
+        }
+
+<span class="nc" id="L176">        StatsLogger ledgerIndexDirStatsLogger = statsLogger</span>
+<span class="nc" id="L177">                .scopeLabel(&quot;ledgerDir&quot;, ledgerBaseDir)</span>
+<span class="nc" id="L178">                .scopeLabel(&quot;indexDir&quot;, indexBaseDir);</span>
+
+<span class="nc" id="L180">        this.writeCacheMaxSize = writeCacheSize;</span>
+<span class="nc" id="L181">        this.writeCache = new WriteCache(allocator, writeCacheMaxSize / 2);</span>
+<span class="nc" id="L182">        this.writeCacheBeingFlushed = new WriteCache(allocator, writeCacheMaxSize / 2);</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        this.singleLedgerDirs = conf.getLedgerDirs().length == 1;</span>
+
+<span class="nc" id="L185">        readCacheMaxSize = readCacheSize;</span>
+<span class="nc" id="L186">        this.readAheadCacheBatchSize = readAheadCacheBatchSize;</span>
+<span class="nc" id="L187">        this.readAheadCacheBatchBytesSize = readAheadCacheBatchBytesSize;</span>
+
+        // Do not attempt to perform read-ahead more than half the total size of the cache
+<span class="nc" id="L190">        maxReadAheadBytesSize = readCacheMaxSize / 2;</span>
+
+<span class="nc" id="L192">        long maxThrottleTimeMillis = conf.getLong(DbLedgerStorage.MAX_THROTTLE_TIME_MILLIS,</span>
+                DEFAULT_MAX_THROTTLE_TIME_MILLIS);
+<span class="nc" id="L194">        maxThrottleTimeNanos = TimeUnit.MILLISECONDS.toNanos(maxThrottleTimeMillis);</span>
+
+<span class="nc" id="L196">        readCache = new ReadCache(allocator, readCacheMaxSize);</span>
+
+<span class="nc" id="L198">        ledgerIndex = new LedgerMetadataIndex(conf,</span>
+                KeyValueStorageRocksDB.factory, indexBaseDir, ledgerIndexDirStatsLogger);
+<span class="nc" id="L200">        entryLocationIndex = new EntryLocationIndex(conf,</span>
+                KeyValueStorageRocksDB.factory, indexBaseDir, ledgerIndexDirStatsLogger);
+
+<span class="nc" id="L203">        transientLedgerInfoCache = ConcurrentLongHashMap.&lt;TransientLedgerInfo&gt;newBuilder()</span>
+<span class="nc" id="L204">                .expectedItems(16 * 1024)</span>
+<span class="nc" id="L205">                .concurrencyLevel(Runtime.getRuntime().availableProcessors() * 2)</span>
+<span class="nc" id="L206">                .build();</span>
+<span class="nc" id="L207">        cleanupExecutor.scheduleAtFixedRate(this::cleanupStaleTransientLedgerInfo,</span>
+                TransientLedgerInfo.LEDGER_INFO_CACHING_TIME_MINUTES,
+                TransientLedgerInfo.LEDGER_INFO_CACHING_TIME_MINUTES, TimeUnit.MINUTES);
+
+<span class="nc" id="L211">        this.entryLogger = entryLogger;</span>
+<span class="nc" id="L212">        gcThread = new GarbageCollectorThread(conf,</span>
+                ledgerManager, ledgerDirsManager, this, entryLogger, ledgerIndexDirStatsLogger);
+
+<span class="nc" id="L215">        dbLedgerStorageStats = new DbLedgerStorageStats(</span>
+            ledgerIndexDirStatsLogger,
+<span class="nc" id="L217">            () -&gt; writeCache.size() + writeCacheBeingFlushed.size(),</span>
+<span class="nc" id="L218">            () -&gt; writeCache.count() + writeCacheBeingFlushed.count(),</span>
+<span class="nc" id="L219">            () -&gt; readCache.size(),</span>
+<span class="nc" id="L220">            () -&gt; readCache.count()</span>
+        );
+
+<span class="nc" id="L223">        flushExecutorTime = ledgerIndexDirStatsLogger.getThreadScopedCounter(&quot;db-storage-thread-time&quot;);</span>
+
+<span class="nc" id="L225">        executor.submit(() -&gt; {</span>
+            // ensure the metric gets registered on start-up as this thread only executes
+            // when the write cache is full which may not happen or not for a long time
+<span class="nc" id="L228">            flushExecutorTime.addLatency(0, TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L229">        });</span>
+
+<span class="nc" id="L231">        ledgerDirsManager.addLedgerDirsListener(getLedgerDirsListener());</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        if (!ledgerBaseDir.equals(indexBaseDir)) {</span>
+<span class="nc" id="L233">            indexDirsManager.addLedgerDirsListener(getLedgerDirsListener());</span>
+        }
+<span class="nc" id="L235">    }</span>
+
+    @Override
+    public void initialize(ServerConfiguration conf, LedgerManager ledgerManager, LedgerDirsManager ledgerDirsManager,
+            LedgerDirsManager indexDirsManager, StatsLogger statsLogger,
+            ByteBufAllocator allocator) throws IOException {
+        /// Initialized in constructor
+<span class="nc" id="L242">    }</span>
+
+    @Override
+<span class="nc" id="L245">    public void setStateManager(StateManager stateManager) { }</span>
+
+    @Override
+    public void setCheckpointSource(CheckpointSource checkpointSource) {
+<span class="nc" id="L249">        this.checkpointSource = checkpointSource;</span>
+<span class="nc" id="L250">    }</span>
+    @Override
+<span class="nc" id="L252">    public void setCheckpointer(Checkpointer checkpointer) { }</span>
+
+    /**
+     * Evict all the ledger info object that were not used recently.
+     */
+    private void cleanupStaleTransientLedgerInfo() {
+<span class="nc" id="L258">        transientLedgerInfoCache.removeIf((ledgerId, ledgerInfo) -&gt; {</span>
+<span class="nc" id="L259">            boolean isStale = ledgerInfo.isStale();</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">            if (isStale) {</span>
+<span class="nc" id="L261">                ledgerInfo.close();</span>
+            }
+
+<span class="nc" id="L264">            return isStale;</span>
+        });
+<span class="nc" id="L266">    }</span>
+
+    @Override
+    public void start() {
+<span class="nc" id="L270">        gcThread.start();</span>
+<span class="nc" id="L271">    }</span>
+
+    @Override
+    public void forceGC() {
+<span class="nc" id="L275">        gcThread.enableForceGC();</span>
+<span class="nc" id="L276">    }</span>
+
+    @Override
+    public void forceGC(boolean forceMajor, boolean forceMinor) {
+<span class="nc" id="L280">        gcThread.enableForceGC(forceMajor, forceMinor);</span>
+<span class="nc" id="L281">    }</span>
+
+    @Override
+    public boolean isInForceGC() {
+<span class="nc" id="L285">        return gcThread.isInForceGC();</span>
+    }
+
+    public void suspendMinorGC() {
+<span class="nc" id="L289">        gcThread.suspendMinorGC();</span>
+<span class="nc" id="L290">    }</span>
+
+    public void suspendMajorGC() {
+<span class="nc" id="L293">        gcThread.suspendMajorGC();</span>
+<span class="nc" id="L294">    }</span>
+
+    public void resumeMinorGC() {
+<span class="nc" id="L297">        gcThread.resumeMinorGC();</span>
+<span class="nc" id="L298">    }</span>
+
+    public void resumeMajorGC() {
+<span class="nc" id="L301">        gcThread.resumeMajorGC();</span>
+<span class="nc" id="L302">    }</span>
+
+    public boolean isMajorGcSuspended() {
+<span class="nc" id="L305">        return gcThread.isMajorGcSuspend();</span>
+    }
+
+    public boolean isMinorGcSuspended() {
+<span class="nc" id="L309">        return gcThread.isMinorGcSuspend();</span>
+    }
+
+    @Override
+    public void entryLocationCompact() {
+<span class="nc bnc" id="L314" title="All 2 branches missed.">        if (entryLocationIndex.isCompacting()) {</span>
+            // RocksDB already running compact.
+<span class="nc" id="L316">            log.info(&quot;Compacting directory {}, skipping this entryLocationCompaction this time.&quot;,</span>
+<span class="nc" id="L317">                    entryLocationIndex.getEntryLocationDBPath());</span>
+<span class="nc" id="L318">            return;</span>
+        }
+<span class="nc" id="L320">        cleanupExecutor.execute(() -&gt; {</span>
+            // There can only be one single cleanup task running because the cleanupExecutor
+            // is single-threaded
+            try {
+<span class="nc" id="L324">                log.info(&quot;Trigger entry location index RocksDB compact.&quot;);</span>
+<span class="nc" id="L325">                entryLocationIndex.compact();</span>
+<span class="nc" id="L326">            } catch (Throwable t) {</span>
+<span class="nc" id="L327">                log.warn(&quot;Failed to trigger entry location index RocksDB compact&quot;, t);</span>
+<span class="nc" id="L328">            }</span>
+<span class="nc" id="L329">        });</span>
+<span class="nc" id="L330">    }</span>
+
+    @Override
+    public boolean isEntryLocationCompacting() {
+<span class="nc" id="L334">        return entryLocationIndex.isCompacting();</span>
+    }
+
+    @Override
+    public List&lt;String&gt; getEntryLocationDBPath() {
+<span class="nc" id="L339">        return Lists.newArrayList(entryLocationIndex.getEntryLocationDBPath());</span>
+    }
+
+    @Override
+    public void shutdown() throws InterruptedException {
+        try {
+<span class="nc" id="L345">            flush();</span>
+
+<span class="nc" id="L347">            gcThread.shutdown();</span>
+<span class="nc" id="L348">            entryLogger.close();</span>
+
+<span class="nc" id="L350">            cleanupExecutor.shutdown();</span>
+<span class="nc" id="L351">            cleanupExecutor.awaitTermination(1, TimeUnit.SECONDS);</span>
+
+<span class="nc" id="L353">            ledgerIndex.close();</span>
+<span class="nc" id="L354">            entryLocationIndex.close();</span>
+
+<span class="nc" id="L356">            writeCache.close();</span>
+<span class="nc" id="L357">            writeCacheBeingFlushed.close();</span>
+<span class="nc" id="L358">            readCache.close();</span>
+<span class="nc" id="L359">            executor.shutdown();</span>
+
+<span class="nc" id="L361">        } catch (IOException e) {</span>
+<span class="nc" id="L362">            log.error(&quot;Error closing db storage&quot;, e);</span>
+<span class="nc" id="L363">        }</span>
+<span class="nc" id="L364">    }</span>
+
+    @Override
+    public boolean ledgerExists(long ledgerId) throws IOException {
+        try {
+<span class="nc" id="L369">            LedgerData ledgerData = ledgerIndex.get(ledgerId);</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L371">                log.debug(&quot;Ledger exists. ledger: {} : {}&quot;, ledgerId, ledgerData.getExists());</span>
+            }
+<span class="nc" id="L373">            return ledgerData.getExists();</span>
+<span class="nc" id="L374">        } catch (Bookie.NoLedgerException nle) {</span>
+            // ledger does not exist
+<span class="nc" id="L376">            return false;</span>
+        }
+    }
+
+    @Override
+    public boolean entryExists(long ledgerId, long entryId) throws IOException, BookieException {
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        if (entryId == BookieProtocol.LAST_ADD_CONFIRMED) {</span>
+<span class="nc" id="L383">            return false;</span>
+        }
+
+        // We need to try to read from both write caches, since recent entries could be found in either of the two. The
+        // write caches are already thread safe on their own, here we just need to make sure we get references to both
+        // of them. Using an optimistic lock since the read lock is always free, unless we're swapping the caches.
+<span class="nc" id="L389">        long stamp = writeCacheRotationLock.tryOptimisticRead();</span>
+<span class="nc" id="L390">        WriteCache localWriteCache = writeCache;</span>
+<span class="nc" id="L391">        WriteCache localWriteCacheBeingFlushed = writeCacheBeingFlushed;</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        if (!writeCacheRotationLock.validate(stamp)) {</span>
+            // Fallback to regular read lock approach
+<span class="nc" id="L394">            stamp = writeCacheRotationLock.readLock();</span>
+            try {
+<span class="nc" id="L396">                localWriteCache = writeCache;</span>
+<span class="nc" id="L397">                localWriteCacheBeingFlushed = writeCacheBeingFlushed;</span>
+            } finally {
+<span class="nc" id="L399">                writeCacheRotationLock.unlockRead(stamp);</span>
+            }
+        }
+
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        boolean inCache = localWriteCache.hasEntry(ledgerId, entryId)</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">             || localWriteCacheBeingFlushed.hasEntry(ledgerId, entryId)</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">             || readCache.hasEntry(ledgerId, entryId);</span>
+
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (inCache) {</span>
+<span class="nc" id="L408">            return true;</span>
+        }
+
+        // Read from main storage
+<span class="nc" id="L412">        long entryLocation = entryLocationIndex.getLocation(ledgerId, entryId);</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        if (entryLocation != 0) {</span>
+<span class="nc" id="L414">            return true;</span>
+        }
+
+        // Only a negative result while in limbo equates to unknown
+<span class="nc" id="L418">        throwIfLimbo(ledgerId);</span>
+
+<span class="nc" id="L420">        return false;</span>
+    }
+
+    @Override
+    public boolean isFenced(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L425">        boolean isFenced = ledgerIndex.get(ledgerId).getFenced();</span>
+
+<span class="nc bnc" id="L427" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L428">            log.debug(&quot;ledger: {}, isFenced: {}.&quot;, ledgerId, isFenced);</span>
+        }
+
+        // Only a negative result while in limbo equates to unknown
+<span class="nc bnc" id="L432" title="All 2 branches missed.">        if (!isFenced) {</span>
+<span class="nc" id="L433">            throwIfLimbo(ledgerId);</span>
+        }
+
+<span class="nc" id="L436">        return isFenced;</span>
+    }
+
+    @Override
+    public boolean setFenced(long ledgerId) throws IOException {
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L442">            log.debug(&quot;Set fenced. ledger: {}&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L444">        boolean changed = ledgerIndex.setFenced(ledgerId);</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">        if (changed) {</span>
+            // notify all the watchers if a ledger is fenced
+<span class="nc" id="L447">            TransientLedgerInfo ledgerInfo = transientLedgerInfoCache.get(ledgerId);</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">            if (null != ledgerInfo) {</span>
+<span class="nc" id="L449">                ledgerInfo.notifyWatchers(Long.MAX_VALUE);</span>
+            }
+        }
+<span class="nc" id="L452">        return changed;</span>
+    }
+
+    @Override
+    public void setMasterKey(long ledgerId, byte[] masterKey) throws IOException {
+<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L458">            log.debug(&quot;Set master key. ledger: {}&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L460">        ledgerIndex.setMasterKey(ledgerId, masterKey);</span>
+<span class="nc" id="L461">    }</span>
+
+    @Override
+    public byte[] readMasterKey(long ledgerId) throws IOException, BookieException {
+<span class="nc bnc" id="L465" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L466">            log.debug(&quot;Read master key. ledger: {}&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L468">        return ledgerIndex.get(ledgerId).getMasterKey().toByteArray();</span>
+    }
+
+    @Override
+    public long addEntry(ByteBuf entry) throws IOException, BookieException {
+<span class="nc" id="L473">        long startTime = MathUtils.nowInNano();</span>
+
+<span class="nc" id="L475">        long ledgerId = entry.getLong(entry.readerIndex());</span>
+<span class="nc" id="L476">        long entryId = entry.getLong(entry.readerIndex() + 8);</span>
+<span class="nc" id="L477">        long lac = entry.getLong(entry.readerIndex() + 16);</span>
+
+<span class="nc bnc" id="L479" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L480">            log.debug(&quot;Add entry. {}@{}, lac = {}&quot;, ledgerId, entryId, lac);</span>
+        }
+
+        // First we try to do an optimistic locking to get access to the current write cache.
+        // This is based on the fact that the write cache is only being rotated (swapped) every 1 minute. During the
+        // rest of the time, we can have multiple thread using the optimistic lock here without interfering.
+<span class="nc" id="L486">        long stamp = writeCacheRotationLock.tryOptimisticRead();</span>
+<span class="nc" id="L487">        boolean inserted = false;</span>
+
+        // If the stamp is 0, the lock was exclusively acquired, validation will fail, and we can skip this put.
+<span class="nc bnc" id="L490" title="All 2 branches missed.">        if (stamp != 0) {</span>
+<span class="nc" id="L491">            inserted = writeCache.put(ledgerId, entryId, entry);</span>
+        }
+
+<span class="nc bnc" id="L494" title="All 4 branches missed.">        if (stamp == 0 || !writeCacheRotationLock.validate(stamp)) {</span>
+            // The write cache was rotated while we were inserting. We need to acquire the proper read lock and repeat
+            // the operation because we might have inserted in a write cache that was already being flushed and cleared,
+            // without being sure about this last entry being flushed or not.
+<span class="nc" id="L498">            stamp = writeCacheRotationLock.readLock();</span>
+            try {
+<span class="nc" id="L500">                inserted = writeCache.put(ledgerId, entryId, entry);</span>
+            } finally {
+<span class="nc" id="L502">                writeCacheRotationLock.unlockRead(stamp);</span>
+            }
+        }
+
+<span class="nc bnc" id="L506" title="All 2 branches missed.">        if (!inserted) {</span>
+<span class="nc" id="L507">            triggerFlushAndAddEntry(ledgerId, entryId, entry);</span>
+        }
+
+        // after successfully insert the entry, update LAC and notify the watchers
+<span class="nc" id="L511">        updateCachedLacIfNeeded(ledgerId, lac);</span>
+
+<span class="nc" id="L513">        recordSuccessfulEvent(dbLedgerStorageStats.getAddEntryStats(), startTime);</span>
+<span class="nc" id="L514">        return entryId;</span>
+    }
+
+    private void triggerFlushAndAddEntry(long ledgerId, long entryId, ByteBuf entry)
+            throws IOException, BookieException {
+<span class="nc" id="L519">        long throttledStartTime = MathUtils.nowInNano();</span>
+<span class="nc" id="L520">        dbLedgerStorageStats.getThrottledWriteRequests().inc();</span>
+<span class="nc" id="L521">        long absoluteTimeoutNanos = System.nanoTime() + maxThrottleTimeNanos;</span>
+
+<span class="nc bnc" id="L523" title="All 2 branches missed.">        while (System.nanoTime() &lt; absoluteTimeoutNanos) {</span>
+            // Write cache is full, we need to trigger a flush so that it gets rotated
+            // If the flush has already been triggered or flush has already switched the
+            // cache, we don't need to trigger another flush
+<span class="nc bnc" id="L527" title="All 4 branches missed.">            if (!isFlushOngoing.get() &amp;&amp; hasFlushBeenTriggered.compareAndSet(false, true)) {</span>
+                // Trigger an early flush in background
+<span class="nc" id="L529">                log.info(&quot;Write cache is full, triggering flush&quot;);</span>
+<span class="nc" id="L530">                executor.execute(() -&gt; {</span>
+<span class="nc" id="L531">                        long startTime = System.nanoTime();</span>
+                        try {
+<span class="nc" id="L533">                            flush();</span>
+<span class="nc" id="L534">                        } catch (IOException e) {</span>
+<span class="nc" id="L535">                            log.error(&quot;Error during flush&quot;, e);</span>
+                        } finally {
+<span class="nc" id="L537">                            flushExecutorTime.addLatency(MathUtils.elapsedNanos(startTime), TimeUnit.NANOSECONDS);</span>
+                        }
+<span class="nc" id="L539">                    });</span>
+            }
+
+<span class="nc" id="L542">            long stamp = writeCacheRotationLock.readLock();</span>
+            try {
+<span class="nc bnc" id="L544" title="All 2 branches missed.">                if (writeCache.put(ledgerId, entryId, entry)) {</span>
+                    // We succeeded in putting the entry in write cache in the
+<span class="nc" id="L546">                    recordSuccessfulEvent(dbLedgerStorageStats.getThrottledWriteStats(), throttledStartTime);</span>
+<span class="nc" id="L547">                    return;</span>
+                }
+            } finally {
+<span class="nc" id="L550">                writeCacheRotationLock.unlockRead(stamp);</span>
+            }
+
+            // Wait some time and try again
+            try {
+<span class="nc" id="L555">                Thread.sleep(1);</span>
+<span class="nc" id="L556">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L557">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L558">                throw new IOException(&quot;Interrupted when adding entry &quot; + ledgerId + &quot;@&quot; + entryId);</span>
+<span class="nc" id="L559">            }</span>
+<span class="nc" id="L560">        }</span>
+
+        // Timeout expired and we weren't able to insert in write cache
+<span class="nc" id="L563">        dbLedgerStorageStats.getRejectedWriteRequests().inc();</span>
+<span class="nc" id="L564">        recordFailedEvent(dbLedgerStorageStats.getThrottledWriteStats(), throttledStartTime);</span>
+<span class="nc" id="L565">        throw new OperationRejectedException();</span>
+    }
+
+    @Override
+    public ByteBuf getEntry(long ledgerId, long entryId) throws IOException, BookieException {
+<span class="nc" id="L570">        long startTime = MathUtils.nowInNano();</span>
+        try {
+<span class="nc" id="L572">            ByteBuf entry = doGetEntry(ledgerId, entryId);</span>
+<span class="nc" id="L573">            recordSuccessfulEvent(dbLedgerStorageStats.getReadEntryStats(), startTime);</span>
+<span class="nc" id="L574">            return entry;</span>
+<span class="nc" id="L575">        } catch (IOException e) {</span>
+<span class="nc" id="L576">            recordFailedEvent(dbLedgerStorageStats.getReadEntryStats(), startTime);</span>
+<span class="nc" id="L577">            throw e;</span>
+        }
+    }
+
+    private ByteBuf doGetEntry(long ledgerId, long entryId) throws IOException, BookieException {
+<span class="nc bnc" id="L582" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L583">            log.debug(&quot;Get Entry: {}@{}&quot;, ledgerId, entryId);</span>
+        }
+
+<span class="nc bnc" id="L586" title="All 2 branches missed.">        if (entryId == BookieProtocol.LAST_ADD_CONFIRMED) {</span>
+<span class="nc" id="L587">            return getLastEntry(ledgerId);</span>
+        }
+
+        // We need to try to read from both write caches, since recent entries could be found in either of the two. The
+        // write caches are already thread safe on their own, here we just need to make sure we get references to both
+        // of them. Using an optimistic lock since the read lock is always free, unless we're swapping the caches.
+<span class="nc" id="L593">        long stamp = writeCacheRotationLock.tryOptimisticRead();</span>
+<span class="nc" id="L594">        WriteCache localWriteCache = writeCache;</span>
+<span class="nc" id="L595">        WriteCache localWriteCacheBeingFlushed = writeCacheBeingFlushed;</span>
+<span class="nc bnc" id="L596" title="All 2 branches missed.">        if (!writeCacheRotationLock.validate(stamp)) {</span>
+            // Fallback to regular read lock approach
+<span class="nc" id="L598">            stamp = writeCacheRotationLock.readLock();</span>
+            try {
+<span class="nc" id="L600">                localWriteCache = writeCache;</span>
+<span class="nc" id="L601">                localWriteCacheBeingFlushed = writeCacheBeingFlushed;</span>
+            } finally {
+<span class="nc" id="L603">                writeCacheRotationLock.unlockRead(stamp);</span>
+            }
+        }
+
+        // First try to read from the write cache of recent entries
+<span class="nc" id="L608">        ByteBuf entry = localWriteCache.get(ledgerId, entryId);</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">        if (entry != null) {</span>
+<span class="nc" id="L610">            dbLedgerStorageStats.getWriteCacheHitCounter().inc();</span>
+<span class="nc" id="L611">            return entry;</span>
+        }
+
+        // If there's a flush going on, the entry might be in the flush buffer
+<span class="nc" id="L615">        entry = localWriteCacheBeingFlushed.get(ledgerId, entryId);</span>
+<span class="nc bnc" id="L616" title="All 2 branches missed.">        if (entry != null) {</span>
+<span class="nc" id="L617">            dbLedgerStorageStats.getWriteCacheHitCounter().inc();</span>
+<span class="nc" id="L618">            return entry;</span>
+        }
+
+<span class="nc" id="L621">        dbLedgerStorageStats.getWriteCacheMissCounter().inc();</span>
+
+        // Try reading from read-ahead cache
+<span class="nc" id="L624">        entry = readCache.get(ledgerId, entryId);</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">        if (entry != null) {</span>
+<span class="nc" id="L626">            dbLedgerStorageStats.getReadCacheHitCounter().inc();</span>
+<span class="nc" id="L627">            return entry;</span>
+        }
+
+<span class="nc" id="L630">        dbLedgerStorageStats.getReadCacheMissCounter().inc();</span>
+
+        // Read from main storage
+        long entryLocation;
+<span class="nc" id="L634">        long locationIndexStartNano = MathUtils.nowInNano();</span>
+        try {
+<span class="nc" id="L636">            entryLocation = entryLocationIndex.getLocation(ledgerId, entryId);</span>
+<span class="nc bnc" id="L637" title="All 2 branches missed.">            if (entryLocation == 0) {</span>
+                // Only a negative result while in limbo equates to unknown
+<span class="nc" id="L639">                throwIfLimbo(ledgerId);</span>
+
+<span class="nc" id="L641">                throw new NoEntryException(ledgerId, entryId);</span>
+            }
+        } finally {
+<span class="nc" id="L644">            dbLedgerStorageStats.getReadFromLocationIndexTime().addLatency(</span>
+<span class="nc" id="L645">                    MathUtils.elapsedNanos(locationIndexStartNano), TimeUnit.NANOSECONDS);</span>
+        }
+
+<span class="nc" id="L648">        long readEntryStartNano = MathUtils.nowInNano();</span>
+        try {
+<span class="nc" id="L650">            entry = entryLogger.readEntry(ledgerId, entryId, entryLocation);</span>
+        } finally {
+<span class="nc" id="L652">            dbLedgerStorageStats.getReadFromEntryLogTime().addLatency(</span>
+<span class="nc" id="L653">                    MathUtils.elapsedNanos(readEntryStartNano), TimeUnit.NANOSECONDS);</span>
+        }
+
+<span class="nc" id="L656">        readCache.put(ledgerId, entryId, entry);</span>
+
+        // Try to read more entries
+<span class="nc" id="L659">        long nextEntryLocation = entryLocation + 4 /* size header */ + entry.readableBytes();</span>
+<span class="nc" id="L660">        fillReadAheadCache(ledgerId, entryId + 1, nextEntryLocation);</span>
+
+<span class="nc" id="L662">        return entry;</span>
+    }
+
+    private void fillReadAheadCache(long originalLedgerId, long firstEntryId, long firstEntryLocation) {
+<span class="nc" id="L666">        long readAheadStartNano = MathUtils.nowInNano();</span>
+<span class="nc" id="L667">        int count = 0;</span>
+<span class="nc" id="L668">        long size = 0;</span>
+
+        try {
+<span class="nc" id="L671">            long firstEntryLogId = (firstEntryLocation &gt;&gt; 32);</span>
+<span class="nc" id="L672">            long currentEntryLogId = firstEntryLogId;</span>
+<span class="nc" id="L673">            long currentEntryLocation = firstEntryLocation;</span>
+
+<span class="nc bnc" id="L675" title="All 4 branches missed.">            while (chargeReadAheadCache(count, size) &amp;&amp; currentEntryLogId == firstEntryLogId) {</span>
+<span class="nc" id="L676">                ByteBuf entry = entryLogger.readEntry(originalLedgerId,</span>
+                        firstEntryId, currentEntryLocation);
+
+                try {
+<span class="nc" id="L680">                    long currentEntryLedgerId = entry.getLong(0);</span>
+<span class="nc" id="L681">                    long currentEntryId = entry.getLong(8);</span>
+
+<span class="nc bnc" id="L683" title="All 2 branches missed.">                    if (currentEntryLedgerId != originalLedgerId) {</span>
+                        // Found an entry belonging to a different ledger, stopping read-ahead
+                        break;
+                    }
+
+                    // Insert entry in read cache
+<span class="nc" id="L689">                    readCache.put(originalLedgerId, currentEntryId, entry);</span>
+
+<span class="nc" id="L691">                    count++;</span>
+<span class="nc" id="L692">                    firstEntryId++;</span>
+<span class="nc" id="L693">                    size += entry.readableBytes();</span>
+
+<span class="nc" id="L695">                    currentEntryLocation += 4 + entry.readableBytes();</span>
+<span class="nc" id="L696">                    currentEntryLogId = currentEntryLocation &gt;&gt; 32;</span>
+                } finally {
+<span class="nc" id="L698">                    ReferenceCountUtil.release(entry);</span>
+                }
+<span class="nc" id="L700">            }</span>
+<span class="nc" id="L701">        } catch (Exception e) {</span>
+<span class="nc bnc" id="L702" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L703">                log.debug(&quot;Exception during read ahead for ledger: {}: e&quot;, originalLedgerId, e);</span>
+            }
+        } finally {
+<span class="nc" id="L706">            dbLedgerStorageStats.getReadAheadBatchCountStats().registerSuccessfulValue(count);</span>
+<span class="nc" id="L707">            dbLedgerStorageStats.getReadAheadBatchSizeStats().registerSuccessfulValue(size);</span>
+<span class="nc" id="L708">            dbLedgerStorageStats.getReadAheadTime().addLatency(</span>
+<span class="nc" id="L709">                    MathUtils.elapsedNanos(readAheadStartNano), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc" id="L711">    }</span>
+
+    protected boolean chargeReadAheadCache(int currentReadAheadCount, long currentReadAheadBytes) {
+        // compatible with old logic
+<span class="nc bnc" id="L715" title="All 4 branches missed.">        boolean chargeSizeCondition = currentReadAheadCount &lt; readAheadCacheBatchSize</span>
+                &amp;&amp; currentReadAheadBytes &lt; maxReadAheadBytesSize;
+<span class="nc bnc" id="L717" title="All 4 branches missed.">        if (chargeSizeCondition &amp;&amp; readAheadCacheBatchBytesSize &gt; 0) {</span>
+            // exact limits limit the size and count for each batch
+<span class="nc bnc" id="L719" title="All 2 branches missed.">            chargeSizeCondition = currentReadAheadBytes &lt; readAheadCacheBatchBytesSize;</span>
+        }
+<span class="nc" id="L721">        return chargeSizeCondition;</span>
+    }
+
+    public ByteBuf getLastEntry(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L725">        throwIfLimbo(ledgerId);</span>
+
+<span class="nc" id="L727">        long stamp = writeCacheRotationLock.readLock();</span>
+        try {
+            // First try to read from the write cache of recent entries
+<span class="nc" id="L730">            ByteBuf entry = writeCache.getLastEntry(ledgerId);</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">            if (entry != null) {</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">                if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L733">                    long foundLedgerId = entry.readLong(); // ledgerId</span>
+<span class="nc" id="L734">                    long entryId = entry.readLong();</span>
+<span class="nc" id="L735">                    entry.resetReaderIndex();</span>
+<span class="nc bnc" id="L736" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L737">                        log.debug(&quot;Found last entry for ledger {} in write cache: {}@{}&quot;, ledgerId, foundLedgerId,</span>
+<span class="nc" id="L738">                                entryId);</span>
+                    }
+                }
+
+<span class="nc" id="L742">                dbLedgerStorageStats.getWriteCacheHitCounter().inc();</span>
+<span class="nc" id="L743">                return entry;</span>
+            }
+
+            // If there's a flush going on, the entry might be in the flush buffer
+<span class="nc" id="L747">            entry = writeCacheBeingFlushed.getLastEntry(ledgerId);</span>
+<span class="nc bnc" id="L748" title="All 2 branches missed.">            if (entry != null) {</span>
+<span class="nc bnc" id="L749" title="All 2 branches missed.">                if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L750">                    entry.readLong(); // ledgerId</span>
+<span class="nc" id="L751">                    long entryId = entry.readLong();</span>
+<span class="nc" id="L752">                    entry.resetReaderIndex();</span>
+<span class="nc bnc" id="L753" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L754">                        log.debug(&quot;Found last entry for ledger {} in write cache being flushed: {}&quot;, ledgerId, entryId);</span>
+                    }
+                }
+
+<span class="nc" id="L758">                dbLedgerStorageStats.getWriteCacheHitCounter().inc();</span>
+<span class="nc" id="L759">                return entry;</span>
+            }
+        } finally {
+<span class="nc" id="L762">            writeCacheRotationLock.unlockRead(stamp);</span>
+        }
+
+<span class="nc" id="L765">        dbLedgerStorageStats.getWriteCacheMissCounter().inc();</span>
+
+        // Search the last entry in storage
+<span class="nc" id="L768">        long locationIndexStartNano = MathUtils.nowInNano();</span>
+<span class="nc" id="L769">        long lastEntryId = entryLocationIndex.getLastEntryInLedger(ledgerId);</span>
+<span class="nc bnc" id="L770" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L771">            log.debug(&quot;Found last entry for ledger {} in db: {}&quot;, ledgerId, lastEntryId);</span>
+        }
+
+<span class="nc" id="L774">        long entryLocation = entryLocationIndex.getLocation(ledgerId, lastEntryId);</span>
+<span class="nc" id="L775">        dbLedgerStorageStats.getReadFromLocationIndexTime().addLatency(</span>
+<span class="nc" id="L776">                MathUtils.elapsedNanos(locationIndexStartNano), TimeUnit.NANOSECONDS);</span>
+
+<span class="nc" id="L778">        long readEntryStartNano = MathUtils.nowInNano();</span>
+<span class="nc" id="L779">        ByteBuf content = entryLogger.readEntry(ledgerId, lastEntryId, entryLocation);</span>
+<span class="nc" id="L780">        dbLedgerStorageStats.getReadFromEntryLogTime().addLatency(</span>
+<span class="nc" id="L781">                MathUtils.elapsedNanos(readEntryStartNano), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L782">        return content;</span>
+    }
+
+    @VisibleForTesting
+    boolean isFlushRequired() {
+<span class="nc" id="L787">        long stamp = writeCacheRotationLock.readLock();</span>
+        try {
+<span class="nc bnc" id="L789" title="All 2 branches missed.">            return !writeCache.isEmpty();</span>
+        } finally {
+<span class="nc" id="L791">            writeCacheRotationLock.unlockRead(stamp);</span>
+        }
+    }
+
+    @Override
+    public void checkpoint(Checkpoint checkpoint) throws IOException {
+<span class="nc" id="L797">        Checkpoint thisCheckpoint = checkpointSource.newCheckpoint();</span>
+<span class="nc bnc" id="L798" title="All 2 branches missed.">        if (lastCheckpoint.compareTo(checkpoint) &gt; 0) {</span>
+<span class="nc" id="L799">            return;</span>
+        }
+
+        // Only a single flush operation can happen at a time
+<span class="nc" id="L803">        flushMutex.lock();</span>
+<span class="nc" id="L804">        long startTime = -1;</span>
+        try {
+<span class="nc" id="L806">            startTime = MathUtils.nowInNano();</span>
+<span class="nc" id="L807">        } catch (Throwable e) {</span>
+            // Fix spotbugs warning. Should never happen
+<span class="nc" id="L809">            flushMutex.unlock();</span>
+<span class="nc" id="L810">            throw new IOException(e);</span>
+<span class="nc" id="L811">        }</span>
+
+        try {
+<span class="nc bnc" id="L814" title="All 2 branches missed.">            if (writeCache.isEmpty()) {</span>
+<span class="nc" id="L815">                return;</span>
+            }
+            // Swap the write cache so that writes can continue to happen while the flush is
+            // ongoing
+<span class="nc" id="L819">            swapWriteCache();</span>
+
+<span class="nc" id="L821">            long sizeToFlush = writeCacheBeingFlushed.size();</span>
+<span class="nc bnc" id="L822" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L823">                log.debug(&quot;Flushing entries. count: {} -- size {} Mb&quot;, writeCacheBeingFlushed.count(),</span>
+<span class="nc" id="L824">                        sizeToFlush / 1024.0 / 1024);</span>
+            }
+
+            // Write all the pending entries into the entry logger and collect the offset
+            // position for each entry
+
+<span class="nc" id="L830">            try (Batch batch = entryLocationIndex.newBatch()) {</span>
+<span class="nc" id="L831">                writeCacheBeingFlushed.forEach((ledgerId, entryId, entry) -&gt; {</span>
+<span class="nc" id="L832">                    long location = entryLogger.addEntry(ledgerId, entry);</span>
+<span class="nc" id="L833">                    entryLocationIndex.addLocation(batch, ledgerId, entryId, location);</span>
+<span class="nc" id="L834">                });</span>
+
+<span class="nc" id="L836">                long entryLoggerStart = MathUtils.nowInNano();</span>
+<span class="nc" id="L837">                entryLogger.flush();</span>
+<span class="nc" id="L838">                recordSuccessfulEvent(dbLedgerStorageStats.getFlushEntryLogStats(), entryLoggerStart);</span>
+
+<span class="nc" id="L840">                long batchFlushStartTime = MathUtils.nowInNano();</span>
+<span class="nc" id="L841">                batch.flush();</span>
+
+<span class="nc" id="L843">                recordSuccessfulEvent(dbLedgerStorageStats.getFlushLocationIndexStats(), batchFlushStartTime);</span>
+<span class="nc bnc" id="L844" title="All 2 branches missed.">                if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L845">                    log.debug(&quot;DB batch flushed time : {} s&quot;,</span>
+<span class="nc" id="L846">                            MathUtils.elapsedNanos(batchFlushStartTime) / (double) TimeUnit.SECONDS.toNanos(1));</span>
+                }
+            }
+
+<span class="nc" id="L850">            long ledgerIndexStartTime = MathUtils.nowInNano();</span>
+<span class="nc" id="L851">            ledgerIndex.flush();</span>
+<span class="nc" id="L852">            recordSuccessfulEvent(dbLedgerStorageStats.getFlushLedgerIndexStats(), ledgerIndexStartTime);</span>
+
+<span class="nc" id="L854">            lastCheckpoint = thisCheckpoint;</span>
+
+            // Discard all the entry from the write cache, since they're now persisted
+<span class="nc" id="L857">            writeCacheBeingFlushed.clear();</span>
+
+<span class="nc" id="L859">            double flushTimeSeconds = MathUtils.elapsedNanos(startTime) / (double) TimeUnit.SECONDS.toNanos(1);</span>
+<span class="nc" id="L860">            double flushThroughput = sizeToFlush / 1024.0 / 1024.0 / flushTimeSeconds;</span>
+
+<span class="nc bnc" id="L862" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L863">                log.debug(&quot;Flushing done time {} s -- Written {} MB/s&quot;, flushTimeSeconds, flushThroughput);</span>
+            }
+
+<span class="nc" id="L866">            recordSuccessfulEvent(dbLedgerStorageStats.getFlushStats(), startTime);</span>
+<span class="nc" id="L867">            dbLedgerStorageStats.getFlushSizeStats().registerSuccessfulValue(sizeToFlush);</span>
+<span class="nc" id="L868">        } catch (IOException e) {</span>
+<span class="nc" id="L869">            recordFailedEvent(dbLedgerStorageStats.getFlushStats(), startTime);</span>
+            // Leave IOException as it is
+<span class="nc" id="L871">            throw e;</span>
+        } finally {
+            try {
+<span class="nc" id="L874">                cleanupExecutor.execute(() -&gt; {</span>
+                    // There can only be one single cleanup task running because the cleanupExecutor
+                    // is single-threaded
+                    try {
+<span class="nc bnc" id="L878" title="All 2 branches missed.">                        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L879">                            log.debug(&quot;Removing deleted ledgers from db indexes&quot;);</span>
+                        }
+
+<span class="nc" id="L882">                        entryLocationIndex.removeOffsetFromDeletedLedgers();</span>
+<span class="nc" id="L883">                        ledgerIndex.removeDeletedLedgers();</span>
+<span class="nc" id="L884">                    } catch (Throwable t) {</span>
+<span class="nc" id="L885">                        log.warn(&quot;Failed to cleanup db indexes&quot;, t);</span>
+<span class="nc" id="L886">                    }</span>
+<span class="nc" id="L887">                });</span>
+
+<span class="nc" id="L889">                isFlushOngoing.set(false);</span>
+            } finally {
+<span class="nc" id="L891">                flushMutex.unlock();</span>
+            }
+        }
+<span class="nc" id="L894">    }</span>
+
+    /**
+     * Swap the current write cache with the replacement cache.
+     */
+    private void swapWriteCache() {
+<span class="nc" id="L900">        long stamp = writeCacheRotationLock.writeLock();</span>
+        try {
+            // First, swap the current write-cache map with an empty one so that writes will
+            // go on unaffected. Only a single flush is happening at the same time
+<span class="nc" id="L904">            WriteCache tmp = writeCacheBeingFlushed;</span>
+<span class="nc" id="L905">            writeCacheBeingFlushed = writeCache;</span>
+<span class="nc" id="L906">            writeCache = tmp;</span>
+
+            // Set to true before updating hasFlushBeenTriggered to false.
+<span class="nc" id="L909">            isFlushOngoing.set(true);</span>
+            // since the cache is switched, we can allow flush to be triggered
+<span class="nc" id="L911">            hasFlushBeenTriggered.set(false);</span>
+        } finally {
+<span class="nc" id="L913">            writeCacheRotationLock.unlockWrite(stamp);</span>
+        }
+<span class="nc" id="L915">    }</span>
+
+    @Override
+    public void flush() throws IOException {
+<span class="nc" id="L919">        Checkpoint cp = checkpointSource.newCheckpoint();</span>
+<span class="nc" id="L920">        checkpoint(cp);</span>
+<span class="nc bnc" id="L921" title="All 2 branches missed.">        if (singleLedgerDirs) {</span>
+<span class="nc" id="L922">            checkpointSource.checkpointComplete(cp, true);</span>
+        }
+<span class="nc" id="L924">    }</span>
+
+    @Override
+    public void deleteLedger(long ledgerId) throws IOException {
+<span class="nc bnc" id="L928" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L929">            log.debug(&quot;Deleting ledger {}&quot;, ledgerId);</span>
+        }
+
+        // Delete entries from this ledger that are still in the write cache
+<span class="nc" id="L933">        long stamp = writeCacheRotationLock.readLock();</span>
+        try {
+<span class="nc" id="L935">            writeCache.deleteLedger(ledgerId);</span>
+        } finally {
+<span class="nc" id="L937">            writeCacheRotationLock.unlockRead(stamp);</span>
+        }
+
+<span class="nc" id="L940">        entryLocationIndex.delete(ledgerId);</span>
+<span class="nc" id="L941">        ledgerIndex.delete(ledgerId);</span>
+
+<span class="nc bnc" id="L943" title="All 2 branches missed.">        for (int i = 0, size = ledgerDeletionListeners.size(); i &lt; size; i++) {</span>
+<span class="nc" id="L944">            LedgerDeletionListener listener = ledgerDeletionListeners.get(i);</span>
+<span class="nc" id="L945">            listener.ledgerDeleted(ledgerId);</span>
+        }
+
+<span class="nc" id="L948">        TransientLedgerInfo tli = transientLedgerInfoCache.remove(ledgerId);</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">        if (tli != null) {</span>
+<span class="nc" id="L950">            tli.close();</span>
+        }
+<span class="nc" id="L952">    }</span>
+
+    @Override
+    public Iterable&lt;Long&gt; getActiveLedgersInRange(long firstLedgerId, long lastLedgerId) throws IOException {
+<span class="nc" id="L956">        return ledgerIndex.getActiveLedgersInRange(firstLedgerId, lastLedgerId);</span>
+    }
+
+    @Override
+    public void updateEntriesLocations(Iterable&lt;EntryLocation&gt; locations) throws IOException {
+        // Before updating the DB with the new location for the compacted entries, we need to
+        // make sure that there is no ongoing flush() operation.
+        // If there were a flush, we could have the following situation, which is highly
+        // unlikely though possible:
+        // 1. Flush operation has written the write-cache content into entry-log files
+        // 2. The DB location index is not yet updated
+        // 3. Compaction is triggered and starts compacting some of the recent files
+        // 4. Compaction will write the &quot;new location&quot; into the DB
+        // 5. The pending flush() will overwrite the DB with the &quot;old location&quot;, pointing
+        //    to a file that no longer exists
+        //
+        // To avoid this race condition, we need that all the entries that are potentially
+        // included in the compaction round to have all the indexes already flushed into
+        // the DB.
+        // The easiest lightweight way to achieve this is to wait for any pending
+        // flush operation to be completed before updating the index with the compacted
+        // entries, by blocking on the flushMutex.
+<span class="nc" id="L978">        flushMutex.lock();</span>
+<span class="nc" id="L979">        flushMutex.unlock();</span>
+
+        // We don't need to keep the flush mutex locked here while updating the DB.
+        // It's fine to have a concurrent flush operation at this point, because we
+        // know that none of the entries being flushed was included in the compaction
+        // round that we are dealing with.
+<span class="nc" id="L985">        entryLocationIndex.updateLocations(locations);</span>
+<span class="nc" id="L986">    }</span>
+
+    @VisibleForTesting
+    EntryLogger getEntryLogger() {
+<span class="nc" id="L990">        return entryLogger;</span>
+    }
+
+    @Override
+    public long getLastAddConfirmed(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L995">        throwIfLimbo(ledgerId);</span>
+
+<span class="nc" id="L997">        TransientLedgerInfo ledgerInfo = transientLedgerInfoCache.get(ledgerId);</span>
+<span class="nc bnc" id="L998" title="All 2 branches missed.">        long lac = null != ledgerInfo ? ledgerInfo.getLastAddConfirmed() : TransientLedgerInfo.NOT_ASSIGNED_LAC;</span>
+<span class="nc bnc" id="L999" title="All 2 branches missed.">        if (lac == TransientLedgerInfo.NOT_ASSIGNED_LAC) {</span>
+<span class="nc" id="L1000">            ByteBuf bb = getEntry(ledgerId, BookieProtocol.LAST_ADD_CONFIRMED);</span>
+            try {
+<span class="nc" id="L1002">                bb.skipBytes(2 * Long.BYTES); // skip ledger id and entry id</span>
+<span class="nc" id="L1003">                lac = bb.readLong();</span>
+<span class="nc" id="L1004">                lac = getOrAddLedgerInfo(ledgerId).setLastAddConfirmed(lac);</span>
+            } finally {
+<span class="nc" id="L1006">                ReferenceCountUtil.release(bb);</span>
+            }
+        }
+<span class="nc" id="L1009">        return lac;</span>
+    }
+
+    @Override
+    public boolean waitForLastAddConfirmedUpdate(long ledgerId, long previousLAC,
+            Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher) throws IOException {
+<span class="nc" id="L1015">        return getOrAddLedgerInfo(ledgerId).waitForLastAddConfirmedUpdate(previousLAC, watcher);</span>
+    }
+
+    @Override
+    public void cancelWaitForLastAddConfirmedUpdate(long ledgerId,
+                                                    Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher)
+            throws IOException {
+<span class="nc" id="L1022">        getOrAddLedgerInfo(ledgerId).cancelWaitForLastAddConfirmedUpdate(watcher);</span>
+<span class="nc" id="L1023">    }</span>
+
+    @Override
+    public void setExplicitLac(long ledgerId, ByteBuf lac) throws IOException {
+<span class="nc" id="L1027">        TransientLedgerInfo ledgerInfo = getOrAddLedgerInfo(ledgerId);</span>
+<span class="nc" id="L1028">        ledgerInfo.setExplicitLac(lac);</span>
+<span class="nc" id="L1029">        ledgerIndex.setExplicitLac(ledgerId, lac);</span>
+<span class="nc" id="L1030">        ledgerInfo.notifyWatchers(Long.MAX_VALUE);</span>
+<span class="nc" id="L1031">    }</span>
+
+    @Override
+    public ByteBuf getExplicitLac(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L1035">        throwIfLimbo(ledgerId);</span>
+<span class="nc bnc" id="L1036" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1037">            log.debug(&quot;getExplicitLac ledger {}&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L1039">        TransientLedgerInfo ledgerInfo = getOrAddLedgerInfo(ledgerId);</span>
+<span class="nc bnc" id="L1040" title="All 2 branches missed.">        if (ledgerInfo.getExplicitLac() != null) {</span>
+<span class="nc bnc" id="L1041" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1042">                log.debug(&quot;getExplicitLac ledger {} returned from TransientLedgerInfo&quot;, ledgerId);</span>
+            }
+<span class="nc" id="L1044">            return ledgerInfo.getExplicitLac();</span>
+        }
+<span class="nc" id="L1046">        LedgerData ledgerData = ledgerIndex.get(ledgerId);</span>
+<span class="nc bnc" id="L1047" title="All 2 branches missed.">        if (!ledgerData.hasExplicitLac()) {</span>
+<span class="nc bnc" id="L1048" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1049">                log.debug(&quot;getExplicitLac ledger {} missing from LedgerData&quot;, ledgerId);</span>
+            }
+<span class="nc" id="L1051">            return null;</span>
+        }
+<span class="nc bnc" id="L1053" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1054">            log.debug(&quot;getExplicitLac ledger {} returned from LedgerData&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L1056">        ByteString persistedLac = ledgerData.getExplicitLac();</span>
+<span class="nc" id="L1057">        ledgerInfo.setExplicitLac(Unpooled.wrappedBuffer(persistedLac.toByteArray()));</span>
+<span class="nc" id="L1058">        return ledgerInfo.getExplicitLac();</span>
+    }
+
+    private TransientLedgerInfo getOrAddLedgerInfo(long ledgerId) {
+<span class="nc" id="L1062">        return transientLedgerInfoCache.computeIfAbsent(ledgerId, l -&gt; {</span>
+<span class="nc" id="L1063">            return new TransientLedgerInfo(l, ledgerIndex);</span>
+        });
+    }
+
+    private void updateCachedLacIfNeeded(long ledgerId, long lac) {
+<span class="nc" id="L1068">        TransientLedgerInfo tli = transientLedgerInfoCache.get(ledgerId);</span>
+<span class="nc bnc" id="L1069" title="All 2 branches missed.">        if (tli != null) {</span>
+<span class="nc" id="L1070">            tli.setLastAddConfirmed(lac);</span>
+        }
+<span class="nc" id="L1072">    }</span>
+
+    @Override
+    public void flushEntriesLocationsIndex() throws IOException {
+        // No-op. Location index is already flushed in updateEntriesLocations() call
+<span class="nc" id="L1077">    }</span>
+
+    /**
+     * Add an already existing ledger to the index.
+     *
+     * &lt;p&gt;This method is only used as a tool to help the migration from InterleaveLedgerStorage to DbLedgerStorage
+     *
+     * @param ledgerId
+     *            the ledger id
+     * @param pages
+     *            Iterator over index pages from Indexed
+     * @return the number of
+     */
+    @SuppressFBWarnings(&quot;RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE&quot;)
+    public long addLedgerToIndex(long ledgerId, boolean isFenced, byte[] masterKey,
+            LedgerCache.PageEntriesIterable pages) throws Exception {
+<span class="nc" id="L1093">        LedgerData ledgerData = LedgerData.newBuilder().setExists(true).setFenced(isFenced)</span>
+<span class="nc" id="L1094">                .setMasterKey(ByteString.copyFrom(masterKey)).build();</span>
+<span class="nc" id="L1095">        ledgerIndex.set(ledgerId, ledgerData);</span>
+<span class="nc" id="L1096">        MutableLong numberOfEntries = new MutableLong();</span>
+
+        // Iterate over all the entries pages
+<span class="nc" id="L1099">        try (Batch batch = entryLocationIndex.newBatch()) {</span>
+<span class="nc bnc" id="L1100" title="All 2 branches missed.">            for (LedgerCache.PageEntries page : pages) {</span>
+<span class="nc" id="L1101">                try (LedgerEntryPage lep = page.getLEP()) {</span>
+<span class="nc" id="L1102">                    lep.getEntries((entryId, location) -&gt; {</span>
+<span class="nc" id="L1103">                        entryLocationIndex.addLocation(batch, ledgerId, entryId, location);</span>
+<span class="nc" id="L1104">                        numberOfEntries.increment();</span>
+<span class="nc" id="L1105">                        return true;</span>
+                    });
+                }
+<span class="nc" id="L1108">            }</span>
+
+<span class="nc" id="L1110">            ledgerIndex.flush();</span>
+<span class="nc" id="L1111">            batch.flush();</span>
+        }
+
+<span class="nc" id="L1114">        return numberOfEntries.longValue();</span>
+    }
+
+    @Override
+    public void registerLedgerDeletionListener(LedgerDeletionListener listener) {
+<span class="nc" id="L1119">        ledgerDeletionListeners.add(listener);</span>
+<span class="nc" id="L1120">    }</span>
+
+    public EntryLocationIndex getEntryLocationIndex() {
+<span class="nc" id="L1123">        return entryLocationIndex;</span>
+    }
+
+    private void recordSuccessfulEvent(OpStatsLogger logger, long startTimeNanos) {
+<span class="nc" id="L1127">        logger.registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L1128">    }</span>
+
+    private void recordFailedEvent(OpStatsLogger logger, long startTimeNanos) {
+<span class="nc" id="L1131">        logger.registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L1132">    }</span>
+
+    @Override
+    public List&lt;GarbageCollectionStatus&gt; getGarbageCollectionStatus() {
+<span class="nc" id="L1136">        return Collections.singletonList(gcThread.getGarbageCollectionStatus());</span>
+    }
+
+    /**
+     * Interface which process ledger logger.
+     */
+    public interface LedgerLoggerProcessor {
+        void process(long entryId, long entryLogId, long position);
+    }
+
+<span class="nc" id="L1146">    private static final Logger log = LoggerFactory.getLogger(SingleDirectoryDbLedgerStorage.class);</span>
+
+    @Override
+    public OfLong getListOfEntriesOfLedger(long ledgerId) throws IOException {
+<span class="nc" id="L1150">        throw new UnsupportedOperationException(</span>
+                &quot;getListOfEntriesOfLedger method is currently unsupported for SingleDirectoryDbLedgerStorage&quot;);
+    }
+
+    private LedgerDirsListener getLedgerDirsListener() {
+<span class="nc" id="L1155">        return new LedgerDirsListener() {</span>
+
+            @Override
+            public void diskAlmostFull(File disk) {
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">                if (gcThread.isForceGCAllowWhenNoSpace()) {</span>
+<span class="nc" id="L1160">                    gcThread.enableForceGC();</span>
+                } else {
+<span class="nc" id="L1162">                    gcThread.suspendMajorGC();</span>
+                }
+<span class="nc" id="L1164">            }</span>
+
+            @Override
+            public void diskFull(File disk) {
+<span class="nc bnc" id="L1168" title="All 2 branches missed.">                if (gcThread.isForceGCAllowWhenNoSpace()) {</span>
+<span class="nc" id="L1169">                    gcThread.enableForceGC();</span>
+                } else {
+<span class="nc" id="L1171">                    gcThread.suspendMajorGC();</span>
+<span class="nc" id="L1172">                    gcThread.suspendMinorGC();</span>
+                }
+<span class="nc" id="L1174">            }</span>
+
+            @Override
+            public void allDisksFull(boolean highPriorityWritesAllowed) {
+<span class="nc bnc" id="L1178" title="All 2 branches missed.">                if (gcThread.isForceGCAllowWhenNoSpace()) {</span>
+<span class="nc" id="L1179">                    gcThread.enableForceGC();</span>
+                } else {
+<span class="nc" id="L1181">                    gcThread.suspendMajorGC();</span>
+<span class="nc" id="L1182">                    gcThread.suspendMinorGC();</span>
+                }
+<span class="nc" id="L1184">            }</span>
+
+            @Override
+            public void diskWritable(File disk) {
+                // we have enough space now
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">                if (gcThread.isForceGCAllowWhenNoSpace()) {</span>
+                    // disable force gc.
+<span class="nc" id="L1191">                    gcThread.disableForceGC();</span>
+                } else {
+                    // resume compaction to normal.
+<span class="nc" id="L1194">                    gcThread.resumeMajorGC();</span>
+<span class="nc" id="L1195">                    gcThread.resumeMinorGC();</span>
+                }
+<span class="nc" id="L1197">            }</span>
+
+            @Override
+            public void diskJustWritable(File disk) {
+<span class="nc bnc" id="L1201" title="All 2 branches missed.">                if (gcThread.isForceGCAllowWhenNoSpace()) {</span>
+                    // if a disk is just writable, we still need force gc.
+<span class="nc" id="L1203">                    gcThread.enableForceGC();</span>
+                } else {
+                    // still under warn threshold, only resume minor compaction.
+<span class="nc" id="L1206">                    gcThread.resumeMinorGC();</span>
+                }
+<span class="nc" id="L1208">            }</span>
+        };
+    }
+
+    @Override
+    public void setLimboState(long ledgerId) throws IOException {
+<span class="nc bnc" id="L1214" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1215">            log.debug(&quot;setLimboState. ledger: {}&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L1217">        ledgerIndex.setLimbo(ledgerId);</span>
+<span class="nc" id="L1218">    }</span>
+
+    @Override
+    public boolean hasLimboState(long ledgerId) throws IOException {
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1223">            log.debug(&quot;hasLimboState. ledger: {}&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L1225">        return ledgerIndex.get(ledgerId).getLimbo();</span>
+    }
+
+    @Override
+    public void clearLimboState(long ledgerId) throws IOException {
+<span class="nc bnc" id="L1230" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1231">            log.debug(&quot;clearLimboState. ledger: {}&quot;, ledgerId);</span>
+        }
+<span class="nc" id="L1233">        ledgerIndex.clearLimbo(ledgerId);</span>
+<span class="nc" id="L1234">    }</span>
+
+    private void throwIfLimbo(long ledgerId) throws IOException, BookieException {
+<span class="nc bnc" id="L1237" title="All 2 branches missed.">        if (hasLimboState(ledgerId)) {</span>
+<span class="nc bnc" id="L1238" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L1239">                log.debug(&quot;Accessing ledger({}) in limbo state, throwing exception&quot;, ledgerId);</span>
+            }
+<span class="nc" id="L1241">            throw BookieException.create(BookieException.Code.DataUnknownException);</span>
+        }
+<span class="nc" id="L1243">    }</span>
+
+    /**
+     * Mapping of enums to bitmaps. The bitmaps must not overlap so that we can
+     * do bitwise operations on them.
+     */
+<span class="nc" id="L1249">    private static final Map&lt;StorageState, Integer&gt; stateBitmaps = ImmutableMap.of(</span>
+<span class="nc" id="L1250">            StorageState.NEEDS_INTEGRITY_CHECK, 0x00000001);</span>
+
+    @Override
+    public EnumSet&lt;StorageState&gt; getStorageStateFlags() throws IOException {
+<span class="nc" id="L1254">        int flags = ledgerIndex.getStorageStateFlags();</span>
+<span class="nc" id="L1255">        EnumSet&lt;StorageState&gt; flagsEnum = EnumSet.noneOf(StorageState.class);</span>
+<span class="nc bnc" id="L1256" title="All 2 branches missed.">        for (Map.Entry&lt;StorageState, Integer&gt; e : stateBitmaps.entrySet()) {</span>
+<span class="nc" id="L1257">            int value = e.getValue();</span>
+<span class="nc bnc" id="L1258" title="All 2 branches missed.">            if ((flags &amp; value) == value) {</span>
+<span class="nc" id="L1259">                flagsEnum.add(e.getKey());</span>
+            }
+<span class="nc" id="L1261">            flags = flags &amp; ~value;</span>
+<span class="nc" id="L1262">        }</span>
+<span class="nc bnc" id="L1263" title="All 2 branches missed.">        checkState(flags == 0, &quot;Unknown storage state flag found &quot; + flags);</span>
+<span class="nc" id="L1264">        return flagsEnum;</span>
+    }
+
+    @Override
+    public void setStorageStateFlag(StorageState flag) throws IOException {
+<span class="nc" id="L1269">        checkArgument(stateBitmaps.containsKey(flag), &quot;Unsupported flag &quot; + flag);</span>
+<span class="nc" id="L1270">        int flagInt = stateBitmaps.get(flag);</span>
+        while (true) {
+<span class="nc" id="L1272">            int curFlags = ledgerIndex.getStorageStateFlags();</span>
+<span class="nc" id="L1273">            int newFlags = curFlags | flagInt;</span>
+<span class="nc bnc" id="L1274" title="All 2 branches missed.">            if (ledgerIndex.setStorageStateFlags(curFlags, newFlags)) {</span>
+<span class="nc" id="L1275">                return;</span>
+            } else {
+<span class="nc" id="L1277">                log.info(&quot;Conflict updating storage state flags {} -&gt; {}, retrying&quot;,</span>
+<span class="nc" id="L1278">                        curFlags, newFlags);</span>
+            }
+<span class="nc" id="L1280">        }</span>
+    }
+
+    @Override
+    public void clearStorageStateFlag(StorageState flag) throws IOException {
+<span class="nc" id="L1285">        checkArgument(stateBitmaps.containsKey(flag), &quot;Unsupported flag &quot; + flag);</span>
+<span class="nc" id="L1286">        int flagInt = stateBitmaps.get(flag);</span>
+        while (true) {
+<span class="nc" id="L1288">            int curFlags = ledgerIndex.getStorageStateFlags();</span>
+<span class="nc" id="L1289">            int newFlags = curFlags &amp; ~flagInt;</span>
+<span class="nc bnc" id="L1290" title="All 2 branches missed.">            if (ledgerIndex.setStorageStateFlags(curFlags, newFlags)) {</span>
+<span class="nc" id="L1291">                return;</span>
+            } else {
+<span class="nc" id="L1293">                log.info(&quot;Conflict updating storage state flags {} -&gt; {}, retrying&quot;,</span>
+<span class="nc" id="L1294">                        curFlags, newFlags);</span>
+            }
+<span class="nc" id="L1296">        }</span>
+    }
+
+    @VisibleForTesting
+    DbLedgerStorageStats getDbLedgerStorageStats() {
+<span class="nc" id="L1301">        return dbLedgerStorageStats;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

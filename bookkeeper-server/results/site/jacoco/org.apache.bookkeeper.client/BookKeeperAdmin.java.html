@@ -1,0 +1,1856 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BookKeeperAdmin.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">BookKeeperAdmin.java</span></div><h1>BookKeeperAdmin.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.bookkeeper.meta.MetadataDrivers.runFunctionWithMetadataBookieDriver;
+import static org.apache.bookkeeper.meta.MetadataDrivers.runFunctionWithRegistrationManager;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import lombok.SneakyThrows;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.client.AsyncCallback.OpenCallback;
+import org.apache.bookkeeper.client.AsyncCallback.RecoverCallback;
+import org.apache.bookkeeper.client.EnsemblePlacementPolicy.PlacementPolicyAdherence;
+import org.apache.bookkeeper.client.LedgerFragmentReplicator.SingleFragmentCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncOpenCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncReadCallback;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.BookieServiceInfo;
+import org.apache.bookkeeper.discover.RegistrationClient.RegistrationListener;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.meta.LedgerAuditorManager;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerManager.LedgerRangeIterator;
+import org.apache.bookkeeper.meta.LedgerManagerFactory;
+import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
+import org.apache.bookkeeper.meta.MetadataBookieDriver;
+import org.apache.bookkeeper.meta.UnderreplicatedLedger;
+import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookieAddressResolver;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.MultiCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.replication.BookieLedgerIndexer;
+import org.apache.bookkeeper.replication.ReplicationException.BKAuditException;
+import org.apache.bookkeeper.replication.ReplicationException.CompatibilityException;
+import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.AvailabilityOfEntriesOfLedger;
+import org.apache.bookkeeper.util.IOUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.zookeeper.AsyncCallback;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Admin client for BookKeeper clusters.
+ */
+public class BookKeeperAdmin implements AutoCloseable {
+
+<span class="nc" id="L107">    private static final Logger LOG = LoggerFactory.getLogger(BookKeeperAdmin.class);</span>
+<span class="nc" id="L108">    private static final Logger VERBOSE = LoggerFactory.getLogger(&quot;verbose&quot;);</span>
+<span class="nc" id="L109">    private static final BiConsumer&lt;Long, Long&gt; NOOP_BICONSUMER = (l, e) -&gt; { };</span>
+
+    // BookKeeper client instance
+    private BookKeeper bkc;
+    private final boolean ownsBK;
+
+    // LedgerFragmentReplicator instance
+    private LedgerFragmentReplicator lfr;
+
+    private LedgerManagerFactory mFactory;
+
+    /*
+     * underreplicationManager is not initialized as part of constructor use its
+     * getter (getUnderreplicationManager) so that it can be lazy-initialized
+     */
+    private LedgerUnderreplicationManager underreplicationManager;
+
+    private LedgerAuditorManager ledgerAuditorManager;
+
+    /**
+     * Constructor that takes in a ZooKeeper servers connect string so we know
+     * how to connect to ZooKeeper to retrieve information about the BookKeeper
+     * cluster. We need this before we can do any type of admin operations on
+     * the BookKeeper cluster.
+     *
+     * @param zkServers
+     *            Comma separated list of hostname:port pairs for the ZooKeeper
+     *            servers cluster.
+     * @throws IOException
+     *             throws this exception if there is an error instantiating the
+     *             ZooKeeper client.
+     * @throws InterruptedException
+     *             Throws this exception if there is an error instantiating the
+     *             BookKeeper client.
+     * @throws BKException
+     *             Throws this exception if there is an error instantiating the
+     *             BookKeeper client.
+     */
+    public BookKeeperAdmin(String zkServers) throws IOException, InterruptedException, BKException {
+<span class="nc" id="L148">        this(new ClientConfiguration().setMetadataServiceUri(&quot;zk+null://&quot; + zkServers + &quot;/ledgers&quot;));</span>
+<span class="nc" id="L149">    }</span>
+
+    /**
+     * Constructor that takes in a configuration object so we know
+     * how to connect to ZooKeeper to retrieve information about the BookKeeper
+     * cluster. We need this before we can do any type of admin operations on
+     * the BookKeeper cluster.
+     *
+     * @param conf
+     *           Client Configuration Object
+     * @throws IOException
+     *             throws this exception if there is an error instantiating the
+     *             ZooKeeper client.
+     * @throws InterruptedException
+     *             Throws this exception if there is an error instantiating the
+     *             BookKeeper client.
+     * @throws BKException
+     *             Throws this exception if there is an error instantiating the
+     *             BookKeeper client.
+     */
+<span class="nc" id="L169">    public BookKeeperAdmin(ClientConfiguration conf) throws IOException, InterruptedException, BKException {</span>
+        // Create the BookKeeper client instance
+<span class="nc" id="L171">        bkc = new BookKeeper(conf);</span>
+<span class="nc" id="L172">        ownsBK = true;</span>
+<span class="nc" id="L173">        this.lfr = new LedgerFragmentReplicator(bkc, NullStatsLogger.INSTANCE, conf);</span>
+<span class="nc" id="L174">        this.mFactory = bkc.ledgerManagerFactory;</span>
+<span class="nc" id="L175">    }</span>
+
+    @VisibleForTesting
+    public static BookKeeperAdmin newBookKeeperAdmin(ClientConfiguration conf)
+            throws IOException, InterruptedException, BKException {
+<span class="nc" id="L180">        return new BookKeeperAdmin(conf);</span>
+    }
+
+    /**
+     * Constructor that takes in a BookKeeper instance . This will be useful,
+     * when user already has bk instance ready.
+     *
+     * @param bkc
+     *            - bookkeeper instance
+     * @param statsLogger
+     *            - stats logger
+     */
+<span class="nc" id="L192">    public BookKeeperAdmin(final BookKeeper bkc, StatsLogger statsLogger, ClientConfiguration conf) {</span>
+<span class="nc" id="L193">        Objects.requireNonNull(conf, &quot;Client configuration cannot be null&quot;);</span>
+<span class="nc" id="L194">        this.bkc = bkc;</span>
+<span class="nc" id="L195">        ownsBK = false;</span>
+<span class="nc" id="L196">        this.lfr = new LedgerFragmentReplicator(bkc, statsLogger, conf);</span>
+<span class="nc" id="L197">        this.mFactory = bkc.ledgerManagerFactory;</span>
+<span class="nc" id="L198">    }</span>
+
+    public BookKeeperAdmin(final BookKeeper bkc, ClientConfiguration conf) {
+<span class="nc" id="L201">        this(bkc, NullStatsLogger.INSTANCE, conf);</span>
+<span class="nc" id="L202">    }</span>
+
+<span class="nc" id="L204">    public BookKeeperAdmin(final BookKeeper bkc) {</span>
+<span class="nc" id="L205">        this.bkc = bkc;</span>
+<span class="nc" id="L206">        ownsBK = false;</span>
+<span class="nc" id="L207">        this.mFactory = bkc.ledgerManagerFactory;</span>
+<span class="nc" id="L208">    }</span>
+
+    public ClientConfiguration getConf() {
+<span class="nc" id="L211">        return bkc.getConf();</span>
+    }
+
+    /**
+     * Gracefully release resources that this client uses.
+     *
+     * @throws InterruptedException
+     *             if there is an error shutting down the clients that this
+     *             class uses.
+     */
+    @Override
+    public void close() throws InterruptedException, BKException {
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (ownsBK) {</span>
+<span class="nc" id="L224">            bkc.close();</span>
+        }
+
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        if (ledgerAuditorManager != null) {</span>
+            try {
+<span class="nc" id="L229">                ledgerAuditorManager.close();</span>
+<span class="nc" id="L230">            } catch (Exception e) {</span>
+<span class="nc" id="L231">                throw new BKException.MetaStoreException(e);</span>
+<span class="nc" id="L232">            }</span>
+        }
+<span class="nc" id="L234">    }</span>
+
+    /**
+     * Get a list of the available bookies.
+     *
+     * @return a collection of bookie addresses
+     */
+    public Collection&lt;BookieId&gt; getAvailableBookies()
+            throws BKException {
+<span class="nc" id="L243">        return bkc.bookieWatcher.getBookies();</span>
+    }
+
+    /**
+     * Get a list of all bookies including the not available ones.
+     *
+     * @return a collection of bookie addresses
+     */
+    public Collection&lt;BookieId&gt; getAllBookies()
+            throws BKException {
+<span class="nc" id="L253">        return bkc.bookieWatcher.getAllBookies();</span>
+    }
+
+    public BookieAddressResolver getBookieAddressResolver() {
+<span class="nc" id="L257">        return bkc.bookieWatcher.getBookieAddressResolver();</span>
+    }
+
+<span class="nc" id="L260">    @SneakyThrows</span>
+    public BookieServiceInfo getBookieServiceInfo(BookieId bookiedId)
+            throws BKException {
+<span class="nc" id="L263">        return FutureUtils.result(bkc.getMetadataClientDriver()</span>
+<span class="nc" id="L264">                .getRegistrationClient().getBookieServiceInfo(bookiedId)).getValue();</span>
+    }
+
+    /**
+     * Get a list of readonly bookies synchronously.
+     *
+     * @return a collection of bookie addresses
+     * @throws BKException if there are issues trying to read the list.
+     */
+    public Collection&lt;BookieId&gt; getReadOnlyBookies() throws BKException {
+<span class="nc" id="L274">        return bkc.bookieWatcher.getReadOnlyBookies();</span>
+    }
+
+    /**
+     * Notify when the available list of bookies changes.
+     * Once registered, the listener will be notified when the list of available bookies changes.
+     *
+     * @param listener the listener to notify
+     */
+    public void watchWritableBookiesChanged(final RegistrationListener listener)
+            throws BKException {
+<span class="nc" id="L285">        bkc</span>
+<span class="nc" id="L286">            .getMetadataClientDriver()</span>
+<span class="nc" id="L287">            .getRegistrationClient()</span>
+<span class="nc" id="L288">            .watchWritableBookies(listener);</span>
+<span class="nc" id="L289">    }</span>
+
+    /**
+     * Notify when the available list of read only bookies changes.
+     * Once registered, the listener will be notified when the list of available bookies changes.
+     *
+     * @param listener the listener to notify
+     */
+    public void watchReadOnlyBookiesChanged(final RegistrationListener listener)
+            throws BKException {
+<span class="nc" id="L299">        bkc</span>
+<span class="nc" id="L300">            .getMetadataClientDriver()</span>
+<span class="nc" id="L301">            .getRegistrationClient()</span>
+<span class="nc" id="L302">            .watchReadOnlyBookies(listener);</span>
+<span class="nc" id="L303">    }</span>
+
+    /**
+     * Open a ledger as an administrator. This means that no digest password
+     * checks are done. Otherwise, the call is identical to BookKeeper#asyncOpenLedger
+     *
+     * @param lId
+     *          ledger identifier
+     * @param cb
+     *          Callback which will receive a LedgerHandle object
+     * @param ctx
+     *          optional context object, to be passwd to the callback (can be null)
+     *
+     * @see BookKeeper#asyncOpenLedger
+     */
+    public void asyncOpenLedger(final long lId, final OpenCallback cb, final Object ctx) {
+<span class="nc" id="L319">        new LedgerOpenOp(bkc, bkc.getClientCtx().getClientStats(), lId, cb, ctx).initiate();</span>
+<span class="nc" id="L320">    }</span>
+
+    /**
+     * Open a ledger as an administrator. This means that no digest password
+     * checks are done. Otherwise, the call is identical to
+     * BookKeeper#openLedger
+     *
+     * @param lId
+     *            - ledger identifier
+     * @see BookKeeper#openLedger
+     */
+    public LedgerHandle openLedger(final long lId) throws InterruptedException,
+            BKException {
+<span class="nc" id="L333">        CompletableFuture&lt;LedgerHandle&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L334">        SyncOpenCallback result = new SyncOpenCallback(future);</span>
+
+<span class="nc" id="L336">        new LedgerOpenOp(bkc, bkc.getClientCtx().getClientStats(), lId, result, null).initiate();</span>
+
+<span class="nc" id="L338">        return SyncCallbackUtils.waitForResult(future);</span>
+    }
+
+    /**
+     * Open a ledger as an administrator without recovering the ledger. This means
+     * that no digest password  checks are done. Otherwise, the call is identical
+     * to BookKeeper#asyncOpenLedgerNoRecovery
+     *
+     * @param lId
+     *          ledger identifier
+     * @param cb
+     *          Callback which will receive a LedgerHandle object
+     * @param ctx
+     *          optional context object, to be passwd to the callback (can be null)
+     *
+     * @see BookKeeper#asyncOpenLedgerNoRecovery
+     */
+    public void asyncOpenLedgerNoRecovery(final long lId, final OpenCallback cb, final Object ctx) {
+<span class="nc" id="L356">        new LedgerOpenOp(bkc, bkc.getClientCtx().getClientStats(), lId, cb, ctx).initiateWithoutRecovery();</span>
+<span class="nc" id="L357">    }</span>
+
+    /**
+     * Open a ledger as an administrator without recovering the ledger. This
+     * means that no digest password checks are done. Otherwise, the call is
+     * identical to BookKeeper#openLedgerNoRecovery
+     *
+     * @param lId
+     *            ledger identifier
+     * @see BookKeeper#openLedgerNoRecovery
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public LedgerHandle openLedgerNoRecovery(final long lId)
+            throws InterruptedException, BKException {
+<span class="nc" id="L371">        CompletableFuture&lt;LedgerHandle&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L372">        SyncOpenCallback result = new SyncOpenCallback(future);</span>
+
+<span class="nc" id="L374">        new LedgerOpenOp(bkc, bkc.getClientCtx().getClientStats(), lId, result, null)</span>
+<span class="nc" id="L375">                .initiateWithoutRecovery();</span>
+
+<span class="nc" id="L377">        return SyncCallbackUtils.waitForResult(future);</span>
+    }
+
+    /**
+     * Read entries from a ledger synchronously. If the lastEntry is -1, it will read all the entries in the ledger from
+     * the firstEntry.
+     *
+     * @param ledgerId
+     * @param firstEntry
+     * @param lastEntry
+     * @return
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public Iterable&lt;LedgerEntry&gt; readEntries(long ledgerId, long firstEntry, long lastEntry)
+            throws InterruptedException, BKException {
+<span class="nc bnc" id="L393" title="All 4 branches missed.">        checkArgument(ledgerId &gt;= 0 &amp;&amp; firstEntry &gt;= 0);</span>
+<span class="nc" id="L394">        return new LedgerEntriesIterable(ledgerId, firstEntry, lastEntry);</span>
+    }
+
+    class LedgerEntriesIterable implements Iterable&lt;LedgerEntry&gt; {
+        final long ledgerId;
+        final long firstEntryId;
+        final long lastEntryId;
+
+        public LedgerEntriesIterable(long ledgerId, long firstEntry) {
+<span class="nc" id="L403">            this(ledgerId, firstEntry, -1);</span>
+<span class="nc" id="L404">        }</span>
+
+<span class="nc" id="L406">        public LedgerEntriesIterable(long ledgerId, long firstEntry, long lastEntry) {</span>
+<span class="nc" id="L407">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L408">            this.firstEntryId = firstEntry;</span>
+<span class="nc" id="L409">            this.lastEntryId = lastEntry;</span>
+<span class="nc" id="L410">        }</span>
+
+        @Override
+        public Iterator&lt;LedgerEntry&gt; iterator() {
+            try {
+<span class="nc" id="L415">                return new LedgerEntriesIterator(ledgerId, firstEntryId, lastEntryId);</span>
+<span class="nc" id="L416">            } catch (Exception e) {</span>
+<span class="nc" id="L417">                throw new RuntimeException(e);</span>
+            }
+        }
+    }
+
+    class LedgerEntriesIterator implements Iterator&lt;LedgerEntry&gt; {
+        final LedgerHandle handle;
+        final long ledgerId;
+        final long lastEntryId;
+
+        long nextEntryId;
+        LedgerEntry currentEntry;
+
+        public LedgerEntriesIterator(long ledgerId, long firstEntry, long lastEntry)
+<span class="nc" id="L431">                throws InterruptedException, BKException {</span>
+<span class="nc" id="L432">            this.handle = openLedgerNoRecovery(ledgerId);</span>
+<span class="nc" id="L433">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L434">            this.nextEntryId = firstEntry;</span>
+<span class="nc" id="L435">            this.lastEntryId = lastEntry;</span>
+<span class="nc" id="L436">            this.currentEntry = null;</span>
+<span class="nc" id="L437">        }</span>
+
+        @Override
+        public boolean hasNext() {
+<span class="nc bnc" id="L441" title="All 2 branches missed.">            if (currentEntry != null) {</span>
+<span class="nc" id="L442">                return true;</span>
+            }
+<span class="nc bnc" id="L444" title="All 6 branches missed.">            if ((lastEntryId == -1 || nextEntryId &lt;= lastEntryId) &amp;&amp; nextEntryId &lt;= handle.getLastAddConfirmed()) {</span>
+                try {
+<span class="nc" id="L446">                    CompletableFuture&lt;Enumeration&lt;LedgerEntry&gt;&gt; result = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L447">                    handle.asyncReadEntriesInternal(nextEntryId, nextEntryId,</span>
+                        new SyncReadCallback(result), null, false);
+
+<span class="nc" id="L450">                    currentEntry = SyncCallbackUtils.waitForResult(result).nextElement();</span>
+
+<span class="nc" id="L452">                    return true;</span>
+<span class="nc" id="L453">                } catch (Exception e) {</span>
+<span class="nc bnc" id="L454" title="All 4 branches missed.">                    if (e instanceof BKException.BKNoSuchEntryException &amp;&amp; lastEntryId == -1) {</span>
+                        // there are no more entries in the ledger, so we just return false and ignore this exception
+                        // since the last entry id was undefined
+<span class="nc" id="L457">                        close();</span>
+<span class="nc" id="L458">                        return false;</span>
+                    }
+<span class="nc" id="L460">                    LOG.error(&quot;Error reading entry {} from ledger {}&quot;, nextEntryId, ledgerId, e);</span>
+<span class="nc" id="L461">                    close();</span>
+<span class="nc" id="L462">                    throw new RuntimeException(e);</span>
+                }
+            }
+<span class="nc" id="L465">            close();</span>
+<span class="nc" id="L466">            return false;</span>
+        }
+
+        @Override
+        public LedgerEntry next() {
+<span class="nc bnc" id="L471" title="All 4 branches missed.">            if (lastEntryId &gt; -1 &amp;&amp; nextEntryId &gt; lastEntryId) {</span>
+<span class="nc" id="L472">                throw new NoSuchElementException();</span>
+            }
+<span class="nc" id="L474">            ++nextEntryId;</span>
+<span class="nc" id="L475">            LedgerEntry entry = currentEntry;</span>
+<span class="nc" id="L476">            currentEntry = null;</span>
+<span class="nc" id="L477">            return entry;</span>
+        }
+
+        @Override
+        public void remove() {
+            // noop
+<span class="nc" id="L483">        }</span>
+
+        private void close() {
+<span class="nc bnc" id="L486" title="All 2 branches missed.">            if (handle != null) {</span>
+                try {
+<span class="nc" id="L488">                    handle.close();</span>
+<span class="nc" id="L489">                } catch (Exception e) {</span>
+<span class="nc" id="L490">                    LOG.error(&quot;Error closing ledger handle {}&quot;, handle, e);</span>
+<span class="nc" id="L491">                }</span>
+            }
+<span class="nc" id="L493">        }</span>
+    }
+
+    // Object used for calling async methods and waiting for them to complete.
+    static class SyncObject {
+        boolean value;
+        int rc;
+
+<span class="nc" id="L501">        public SyncObject() {</span>
+<span class="nc" id="L502">            value = false;</span>
+<span class="nc" id="L503">            rc = BKException.Code.OK;</span>
+<span class="nc" id="L504">        }</span>
+    }
+
+    public SortedMap&lt;Long, LedgerMetadata&gt; getLedgersContainBookies(Set&lt;BookieId&gt; bookies)
+            throws InterruptedException, BKException {
+<span class="nc" id="L509">        final SyncObject sync = new SyncObject();</span>
+<span class="nc" id="L510">        final AtomicReference&lt;SortedMap&lt;Long, LedgerMetadata&gt;&gt; resultHolder =</span>
+                new AtomicReference&lt;SortedMap&lt;Long, LedgerMetadata&gt;&gt;(null);
+<span class="nc" id="L512">        asyncGetLedgersContainBookies(bookies, new GenericCallback&lt;SortedMap&lt;Long, LedgerMetadata&gt;&gt;() {</span>
+            @Override
+            public void operationComplete(int rc, SortedMap&lt;Long, LedgerMetadata&gt; result) {
+<span class="nc" id="L515">                LOG.info(&quot;GetLedgersContainBookies completed with rc : {}&quot;, rc);</span>
+<span class="nc" id="L516">                synchronized (sync) {</span>
+<span class="nc" id="L517">                    sync.rc = rc;</span>
+<span class="nc" id="L518">                    sync.value = true;</span>
+<span class="nc" id="L519">                    resultHolder.set(result);</span>
+<span class="nc" id="L520">                    sync.notify();</span>
+<span class="nc" id="L521">                }</span>
+<span class="nc" id="L522">            }</span>
+        });
+<span class="nc" id="L524">        synchronized (sync) {</span>
+<span class="nc bnc" id="L525" title="All 2 branches missed.">            while (!sync.value) {</span>
+<span class="nc" id="L526">                sync.wait();</span>
+            }
+<span class="nc" id="L528">        }</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">        if (sync.rc != BKException.Code.OK) {</span>
+<span class="nc" id="L530">            throw BKException.create(sync.rc);</span>
+        }
+<span class="nc" id="L532">        return resultHolder.get();</span>
+    }
+
+    public void asyncGetLedgersContainBookies(final Set&lt;BookieId&gt; bookies,
+                                              final GenericCallback&lt;SortedMap&lt;Long, LedgerMetadata&gt;&gt; callback) {
+<span class="nc" id="L537">        final SortedMap&lt;Long, LedgerMetadata&gt; ledgers = new ConcurrentSkipListMap&lt;Long, LedgerMetadata&gt;();</span>
+<span class="nc" id="L538">        bkc.getLedgerManager().asyncProcessLedgers(new Processor&lt;Long&gt;() {</span>
+            @Override
+            public void process(final Long lid, final AsyncCallback.VoidCallback cb) {
+<span class="nc" id="L541">                bkc.getLedgerManager().readLedgerMetadata(lid)</span>
+<span class="nc" id="L542">                    .whenComplete((metadata, exception) -&gt; {</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">                            if (BKException.getExceptionCode(exception)</span>
+                                == BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {
+                                // the ledger was deleted during this iteration.
+<span class="nc" id="L546">                                cb.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L547">                                return;</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">                            } else if (exception != null) {</span>
+<span class="nc" id="L549">                                cb.processResult(BKException.getExceptionCode(exception), null, null);</span>
+<span class="nc" id="L550">                                return;</span>
+                            }
+<span class="nc" id="L552">                            Set&lt;BookieId&gt; bookiesInLedger =</span>
+<span class="nc" id="L553">                                LedgerMetadataUtils.getBookiesInThisLedger(metadata.getValue());</span>
+<span class="nc" id="L554">                            Sets.SetView&lt;BookieId&gt; intersection =</span>
+<span class="nc" id="L555">                                Sets.intersection(bookiesInLedger, bookies);</span>
+<span class="nc bnc" id="L556" title="All 2 branches missed.">                            if (!intersection.isEmpty()) {</span>
+<span class="nc" id="L557">                                ledgers.put(lid, metadata.getValue());</span>
+                            }
+<span class="nc" id="L559">                            cb.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L560">                        });</span>
+<span class="nc" id="L561">            }</span>
+<span class="nc" id="L562">        }, new AsyncCallback.VoidCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx) {
+<span class="nc" id="L565">                callback.operationComplete(rc, ledgers);</span>
+<span class="nc" id="L566">            }</span>
+        }, null, BKException.Code.OK, BKException.Code.MetaStoreException);
+<span class="nc" id="L568">    }</span>
+
+    /**
+     * Synchronous method to rebuild and recover the ledger fragments data that
+     * was stored on the source bookie. That bookie could have failed completely
+     * and now the ledger data that was stored on it is under replicated. An
+     * optional destination bookie server could be given if we want to copy all
+     * of the ledger fragments data on the failed source bookie to it.
+     * Otherwise, we will just randomly distribute the ledger fragments to the
+     * active set of bookies, perhaps based on load. All ZooKeeper ledger
+     * metadata will be updated to point to the new bookie(s) that contain the
+     * replicated ledger fragments.
+     *
+     * @param bookieSrc
+     *            Source bookie that had a failure. We want to replicate the
+     *            ledger fragments that were stored there.
+     */
+    public void recoverBookieData(final BookieId bookieSrc)
+            throws InterruptedException, BKException {
+<span class="nc" id="L587">        Set&lt;BookieId&gt; bookiesSrc = Sets.newHashSet(bookieSrc);</span>
+<span class="nc" id="L588">        recoverBookieData(bookiesSrc);</span>
+<span class="nc" id="L589">    }</span>
+
+    public void recoverBookieData(final Set&lt;BookieId&gt; bookiesSrc)
+            throws InterruptedException, BKException {
+<span class="nc" id="L593">        recoverBookieData(bookiesSrc, false, false);</span>
+<span class="nc" id="L594">    }</span>
+
+    public void recoverBookieData(final Set&lt;BookieId&gt; bookiesSrc, boolean dryrun, boolean skipOpenLedgers)
+        throws InterruptedException, BKException {
+<span class="nc" id="L598">        recoverBookieData(bookiesSrc, dryrun, skipOpenLedgers, false);</span>
+<span class="nc" id="L599">    }</span>
+
+    public void recoverBookieData(final Set&lt;BookieId&gt; bookiesSrc, boolean dryrun, boolean skipOpenLedgers,
+                                  boolean skipUnrecoverableLedgers) throws InterruptedException, BKException {
+<span class="nc" id="L603">        SyncObject sync = new SyncObject();</span>
+        // Call the async method to recover bookie data.
+<span class="nc" id="L605">        asyncRecoverBookieData(bookiesSrc, dryrun, skipOpenLedgers, skipUnrecoverableLedgers, new RecoverCallback() {</span>
+            @Override
+            public void recoverComplete(int rc, Object ctx) {
+<span class="nc" id="L608">                LOG.info(&quot;Recover bookie operation completed with rc: {}&quot;, BKException.codeLogger(rc));</span>
+<span class="nc" id="L609">                SyncObject syncObj = (SyncObject) ctx;</span>
+<span class="nc" id="L610">                synchronized (syncObj) {</span>
+<span class="nc" id="L611">                    syncObj.rc = rc;</span>
+<span class="nc" id="L612">                    syncObj.value = true;</span>
+<span class="nc" id="L613">                    syncObj.notify();</span>
+<span class="nc" id="L614">                }</span>
+<span class="nc" id="L615">            }</span>
+        }, sync);
+
+        // Wait for the async method to complete.
+<span class="nc" id="L619">        synchronized (sync) {</span>
+<span class="nc bnc" id="L620" title="All 2 branches missed.">            while (!sync.value) {</span>
+<span class="nc" id="L621">                sync.wait();</span>
+            }
+<span class="nc" id="L623">        }</span>
+<span class="nc bnc" id="L624" title="All 2 branches missed.">        if (sync.rc != BKException.Code.OK) {</span>
+<span class="nc" id="L625">            throw BKException.create(sync.rc);</span>
+        }
+<span class="nc" id="L627">    }</span>
+
+    public void recoverBookieData(final long lid,
+                                  final Set&lt;BookieId&gt; bookiesSrc,
+                                  boolean dryrun,
+                                  boolean skipOpenLedgers)
+            throws InterruptedException, BKException {
+<span class="nc" id="L634">        SyncObject sync = new SyncObject();</span>
+        // Call the async method to recover bookie data.
+<span class="nc" id="L636">        asyncRecoverBookieData(lid, bookiesSrc, dryrun, skipOpenLedgers, (rc, ctx) -&gt; {</span>
+<span class="nc" id="L637">            LOG.info(&quot;Recover bookie for {} completed with rc : {}&quot;, lid, BKException.codeLogger(rc));</span>
+<span class="nc" id="L638">            SyncObject syncObject = (SyncObject) ctx;</span>
+<span class="nc" id="L639">            synchronized (syncObject) {</span>
+<span class="nc" id="L640">                syncObject.rc = rc;</span>
+<span class="nc" id="L641">                syncObject.value = true;</span>
+<span class="nc" id="L642">                syncObject.notify();</span>
+<span class="nc" id="L643">            }</span>
+<span class="nc" id="L644">        }, sync);</span>
+
+        // Wait for the async method to complete.
+<span class="nc" id="L647">        synchronized (sync) {</span>
+<span class="nc bnc" id="L648" title="All 2 branches missed.">            while (!sync.value) {</span>
+<span class="nc" id="L649">                sync.wait();</span>
+            }
+<span class="nc" id="L651">        }</span>
+<span class="nc bnc" id="L652" title="All 2 branches missed.">        if (sync.rc != BKException.Code.OK) {</span>
+<span class="nc" id="L653">            throw BKException.create(sync.rc);</span>
+        }
+<span class="nc" id="L655">    }</span>
+
+    /**
+     * Async method to rebuild and recover the ledger fragments data that was
+     * stored on the source bookie. That bookie could have failed completely and
+     * now the ledger data that was stored on it is under replicated. An
+     * optional destination bookie server could be given if we want to copy all
+     * of the ledger fragments data on the failed source bookie to it.
+     * Otherwise, we will just randomly distribute the ledger fragments to the
+     * active set of bookies, perhaps based on load. All ZooKeeper ledger
+     * metadata will be updated to point to the new bookie(s) that contain the
+     * replicated ledger fragments.
+     *
+     * @param bookieSrc
+     *            Source bookie that had a failure. We want to replicate the
+     *            ledger fragments that were stored there.
+     * @param cb
+     *            RecoverCallback to invoke once all of the data on the dead
+     *            bookie has been recovered and replicated.
+     * @param context
+     *            Context for the RecoverCallback to call.
+     */
+    public void asyncRecoverBookieData(final BookieId bookieSrc,
+                                       final RecoverCallback cb, final Object context) {
+<span class="nc" id="L679">        Set&lt;BookieId&gt; bookiesSrc = Sets.newHashSet(bookieSrc);</span>
+<span class="nc" id="L680">        asyncRecoverBookieData(bookiesSrc, cb, context);</span>
+<span class="nc" id="L681">    }</span>
+
+    public void asyncRecoverBookieData(final Set&lt;BookieId&gt; bookieSrc,
+                                       final RecoverCallback cb, final Object context) {
+<span class="nc" id="L685">        asyncRecoverBookieData(bookieSrc, false, false, false, cb, context);</span>
+<span class="nc" id="L686">    }</span>
+
+    public void asyncRecoverBookieData(final Set&lt;BookieId&gt; bookieSrc, boolean dryrun,
+                                       final boolean skipOpenLedgers, final boolean skipUnrecoverableLedgers,
+                                       final RecoverCallback cb, final Object context) {
+<span class="nc" id="L691">        getActiveLedgers(bookieSrc, dryrun, skipOpenLedgers, skipUnrecoverableLedgers, cb, context);</span>
+<span class="nc" id="L692">    }</span>
+
+    /**
+     * Recover a specific ledger.
+     *
+     * @param lid
+     *          ledger to recover
+     * @param bookieSrc
+     *          Source bookies that had a failure. We want to replicate the ledger fragments that were stored there.
+     * @param dryrun
+     *          dryrun the recover procedure.
+     * @param skipOpenLedgers
+     *            Skip recovering open ledgers.
+     * @param callback
+     *          RecoverCallback to invoke once all of the data on the dead
+     *          bookie has been recovered and replicated.
+     * @param context
+     *          Context for the RecoverCallback to call.
+     */
+    public void asyncRecoverBookieData(long lid, final Set&lt;BookieId&gt; bookieSrc, boolean dryrun,
+                                       boolean skipOpenLedgers, final RecoverCallback callback, final Object context) {
+<span class="nc" id="L713">        AsyncCallback.VoidCallback callbackWrapper = (rc, path, ctx)</span>
+<span class="nc" id="L714">            -&gt; callback.recoverComplete(bkc.getReturnRc(rc), context);</span>
+<span class="nc" id="L715">        recoverLedger(bookieSrc, lid, dryrun, skipOpenLedgers, callbackWrapper);</span>
+<span class="nc" id="L716">    }</span>
+
+    /**
+     * This method asynchronously polls ZK to get the current set of active
+     * ledgers. From this, we can open each ledger and look at the metadata to
+     * determine if any of the ledger fragments for it were stored at the dead
+     * input bookie.
+     *
+     * @param bookiesSrc
+     *            Source bookies that had a failure. We want to replicate the
+     *            ledger fragments that were stored there.
+     * @param dryrun
+     *            dryrun the recover procedure.
+     * @param skipOpenLedgers
+     *            Skip recovering open ledgers.
+     * @param cb
+     *            RecoverCallback to invoke once all of the data on the dead
+     *            bookie has been recovered and replicated.
+     * @param context
+     *            Context for the RecoverCallback to call.
+     */
+    private void getActiveLedgers(final Set&lt;BookieId&gt; bookiesSrc, final boolean dryrun,
+                                  final boolean skipOpenLedgers, final boolean skipUnrecoverableLedgers,
+                                  final RecoverCallback cb, final Object context) {
+        // Wrapper class around the RecoverCallback so it can be used
+        // as the final VoidCallback to process ledgers
+        class RecoverCallbackWrapper implements AsyncCallback.VoidCallback {
+            final RecoverCallback cb;
+
+<span class="nc" id="L745">            RecoverCallbackWrapper(RecoverCallback cb) {</span>
+<span class="nc" id="L746">                this.cb = cb;</span>
+<span class="nc" id="L747">            }</span>
+
+            @Override
+            public void processResult(int rc, String path, Object ctx) {
+<span class="nc" id="L751">                cb.recoverComplete(bkc.getReturnRc(rc), ctx);</span>
+<span class="nc" id="L752">            }</span>
+        }
+
+<span class="nc" id="L755">        Processor&lt;Long&gt; ledgerProcessor = new Processor&lt;Long&gt;() {</span>
+            @Override
+            public void process(Long ledgerId, AsyncCallback.VoidCallback iterCallback) {
+<span class="nc" id="L758">                recoverLedger(bookiesSrc, ledgerId, dryrun, skipOpenLedgers, skipUnrecoverableLedgers, iterCallback);</span>
+<span class="nc" id="L759">            }</span>
+        };
+<span class="nc" id="L761">        bkc.getLedgerManager().asyncProcessLedgers(</span>
+                ledgerProcessor, new RecoverCallbackWrapper(cb),
+                context, BKException.Code.OK, BKException.Code.LedgerRecoveryException);
+<span class="nc" id="L764">    }</span>
+
+    /**
+     * This method asynchronously recovers a given ledger if any of the ledger
+     * entries were stored on the failed bookie.
+     *
+     * @param bookiesSrc
+     *            Source bookies that had a failure. We want to replicate the
+     *            ledger fragments that were stored there.
+     * @param lId
+     *            Ledger id we want to recover.
+     * @param dryrun
+     *            printing the recovery plan without actually recovering bookies
+     * @param skipOpenLedgers
+     *            Skip recovering open ledgers.
+     * @param finalLedgerIterCb
+     *            IterationCallback to invoke once we've recovered the current
+     *            ledger.
+     */
+    private void recoverLedger(final Set&lt;BookieId&gt; bookiesSrc, final long lId, final boolean dryrun,
+                               final boolean skipOpenLedgers, final AsyncCallback.VoidCallback finalLedgerIterCb) {
+<span class="nc" id="L785">        recoverLedger(bookiesSrc, lId, dryrun, skipOpenLedgers, false, finalLedgerIterCb);</span>
+<span class="nc" id="L786">    }</span>
+
+    /**
+     * This method asynchronously recovers a given ledger if any of the ledger
+     * entries were stored on the failed bookie.
+     *
+     * @param bookiesSrc
+     *            Source bookies that had a failure. We want to replicate the
+     *            ledger fragments that were stored there.
+     * @param lId
+     *            Ledger id we want to recover.
+     * @param dryrun
+     *            printing the recovery plan without actually recovering bookies
+     * @param skipOpenLedgers
+     *            Skip recovering open ledgers.
+     * @param skipUnrecoverableLedgers
+     *            Skip unrecoverable ledgers.
+     * @param finalLedgerIterCb
+     *            IterationCallback to invoke once we've recovered the current
+     *            ledger.
+     */
+    private void recoverLedger(final Set&lt;BookieId&gt; bookiesSrc, final long lId, final boolean dryrun,
+                               final boolean skipOpenLedgers, final boolean skipUnrecoverableLedgers,
+                               final AsyncCallback.VoidCallback finalLedgerIterCb) {
+<span class="nc bnc" id="L810" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L811">            LOG.debug(&quot;Recovering ledger : {}&quot;, lId);</span>
+        }
+
+<span class="nc" id="L814">        asyncOpenLedgerNoRecovery(lId, new OpenCallback() {</span>
+            @Override
+            public void openComplete(int rc, final LedgerHandle lh, Object ctx) {
+<span class="nc bnc" id="L817" title="All 2 branches missed.">                if (rc != BKException.Code.OK) {</span>
+<span class="nc bnc" id="L818" title="All 2 branches missed.">                    if (skipUnrecoverableLedgers) {</span>
+<span class="nc" id="L819">                        LOG.warn(&quot;BK error opening ledger: {}, skip recover it.&quot;, lId, BKException.create(rc));</span>
+<span class="nc" id="L820">                        finalLedgerIterCb.processResult(BKException.Code.OK, null, null);</span>
+                    } else {
+<span class="nc" id="L822">                        LOG.error(&quot;BK error opening ledger: {}&quot;, lId, BKException.create(rc));</span>
+<span class="nc" id="L823">                        finalLedgerIterCb.processResult(rc, null, null);</span>
+                    }
+<span class="nc" id="L825">                    return;</span>
+                }
+
+<span class="nc" id="L828">                LedgerMetadata lm = lh.getLedgerMetadata();</span>
+<span class="nc bnc" id="L829" title="All 4 branches missed.">                if (skipOpenLedgers &amp;&amp; lm.getState() == LedgerMetadata.State.OPEN) {</span>
+<span class="nc" id="L830">                    LOG.info(&quot;Skip recovering open ledger {}.&quot;, lId);</span>
+                    try {
+<span class="nc" id="L832">                        lh.close();</span>
+<span class="nc" id="L833">                    } catch (InterruptedException ie) {</span>
+<span class="nc" id="L834">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L835">                    } catch (BKException bke) {</span>
+<span class="nc" id="L836">                        LOG.warn(&quot;Error on closing ledger handle for {}.&quot;, lId);</span>
+<span class="nc" id="L837">                    }</span>
+<span class="nc" id="L838">                    finalLedgerIterCb.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L839">                    return;</span>
+                }
+
+<span class="nc bnc" id="L842" title="All 4 branches missed.">                final boolean fenceRequired = !lm.isClosed() &amp;&amp; containBookiesInLastEnsemble(lm, bookiesSrc);</span>
+                // the original write has not removed faulty bookie from
+                // current ledger ensemble. to avoid data loss issue in
+                // the case of concurrent updates to the ensemble composition,
+                // the recovery tool should first close the ledger
+<span class="nc bnc" id="L847" title="All 4 branches missed.">                if (!dryrun &amp;&amp; fenceRequired) {</span>
+                    // close opened non recovery ledger handle
+                    try {
+<span class="nc" id="L850">                        lh.close();</span>
+<span class="nc" id="L851">                    } catch (Exception ie) {</span>
+<span class="nc" id="L852">                        LOG.warn(&quot;Error closing non recovery ledger handle for ledger &quot; + lId, ie);</span>
+<span class="nc" id="L853">                    }</span>
+<span class="nc" id="L854">                    asyncOpenLedger(lId, new OpenCallback() {</span>
+                        @Override
+                        public void openComplete(int newrc, final LedgerHandle newlh, Object newctx) {
+<span class="nc bnc" id="L857" title="All 2 branches missed.">                            if (newrc != BKException.Code.OK) {</span>
+<span class="nc bnc" id="L858" title="All 2 branches missed.">                                if (skipUnrecoverableLedgers) {</span>
+<span class="nc" id="L859">                                    LOG.warn(&quot;BK error opening ledger: {}, skip recover it.&quot;,</span>
+<span class="nc" id="L860">                                        lId, BKException.create(newrc));</span>
+<span class="nc" id="L861">                                    finalLedgerIterCb.processResult(BKException.Code.OK, null, null);</span>
+                                } else {
+<span class="nc" id="L863">                                    LOG.error(&quot;BK error close ledger: {}&quot;, lId, BKException.create(newrc));</span>
+<span class="nc" id="L864">                                    finalLedgerIterCb.processResult(newrc, null, null);</span>
+                                }
+<span class="nc" id="L866">                                return;</span>
+                            }
+<span class="nc" id="L868">                            bkc.mainWorkerPool.submit(() -&gt; {</span>
+                                // do recovery
+<span class="nc" id="L870">                                recoverLedger(bookiesSrc, lId, dryrun, skipOpenLedgers,</span>
+                                    skipUnrecoverableLedgers, finalLedgerIterCb);
+<span class="nc" id="L872">                            });</span>
+<span class="nc" id="L873">                        }</span>
+                    }, null);
+<span class="nc" id="L875">                    return;</span>
+                }
+
+<span class="nc" id="L878">                final AsyncCallback.VoidCallback ledgerIterCb = new AsyncCallback.VoidCallback() {</span>
+                    @Override
+                    public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L881" title="All 2 branches missed.">                        if (BKException.Code.OK != rc) {</span>
+<span class="nc bnc" id="L882" title="All 2 branches missed.">                            if (skipUnrecoverableLedgers) {</span>
+<span class="nc" id="L883">                                LOG.warn(&quot;Failed to recover ledger: {} : {}, skip recover it.&quot;, lId,</span>
+<span class="nc" id="L884">                                    BKException.codeLogger(rc));</span>
+<span class="nc" id="L885">                                rc = BKException.Code.OK;</span>
+                            } else {
+<span class="nc" id="L887">                                LOG.error(&quot;Failed to recover ledger {} : {}&quot;, lId, BKException.codeLogger(rc));</span>
+                            }
+                        } else {
+<span class="nc" id="L890">                            LOG.info(&quot;Recovered ledger {}.&quot;, lId);</span>
+                        }
+                        try {
+<span class="nc" id="L893">                            lh.close();</span>
+<span class="nc" id="L894">                        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L895">                            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L896">                        } catch (BKException bke) {</span>
+<span class="nc" id="L897">                            LOG.warn(&quot;Error on closing ledger handle for {}.&quot;, lId);</span>
+<span class="nc" id="L898">                        }</span>
+<span class="nc" id="L899">                        finalLedgerIterCb.processResult(rc, path, ctx);</span>
+<span class="nc" id="L900">                    }</span>
+                };
+
+                /*
+                 * This List stores the ledger fragments to recover indexed by
+                 * the start entry ID for the range. The ensembles TreeMap is
+                 * keyed off this.
+                 */
+<span class="nc" id="L908">                final List&lt;Long&gt; ledgerFragmentsToRecover = new LinkedList&lt;Long&gt;();</span>
+                /*
+                 * This Map will store the start and end entry ID values for
+                 * each of the ledger fragment ranges. The only exception is the
+                 * current active fragment since it has no end yet. In the event
+                 * of a bookie failure, a new ensemble is created so the current
+                 * ensemble should not contain the dead bookie we are trying to
+                 * recover.
+                 */
+<span class="nc" id="L917">                Map&lt;Long, Long&gt; ledgerFragmentsRange = new HashMap&lt;Long, Long&gt;();</span>
+<span class="nc" id="L918">                Long curEntryId = null;</span>
+                for (Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; entry :
+<span class="nc bnc" id="L920" title="All 2 branches missed.">                         lh.getLedgerMetadata().getAllEnsembles().entrySet()) {</span>
+<span class="nc bnc" id="L921" title="All 2 branches missed.">                    if (curEntryId != null) {</span>
+<span class="nc" id="L922">                        ledgerFragmentsRange.put(curEntryId, entry.getKey() - 1);</span>
+                    }
+<span class="nc" id="L924">                    curEntryId = entry.getKey();</span>
+<span class="nc bnc" id="L925" title="All 2 branches missed.">                    if (containBookies(entry.getValue(), bookiesSrc)) {</span>
+                        /*
+                         * Current ledger fragment has entries stored on the
+                         * dead bookie so we'll need to recover them.
+                         */
+<span class="nc" id="L930">                        ledgerFragmentsToRecover.add(entry.getKey());</span>
+                    }
+<span class="nc" id="L932">                }</span>
+                // add last ensemble otherwise if the failed bookie existed in
+                // the last ensemble of a closed ledger. the entries belonged to
+                // last ensemble would not be replicated.
+<span class="nc bnc" id="L936" title="All 2 branches missed.">                if (curEntryId != null) {</span>
+<span class="nc" id="L937">                    ledgerFragmentsRange.put(curEntryId, lh.getLastAddConfirmed());</span>
+                }
+                /*
+                 * See if this current ledger contains any ledger fragment that
+                 * needs to be re-replicated. If not, then just invoke the
+                 * multiCallback and return.
+                 */
+<span class="nc bnc" id="L944" title="All 2 branches missed.">                if (ledgerFragmentsToRecover.size() == 0) {</span>
+<span class="nc" id="L945">                    ledgerIterCb.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L946">                    return;</span>
+                }
+
+<span class="nc bnc" id="L949" title="All 2 branches missed.">                if (dryrun) {</span>
+<span class="nc bnc" id="L950" title="All 2 branches missed.">                    VERBOSE.info(&quot;Recovered ledger {} : {}&quot;, lId, (fenceRequired ? &quot;[fence required]&quot; : &quot;&quot;));</span>
+                }
+
+                /*
+                 * Multicallback for ledger. Once all fragments for the ledger have been recovered
+                 * trigger the ledgerIterCb
+                 */
+<span class="nc" id="L957">                MultiCallback ledgerFragmentsMcb = new MultiCallback(ledgerFragmentsToRecover.size(), ledgerIterCb,</span>
+                        null, BKException.Code.OK, BKException.Code.LedgerRecoveryException);
+                /*
+                 * Now recover all of the necessary ledger fragments
+                 * asynchronously using a MultiCallback for every fragment.
+                 */
+<span class="nc bnc" id="L963" title="All 2 branches missed.">                for (final Long startEntryId : ledgerFragmentsToRecover) {</span>
+<span class="nc" id="L964">                    Long endEntryId = ledgerFragmentsRange.get(startEntryId);</span>
+<span class="nc" id="L965">                    List&lt;BookieId&gt; ensemble = lh.getLedgerMetadata().getAllEnsembles().get(startEntryId);</span>
+                    // Get bookies to replace
+                    Map&lt;Integer, BookieId&gt; targetBookieAddresses;
+                    try {
+<span class="nc" id="L969">                        targetBookieAddresses = getReplacementBookies(lh, ensemble, bookiesSrc);</span>
+<span class="nc" id="L970">                    } catch (BKException.BKNotEnoughBookiesException e) {</span>
+<span class="nc bnc" id="L971" title="All 2 branches missed.">                        if (!dryrun) {</span>
+<span class="nc" id="L972">                            ledgerFragmentsMcb.processResult(BKException.Code.NotEnoughBookiesException, null, null);</span>
+                        } else {
+<span class="nc" id="L974">                            VERBOSE.info(&quot;  Fragment [{} - {}] : {}&quot;, startEntryId, endEntryId,</span>
+<span class="nc" id="L975">                                BKException.getMessage(BKException.Code.NotEnoughBookiesException));</span>
+                        }
+<span class="nc" id="L977">                        continue;</span>
+<span class="nc" id="L978">                    }</span>
+
+<span class="nc bnc" id="L980" title="All 2 branches missed.">                    if (dryrun) {</span>
+<span class="nc" id="L981">                        ArrayList&lt;BookieId&gt; newEnsemble =</span>
+<span class="nc" id="L982">                                replaceBookiesInEnsemble(ensemble, targetBookieAddresses);</span>
+<span class="nc" id="L983">                        VERBOSE.info(&quot;  Fragment [{} - {}] : &quot;, startEntryId, endEntryId);</span>
+<span class="nc" id="L984">                        VERBOSE.info(&quot;    old ensemble : {}&quot;, formatEnsemble(ensemble, bookiesSrc, '*'));</span>
+<span class="nc" id="L985">                        VERBOSE.info(&quot;    new ensemble : {}&quot;, formatEnsemble(newEnsemble, bookiesSrc, '*'));</span>
+<span class="nc" id="L986">                    } else {</span>
+<span class="nc bnc" id="L987" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L988">                            LOG.debug(&quot;Replicating fragment from [{}, {}] of ledger {} to {}&quot;,</span>
+<span class="nc" id="L989">                                startEntryId, endEntryId, lh.getId(), targetBookieAddresses);</span>
+                        }
+                        try {
+<span class="nc" id="L992">                            SingleFragmentCallback cb =</span>
+                                new SingleFragmentCallback(ledgerFragmentsMcb, lh,
+<span class="nc" id="L994">                                                                                    bkc.getLedgerManager(),</span>
+<span class="nc" id="L995">                                        startEntryId, getReplacementBookiesMap(ensemble, targetBookieAddresses));</span>
+<span class="nc" id="L996">                            LedgerFragment ledgerFragment = new LedgerFragment(lh,</span>
+<span class="nc" id="L997">                                startEntryId, endEntryId, targetBookieAddresses.keySet());</span>
+<span class="nc" id="L998">                            asyncRecoverLedgerFragment(lh, ledgerFragment, cb,</span>
+<span class="nc" id="L999">                                Sets.newHashSet(targetBookieAddresses.values()), NOOP_BICONSUMER);</span>
+<span class="nc" id="L1000">                        } catch (InterruptedException e) {</span>
+<span class="nc" id="L1001">                            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1002">                            return;</span>
+<span class="nc" id="L1003">                        }</span>
+                    }
+<span class="nc" id="L1005">                }</span>
+<span class="nc bnc" id="L1006" title="All 2 branches missed.">                if (dryrun) {</span>
+<span class="nc" id="L1007">                    ledgerIterCb.processResult(BKException.Code.OK, null, null);</span>
+                }
+<span class="nc" id="L1009">            }</span>
+            }, null);
+<span class="nc" id="L1011">    }</span>
+
+    static String formatEnsemble(List&lt;BookieId&gt; ensemble, Set&lt;BookieId&gt; bookiesSrc,
+            char marker) {
+<span class="nc" id="L1015">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L1016">        sb.append(&quot;[&quot;);</span>
+<span class="nc bnc" id="L1017" title="All 2 branches missed.">        for (int i = 0; i &lt; ensemble.size(); i++) {</span>
+<span class="nc" id="L1018">            sb.append(ensemble.get(i));</span>
+<span class="nc bnc" id="L1019" title="All 2 branches missed.">            if (bookiesSrc.contains(ensemble.get(i))) {</span>
+<span class="nc" id="L1020">                sb.append(marker);</span>
+            } else {
+<span class="nc" id="L1022">                sb.append(' ');</span>
+            }
+<span class="nc bnc" id="L1024" title="All 2 branches missed.">            if (i != ensemble.size() - 1) {</span>
+<span class="nc" id="L1025">                sb.append(&quot;, &quot;);</span>
+            }
+        }
+<span class="nc" id="L1028">        sb.append(&quot;]&quot;);</span>
+<span class="nc" id="L1029">        return sb.toString();</span>
+    }
+
+    /**
+     * This method asynchronously recovers a ledger fragment which is a
+     * contiguous portion of a ledger that was stored in an ensemble that
+     * included the failed bookie.
+     *
+     * @param lh
+     *            - LedgerHandle for the ledger
+     * @param ledgerFragment
+     *            - LedgerFragment to replicate
+     * @param ledgerFragmentMcb
+     *            - MultiCallback to invoke once we've recovered the current
+     *            ledger fragment.
+     * @param newBookies
+     *            - New bookies we want to use to recover and replicate the
+     *            ledger entries that were stored on the failed bookie.
+     */
+    private void asyncRecoverLedgerFragment(final LedgerHandle lh,
+            final LedgerFragment ledgerFragment,
+            final AsyncCallback.VoidCallback ledgerFragmentMcb,
+            final Set&lt;BookieId&gt; newBookies,
+            final BiConsumer&lt;Long, Long&gt; onReadEntryFailureCallback) throws InterruptedException {
+<span class="nc" id="L1053">        lfr.replicate(lh, ledgerFragment, ledgerFragmentMcb, newBookies, onReadEntryFailureCallback);</span>
+<span class="nc" id="L1054">    }</span>
+
+    private Map&lt;Integer, BookieId&gt; getReplacementBookies(
+                LedgerHandle lh,
+                List&lt;BookieId&gt; ensemble,
+                Set&lt;BookieId&gt; bookiesToRereplicate)
+            throws BKException.BKNotEnoughBookiesException {
+<span class="nc" id="L1061">        Set&lt;Integer&gt; bookieIndexesToRereplicate = Sets.newHashSet();</span>
+<span class="nc bnc" id="L1062" title="All 2 branches missed.">        for (int bookieIndex = 0; bookieIndex &lt; ensemble.size(); bookieIndex++) {</span>
+<span class="nc" id="L1063">            BookieId bookieInEnsemble = ensemble.get(bookieIndex);</span>
+<span class="nc bnc" id="L1064" title="All 2 branches missed.">            if (bookiesToRereplicate.contains(bookieInEnsemble)) {</span>
+<span class="nc" id="L1065">                bookieIndexesToRereplicate.add(bookieIndex);</span>
+            }
+        }
+<span class="nc" id="L1068">        return getReplacementBookiesByIndexes(</span>
+<span class="nc" id="L1069">                lh, ensemble, bookieIndexesToRereplicate, Optional.of(bookiesToRereplicate));</span>
+    }
+
+    private Map&lt;Integer, BookieId&gt; getReplacementBookiesByIndexes(
+                LedgerHandle lh,
+                List&lt;BookieId&gt; ensemble,
+                Set&lt;Integer&gt; bookieIndexesToRereplicate,
+                Optional&lt;Set&lt;BookieId&gt;&gt; excludedBookies)
+            throws BKException.BKNotEnoughBookiesException {
+        // target bookies to replicate
+<span class="nc" id="L1079">        Map&lt;Integer, BookieId&gt; targetBookieAddresses =</span>
+<span class="nc" id="L1080">                Maps.newHashMapWithExpectedSize(bookieIndexesToRereplicate.size());</span>
+        // bookies to exclude for ensemble allocation
+<span class="nc" id="L1082">        Set&lt;BookieId&gt; bookiesToExclude = Sets.newHashSet();</span>
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">        if (excludedBookies.isPresent()) {</span>
+<span class="nc" id="L1084">            bookiesToExclude.addAll(excludedBookies.get());</span>
+        }
+
+        // excluding bookies that need to be replicated
+<span class="nc bnc" id="L1088" title="All 2 branches missed.">        for (Integer bookieIndex : bookieIndexesToRereplicate) {</span>
+<span class="nc" id="L1089">            BookieId bookie = ensemble.get(bookieIndex);</span>
+<span class="nc" id="L1090">            bookiesToExclude.add(bookie);</span>
+<span class="nc" id="L1091">        }</span>
+
+        // allocate bookies
+<span class="nc bnc" id="L1094" title="All 2 branches missed.">        for (Integer bookieIndex : bookieIndexesToRereplicate) {</span>
+<span class="nc" id="L1095">            BookieId oldBookie = ensemble.get(bookieIndex);</span>
+<span class="nc" id="L1096">            EnsemblePlacementPolicy.PlacementResult&lt;BookieId&gt; replaceBookieResponse =</span>
+<span class="nc" id="L1097">                    bkc.getPlacementPolicy().replaceBookie(</span>
+<span class="nc" id="L1098">                            lh.getLedgerMetadata().getEnsembleSize(),</span>
+<span class="nc" id="L1099">                            lh.getLedgerMetadata().getWriteQuorumSize(),</span>
+<span class="nc" id="L1100">                            lh.getLedgerMetadata().getAckQuorumSize(),</span>
+<span class="nc" id="L1101">                            lh.getLedgerMetadata().getCustomMetadata(),</span>
+                            ensemble,
+                            oldBookie,
+                            bookiesToExclude);
+<span class="nc" id="L1105">            BookieId newBookie = replaceBookieResponse.getResult();</span>
+<span class="nc" id="L1106">            PlacementPolicyAdherence isEnsembleAdheringToPlacementPolicy = replaceBookieResponse.getAdheringToPolicy();</span>
+<span class="nc bnc" id="L1107" title="All 4 branches missed.">            if (isEnsembleAdheringToPlacementPolicy == PlacementPolicyAdherence.FAIL &amp;&amp; LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1108">                LOG.debug(</span>
+                        &quot;replaceBookie for bookie: {} in ensemble: {} &quot;
+                                + &quot;is not adhering to placement policy and chose {}&quot;,
+                        oldBookie, ensemble, newBookie);
+            }
+<span class="nc" id="L1113">            targetBookieAddresses.put(bookieIndex, newBookie);</span>
+<span class="nc" id="L1114">            bookiesToExclude.add(newBookie);</span>
+<span class="nc" id="L1115">        }</span>
+
+<span class="nc" id="L1117">        return targetBookieAddresses;</span>
+    }
+
+    private ArrayList&lt;BookieId&gt; replaceBookiesInEnsemble(
+            List&lt;BookieId&gt; ensemble,
+            Map&lt;Integer, BookieId&gt; replacedBookies) {
+<span class="nc" id="L1123">        ArrayList&lt;BookieId&gt; newEnsemble = Lists.newArrayList(ensemble);</span>
+<span class="nc bnc" id="L1124" title="All 2 branches missed.">        for (Entry&lt;Integer, BookieId&gt; entry : replacedBookies.entrySet()) {</span>
+<span class="nc" id="L1125">            newEnsemble.set(entry.getKey(), entry.getValue());</span>
+<span class="nc" id="L1126">        }</span>
+<span class="nc" id="L1127">        return newEnsemble;</span>
+    }
+
+    /**
+     * Replicate the Ledger fragment to target Bookie passed.
+     *
+     * @param lh
+     *            - ledgerHandle
+     * @param ledgerFragment
+     *            - LedgerFragment to replicate
+     */
+    public void replicateLedgerFragment(LedgerHandle lh, final LedgerFragment ledgerFragment,
+            final BiConsumer&lt;Long, Long&gt; onReadEntryFailureCallback) throws InterruptedException, BKException {
+<span class="nc" id="L1140">        Map&lt;Integer, BookieId&gt; targetBookieAddresses = null;</span>
+<span class="nc bnc" id="L1141" title="All 2 branches missed.">        if (LedgerFragment.ReplicateType.DATA_LOSS == ledgerFragment.getReplicateType()) {</span>
+<span class="nc" id="L1142">            Optional&lt;Set&lt;BookieId&gt;&gt; excludedBookies = Optional.empty();</span>
+<span class="nc" id="L1143">            targetBookieAddresses = getReplacementBookiesByIndexes(lh, ledgerFragment.getEnsemble(),</span>
+<span class="nc" id="L1144">                    ledgerFragment.getBookiesIndexes(), excludedBookies);</span>
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">        } else if (LedgerFragment.ReplicateType.DATA_NOT_ADHERING_PLACEMENT == ledgerFragment.getReplicateType()) {</span>
+<span class="nc" id="L1146">            targetBookieAddresses = replaceNotAdheringPlacementPolicyBookie(ledgerFragment.getEnsemble(),</span>
+<span class="nc" id="L1147">                    lh.getLedgerMetadata().getWriteQuorumSize(), lh.getLedgerMetadata().getAckQuorumSize());</span>
+<span class="nc" id="L1148">            ledgerFragment.getBookiesIndexes().addAll(targetBookieAddresses.keySet());</span>
+        }
+<span class="nc bnc" id="L1150" title="All 2 branches missed.">        if (MapUtils.isEmpty(targetBookieAddresses)) {</span>
+<span class="nc" id="L1151">            LOG.warn(&quot;Could not replicate for {} ledger: {}, not find target bookie.&quot;,</span>
+<span class="nc" id="L1152">                    ledgerFragment.getReplicateType(), ledgerFragment.getLedgerId());</span>
+<span class="nc" id="L1153">            throw new BKException.BKLedgerRecoveryException();</span>
+        }
+<span class="nc" id="L1155">        replicateLedgerFragment(lh, ledgerFragment, targetBookieAddresses, onReadEntryFailureCallback);</span>
+<span class="nc" id="L1156">    }</span>
+
+    private void replicateLedgerFragment(LedgerHandle lh,
+            final LedgerFragment ledgerFragment,
+            final Map&lt;Integer, BookieId&gt; targetBookieAddresses,
+            final BiConsumer&lt;Long, Long&gt; onReadEntryFailureCallback)
+            throws InterruptedException, BKException {
+<span class="nc" id="L1163">        CompletableFuture&lt;Void&gt; result = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1164">        ResultCallBack resultCallBack = new ResultCallBack(result);</span>
+<span class="nc" id="L1165">        SingleFragmentCallback cb = new SingleFragmentCallback(</span>
+            resultCallBack,
+            lh,
+<span class="nc" id="L1168">            bkc.getLedgerManager(),</span>
+<span class="nc" id="L1169">            ledgerFragment.getFirstEntryId(),</span>
+<span class="nc" id="L1170">            getReplacementBookiesMap(ledgerFragment, targetBookieAddresses));</span>
+
+<span class="nc" id="L1172">        Set&lt;BookieId&gt; targetBookieSet = Sets.newHashSet();</span>
+<span class="nc" id="L1173">        targetBookieSet.addAll(targetBookieAddresses.values());</span>
+<span class="nc" id="L1174">        asyncRecoverLedgerFragment(lh, ledgerFragment, cb, targetBookieSet, onReadEntryFailureCallback);</span>
+
+        try {
+<span class="nc" id="L1177">            SyncCallbackUtils.waitForResult(result);</span>
+<span class="nc" id="L1178">        } catch (BKException err) {</span>
+<span class="nc" id="L1179">            throw BKException.create(bkc.getReturnRc(err.getCode()));</span>
+<span class="nc" id="L1180">        }</span>
+<span class="nc" id="L1181">    }</span>
+
+    private static Map&lt;BookieId, BookieId&gt; getReplacementBookiesMap(
+            List&lt;BookieId&gt; ensemble,
+            Map&lt;Integer, BookieId&gt; targetBookieAddresses) {
+<span class="nc" id="L1186">        Map&lt;BookieId, BookieId&gt; bookiesMap =</span>
+                new HashMap&lt;BookieId, BookieId&gt;();
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">        for (Entry&lt;Integer, BookieId&gt; entry : targetBookieAddresses.entrySet()) {</span>
+<span class="nc" id="L1189">            BookieId oldBookie = ensemble.get(entry.getKey());</span>
+<span class="nc" id="L1190">            BookieId newBookie = entry.getValue();</span>
+<span class="nc" id="L1191">            bookiesMap.put(oldBookie, newBookie);</span>
+<span class="nc" id="L1192">        }</span>
+<span class="nc" id="L1193">        return bookiesMap;</span>
+    }
+
+    private static Map&lt;BookieId, BookieId&gt; getReplacementBookiesMap(
+            LedgerFragment ledgerFragment,
+            Map&lt;Integer, BookieId&gt; targetBookieAddresses) {
+<span class="nc" id="L1199">        Map&lt;BookieId, BookieId&gt; bookiesMap =</span>
+                new HashMap&lt;BookieId, BookieId&gt;();
+<span class="nc bnc" id="L1201" title="All 2 branches missed.">        for (Integer bookieIndex : ledgerFragment.getBookiesIndexes()) {</span>
+<span class="nc" id="L1202">            BookieId oldBookie = ledgerFragment.getAddress(bookieIndex);</span>
+<span class="nc" id="L1203">            BookieId newBookie = targetBookieAddresses.get(bookieIndex);</span>
+<span class="nc" id="L1204">            bookiesMap.put(oldBookie, newBookie);</span>
+<span class="nc" id="L1205">        }</span>
+<span class="nc" id="L1206">        return bookiesMap;</span>
+    }
+
+    private static boolean containBookiesInLastEnsemble(LedgerMetadata lm,
+                                                        Set&lt;BookieId&gt; bookies) {
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">        if (lm.getAllEnsembles().size() &lt;= 0) {</span>
+<span class="nc" id="L1212">            return false;</span>
+        }
+<span class="nc" id="L1214">        Long lastKey = lm.getAllEnsembles().lastKey();</span>
+<span class="nc" id="L1215">        List&lt;BookieId&gt; lastEnsemble = lm.getAllEnsembles().get(lastKey);</span>
+<span class="nc" id="L1216">        return containBookies(lastEnsemble, bookies);</span>
+    }
+
+    private static boolean containBookies(List&lt;BookieId&gt; ensemble,
+                                          Set&lt;BookieId&gt; bookies) {
+<span class="nc bnc" id="L1221" title="All 2 branches missed.">        for (BookieId bookie : ensemble) {</span>
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">            if (bookies.contains(bookie)) {</span>
+<span class="nc" id="L1223">                return true;</span>
+            }
+<span class="nc" id="L1225">        }</span>
+<span class="nc" id="L1226">        return false;</span>
+    }
+
+    /**
+     * This is the class for getting the replication result.
+     */
+    public static class ResultCallBack implements AsyncCallback.VoidCallback {
+        private final CompletableFuture&lt;Void&gt; sync;
+
+<span class="nc" id="L1235">        public ResultCallBack(CompletableFuture&lt;Void&gt; sync) {</span>
+<span class="nc" id="L1236">            this.sync = sync;</span>
+<span class="nc" id="L1237">        }</span>
+
+        @Override
+        @SuppressWarnings(&quot;unchecked&quot;)
+        public void processResult(int rc, String s, Object ctx) {
+<span class="nc" id="L1242">            SyncCallbackUtils.finish(rc, null, sync);</span>
+<span class="nc" id="L1243">        }</span>
+    }
+
+    /**
+     * Format the BookKeeper metadata in zookeeper.
+     *
+     * @param isInteractive
+     *            Whether format should ask prompt for confirmation if old data
+     *            exists or not.
+     * @param force
+     *            If non interactive and force is true, then old data will be
+     *            removed without prompt.
+     * @return Returns true if format succeeds else false.
+     */
+    public static boolean format(ServerConfiguration conf,
+            boolean isInteractive, boolean force) throws Exception {
+<span class="nc" id="L1259">        return runFunctionWithMetadataBookieDriver(conf, new Function&lt;MetadataBookieDriver, Boolean&gt;() {</span>
+            @Override
+            @SuppressFBWarnings(&quot;RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE&quot;)
+            public Boolean apply(MetadataBookieDriver driver) {
+                try {
+<span class="nc" id="L1264">                    try (RegistrationManager regManager = driver.createRegistrationManager()) {</span>
+<span class="nc" id="L1265">                        boolean ledgerRootExists = regManager.prepareFormat();</span>
+
+                        // If old data was there then confirm with admin.
+<span class="nc" id="L1268">                        boolean doFormat = true;</span>
+<span class="nc bnc" id="L1269" title="All 2 branches missed.">                        if (ledgerRootExists) {</span>
+<span class="nc bnc" id="L1270" title="All 2 branches missed.">                            if (!isInteractive) {</span>
+                                // If non interactive and force is set, then delete old data.
+<span class="nc" id="L1272">                                doFormat = force;</span>
+                            } else {
+                                // Confirm with the admin.
+<span class="nc" id="L1275">                                doFormat = IOUtils</span>
+<span class="nc" id="L1276">                                        .confirmPrompt(&quot;Ledger root already exists. &quot;</span>
+                                                + &quot;Are you sure to format bookkeeper metadata? &quot;
+                                                + &quot;This may cause data loss.&quot;);
+                            }
+                        }
+
+<span class="nc bnc" id="L1282" title="All 2 branches missed.">                        if (!doFormat) {</span>
+<span class="nc" id="L1283">                            return false;</span>
+                        }
+
+<span class="nc" id="L1286">                        driver.getLedgerManagerFactory().format(</span>
+                                conf,
+<span class="nc" id="L1288">                                driver.getLayoutManager());</span>
+
+<span class="nc" id="L1290">                        return regManager.format();</span>
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">                    }</span>
+<span class="nc" id="L1292">                } catch (Exception e) {</span>
+<span class="nc" id="L1293">                    throw new UncheckedExecutionException(e.getMessage(), e);</span>
+                }
+            }
+        });
+    }
+
+    /**
+     * Initializes new cluster by creating required znodes for the cluster. If
+     * ledgersrootpath is already existing then it will error out.
+     *
+     * @param conf
+     * @return
+     * @throws Exception
+     */
+    public static boolean initNewCluster(ServerConfiguration conf) throws Exception {
+<span class="nc" id="L1308">        return runFunctionWithRegistrationManager(conf, rm -&gt; {</span>
+            try {
+<span class="nc" id="L1310">                return rm.initNewCluster();</span>
+<span class="nc" id="L1311">            } catch (Exception e) {</span>
+<span class="nc" id="L1312">                throw new UncheckedExecutionException(e.getMessage(), e);</span>
+            }
+        });
+    }
+
+    /**
+     * Nukes existing cluster metadata. But it does only if the provided
+     * ledgersRootPath matches with configuration's zkLedgersRootPath and
+     * provided instanceid matches with the cluster metadata. If force is
+     * mentioned then instanceid will not be validated.
+     *
+     * @param conf
+     * @param ledgersRootPath
+     * @param instanceId
+     * @param force
+     * @return
+     * @throws Exception
+     */
+    public static boolean nukeExistingCluster(ServerConfiguration conf, String ledgersRootPath, String instanceId,
+            boolean force) throws Exception {
+<span class="nc" id="L1332">        String confLedgersRootPath = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf);</span>
+<span class="nc bnc" id="L1333" title="All 2 branches missed.">        if (!confLedgersRootPath.equals(ledgersRootPath)) {</span>
+<span class="nc" id="L1334">            LOG.error(&quot;Provided ledgerRootPath : {} is not matching with config's ledgerRootPath: {}, &quot;</span>
+                    + &quot;so exiting nuke operation&quot;, ledgersRootPath, confLedgersRootPath);
+<span class="nc" id="L1336">            return false;</span>
+        }
+
+<span class="nc" id="L1339">        return runFunctionWithRegistrationManager(conf, rm -&gt; {</span>
+            try {
+<span class="nc bnc" id="L1341" title="All 2 branches missed.">                if (!force) {</span>
+<span class="nc" id="L1342">                    String readInstanceId = rm.getClusterInstanceId();</span>
+<span class="nc bnc" id="L1343" title="All 4 branches missed.">                    if ((instanceId == null) || !instanceId.equals(readInstanceId)) {</span>
+<span class="nc" id="L1344">                        LOG.error(&quot;Provided InstanceId : {} is not matching with cluster InstanceId in ZK: {}&quot;,</span>
+                            instanceId, readInstanceId);
+<span class="nc" id="L1346">                        return false;</span>
+                    }
+                }
+<span class="nc" id="L1349">                return rm.nukeExistingCluster();</span>
+<span class="nc" id="L1350">            } catch (Exception e) {</span>
+<span class="nc" id="L1351">                throw new UncheckedExecutionException(e.getMessage(), e);</span>
+            }
+        });
+    }
+
+    /**
+     * Initializes bookie, by making sure that the journalDir, ledgerDirs and
+     * indexDirs are empty and there is no registered Bookie with this BookieId.
+     *
+     * @param conf
+     * @return
+     * @throws Exception
+     */
+    public static boolean initBookie(ServerConfiguration conf) throws Exception {
+        /*
+         * make sure that journalDirs, ledgerDirs and indexDirs are empty
+         */
+<span class="nc" id="L1368">        File[] journalDirs = conf.getJournalDirs();</span>
+<span class="nc bnc" id="L1369" title="All 2 branches missed.">        if (!validateDirectoriesAreEmpty(journalDirs, &quot;JournalDir&quot;)) {</span>
+<span class="nc" id="L1370">            return false;</span>
+        }
+
+<span class="nc" id="L1373">        File[] ledgerDirs = conf.getLedgerDirs();</span>
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">        if (!validateDirectoriesAreEmpty(ledgerDirs, &quot;LedgerDir&quot;)) {</span>
+<span class="nc" id="L1375">            return false;</span>
+        }
+
+<span class="nc" id="L1378">        File[] indexDirs = conf.getIndexDirs();</span>
+<span class="nc bnc" id="L1379" title="All 2 branches missed.">        if (indexDirs != null) {</span>
+<span class="nc bnc" id="L1380" title="All 2 branches missed.">            if (!validateDirectoriesAreEmpty(indexDirs, &quot;IndexDir&quot;)) {</span>
+<span class="nc" id="L1381">                return false;</span>
+            }
+        }
+
+<span class="nc" id="L1385">        return runFunctionWithRegistrationManager(conf, rm -&gt; {</span>
+            try {
+                /*
+                 * make sure that there is no bookie registered with the same
+                 * bookieid and the cookie for the same bookieid is not existing.
+                 */
+<span class="nc" id="L1391">                BookieId bookieId = BookieImpl.getBookieId(conf);</span>
+<span class="nc bnc" id="L1392" title="All 2 branches missed.">                if (rm.isBookieRegistered(bookieId)) {</span>
+<span class="nc" id="L1393">                    LOG.error(&quot;Bookie with bookieId: {} is still registered, &quot;</span>
+                        + &quot;If this node is running bookie process, try stopping it first.&quot;, bookieId);
+<span class="nc" id="L1395">                    return false;</span>
+                }
+
+                try {
+<span class="nc" id="L1399">                    rm.readCookie(bookieId);</span>
+<span class="nc" id="L1400">                    LOG.error(&quot;Cookie still exists in the ZK for this bookie: {}, try formatting the bookie&quot;, bookieId);</span>
+<span class="nc" id="L1401">                    return false;</span>
+<span class="nc" id="L1402">                } catch (BookieException.CookieNotFoundException nfe) {</span>
+                    // it is expected for readCookie to fail with
+                    // BookieException.CookieNotFoundException
+                }
+<span class="nc" id="L1406">                return true;</span>
+<span class="nc" id="L1407">            } catch (Exception e) {</span>
+<span class="nc" id="L1408">                throw new UncheckedExecutionException(e.getMessage(), e);</span>
+            }
+        });
+    }
+
+    private static boolean validateDirectoriesAreEmpty(File[] dirs, String typeOfDir) {
+<span class="nc bnc" id="L1414" title="All 2 branches missed.">        for (File dir : dirs) {</span>
+<span class="nc" id="L1415">            File[] dirFiles = dir.listFiles();</span>
+<span class="nc bnc" id="L1416" title="All 4 branches missed.">            if ((dirFiles != null) &amp;&amp; dirFiles.length != 0) {</span>
+<span class="nc" id="L1417">                LOG.error(&quot;{}: {} is existing and its not empty, try formatting the bookie&quot;, typeOfDir, dir);</span>
+<span class="nc" id="L1418">                return false;</span>
+            }
+        }
+<span class="nc" id="L1421">        return true;</span>
+    }
+
+    /**
+     * This method returns an iterable object for the list of ledger identifiers of
+     * the ledgers currently available.
+     *
+     * @return an iterable object for the list of ledger identifiers
+     * @throws IOException  if the list of ledger identifiers cannot be read from the
+     *  metadata store
+     */
+    public Iterable&lt;Long&gt; listLedgers()
+    throws IOException {
+<span class="nc" id="L1434">        final LedgerRangeIterator iterator = bkc.getLedgerManager().getLedgerRanges(0);</span>
+<span class="nc" id="L1435">        return new Iterable&lt;Long&gt;() {</span>
+            @Override
+            public Iterator&lt;Long&gt; iterator() {
+<span class="nc" id="L1438">                return new Iterator&lt;Long&gt;() {</span>
+<span class="nc" id="L1439">                    Iterator&lt;Long&gt; currentRange = null;</span>
+
+                    @Override
+                    public boolean hasNext() {
+                        try {
+<span class="nc bnc" id="L1444" title="All 2 branches missed.">                            if (iterator.hasNext()) {</span>
+<span class="nc" id="L1445">                                return true;</span>
+<span class="nc bnc" id="L1446" title="All 2 branches missed.">                            } else if (currentRange != null) {</span>
+<span class="nc bnc" id="L1447" title="All 2 branches missed.">                                if (currentRange.hasNext()) {</span>
+<span class="nc" id="L1448">                                    return true;</span>
+                                }
+                            }
+<span class="nc" id="L1451">                        } catch (IOException e) {</span>
+<span class="nc" id="L1452">                            LOG.error(&quot;Error while checking if there is a next element&quot;, e);</span>
+<span class="nc" id="L1453">                        }</span>
+
+<span class="nc" id="L1455">                        return false;</span>
+                    }
+
+                    @Override
+                    public Long next() throws NoSuchElementException {
+                        try {
+<span class="nc bnc" id="L1461" title="All 4 branches missed.">                            if ((currentRange == null) || (!currentRange.hasNext())) {</span>
+<span class="nc" id="L1462">                                currentRange = iterator.next().getLedgers().iterator();</span>
+                            }
+<span class="nc" id="L1464">                        } catch (IOException e) {</span>
+<span class="nc" id="L1465">                            LOG.error(&quot;Error while reading the next element&quot;, e);</span>
+<span class="nc" id="L1466">                            throw new NoSuchElementException(e.getMessage());</span>
+<span class="nc" id="L1467">                        }</span>
+
+<span class="nc" id="L1469">                        return currentRange.next();</span>
+                    }
+
+                    @Override
+                    public void remove()
+                    throws UnsupportedOperationException {
+<span class="nc" id="L1475">                        throw new UnsupportedOperationException();</span>
+                    }
+                };
+            }
+        };
+    }
+
+    /**
+     * @return the metadata for the passed ledger handle
+     */
+    public LedgerMetadata getLedgerMetadata(LedgerHandle lh) {
+<span class="nc" id="L1486">        return lh.getLedgerMetadata();</span>
+    }
+
+    private LedgerUnderreplicationManager getUnderreplicationManager()
+            throws CompatibilityException, UnavailableException, InterruptedException {
+<span class="nc bnc" id="L1491" title="All 2 branches missed.">        if (underreplicationManager == null) {</span>
+<span class="nc" id="L1492">            underreplicationManager = mFactory.newLedgerUnderreplicationManager();</span>
+        }
+<span class="nc" id="L1494">        return underreplicationManager;</span>
+    }
+
+    private LedgerAuditorManager getLedgerAuditorManager()
+            throws IOException, InterruptedException {
+<span class="nc bnc" id="L1499" title="All 2 branches missed.">        if (ledgerAuditorManager == null) {</span>
+<span class="nc" id="L1500">            ledgerAuditorManager = mFactory.newLedgerAuditorManager();</span>
+        }
+<span class="nc" id="L1502">        return ledgerAuditorManager;</span>
+    }
+
+    /**
+     * Setter for LostBookieRecoveryDelay value (in seconds) in Zookeeper.
+     *
+     * @param lostBookieRecoveryDelay
+     *                              lostBookieRecoveryDelay value (in seconds) to set
+     * @throws CompatibilityException
+     * @throws KeeperException
+     * @throws InterruptedException
+     * @throws UnavailableException
+     */
+    public void setLostBookieRecoveryDelay(int lostBookieRecoveryDelay)
+            throws CompatibilityException, KeeperException, InterruptedException, UnavailableException {
+<span class="nc" id="L1517">        LedgerUnderreplicationManager urlManager = getUnderreplicationManager();</span>
+<span class="nc" id="L1518">        urlManager.setLostBookieRecoveryDelay(lostBookieRecoveryDelay);</span>
+<span class="nc" id="L1519">    }</span>
+
+    /**
+     * Returns the current LostBookieRecoveryDelay value (in seconds) in Zookeeper.
+     *
+     * @return
+     *          current lostBookieRecoveryDelay value (in seconds)
+     * @throws CompatibilityException
+     * @throws KeeperException
+     * @throws InterruptedException
+     * @throws UnavailableException
+     */
+    public int getLostBookieRecoveryDelay()
+            throws CompatibilityException, KeeperException, InterruptedException, UnavailableException {
+<span class="nc" id="L1533">        LedgerUnderreplicationManager urlManager = getUnderreplicationManager();</span>
+<span class="nc" id="L1534">        return urlManager.getLostBookieRecoveryDelay();</span>
+    }
+
+    /**
+     * Trigger AuditTask by resetting lostBookieRecoveryDelay to its current
+     * value. If Autorecovery is not enabled or if there is no Auditor then this
+     * method will throw UnavailableException.
+     *
+     * @throws CompatibilityException
+     * @throws KeeperException
+     * @throws InterruptedException
+     * @throws UnavailableException
+     * @throws IOException
+     */
+    public void triggerAudit()
+            throws CompatibilityException, KeeperException, InterruptedException, UnavailableException, IOException {
+<span class="nc" id="L1550">        LedgerUnderreplicationManager urlManager = getUnderreplicationManager();</span>
+<span class="nc bnc" id="L1551" title="All 2 branches missed.">        if (!urlManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L1552">            LOG.error(&quot;Autorecovery is disabled. So giving up!&quot;);</span>
+<span class="nc" id="L1553">            throw new UnavailableException(&quot;Autorecovery is disabled. So giving up!&quot;);</span>
+        }
+
+<span class="nc" id="L1556">        BookieId auditorId = null;</span>
+        try {
+<span class="nc" id="L1558">            auditorId = getLedgerAuditorManager().getCurrentAuditor();</span>
+<span class="nc" id="L1559">        } catch (IOException e) {</span>
+<span class="nc bnc" id="L1560" title="All 2 branches missed.">            if (e.getCause() instanceof KeeperException.NoNodeException) {</span>
+<span class="nc" id="L1561">                LOG.error(&quot;Unable to find Zookeeper node: {}&quot;, e.getCause().getMessage());</span>
+<span class="nc" id="L1562">                throw new UnavailableException(&quot;Autorecovery is disabled due to &quot;</span>
+                        + &quot;missing Zookeeper node. Aborting recovery!&quot;);
+            }
+<span class="nc" id="L1565">            throw e;</span>
+<span class="nc" id="L1566">        }</span>
+<span class="nc bnc" id="L1567" title="All 2 branches missed.">        if (auditorId == null) {</span>
+<span class="nc" id="L1568">            LOG.error(&quot;No auditor elected, though Autorecovery is enabled. So giving up.&quot;);</span>
+<span class="nc" id="L1569">            throw new UnavailableException(&quot;No auditor elected, though Autorecovery is enabled. So giving up.&quot;);</span>
+        }
+
+<span class="nc" id="L1572">        int previousLostBookieRecoveryDelayValue = urlManager.getLostBookieRecoveryDelay();</span>
+<span class="nc" id="L1573">        LOG.info(&quot;Resetting LostBookieRecoveryDelay value: {}, to kickstart audit task&quot;,</span>
+<span class="nc" id="L1574">                previousLostBookieRecoveryDelayValue);</span>
+<span class="nc" id="L1575">        urlManager.setLostBookieRecoveryDelay(previousLostBookieRecoveryDelayValue);</span>
+<span class="nc" id="L1576">    }</span>
+
+    /**
+     * Triggers AuditTask by resetting lostBookieRecoveryDelay and then make
+     * sure the ledgers stored in the given decommissioning bookie are properly
+     * replicated and they are not underreplicated because of the given bookie.
+     * This method waits until there are no underreplicatedledgers because of this
+     * bookie. If the given Bookie is not shutdown yet, then it will throw
+     * BKIllegalOpException.
+     *
+     * @param bookieAddress
+     *            address of the decommissioning bookie
+     * @throws CompatibilityException
+     * @throws UnavailableException
+     * @throws KeeperException
+     * @throws InterruptedException
+     * @throws IOException
+     * @throws BKAuditException
+     * @throws TimeoutException
+     * @throws BKException
+     */
+    public void decommissionBookie(BookieId bookieAddress)
+            throws CompatibilityException, UnavailableException, KeeperException, InterruptedException, IOException,
+            BKAuditException, TimeoutException, BKException {
+<span class="nc bnc" id="L1600" title="All 4 branches missed.">        if (getAvailableBookies().contains(bookieAddress) || getReadOnlyBookies().contains(bookieAddress)) {</span>
+<span class="nc" id="L1601">            LOG.error(&quot;Bookie: {} is not shutdown yet&quot;, bookieAddress);</span>
+<span class="nc" id="L1602">            throw BKException.create(BKException.Code.IllegalOpException);</span>
+        }
+
+<span class="nc" id="L1605">        triggerAudit();</span>
+
+        /*
+         * Sleep for 30 secs, so that Auditor gets chance to trigger its
+         * force audittask and let the underreplicationmanager process
+         * to do its replication process
+         */
+<span class="nc" id="L1612">        Thread.sleep(30 * 1000);</span>
+
+        /*
+         * get the collection of the ledgers which are stored in this
+         * bookie, by making a call to
+         * bookieLedgerIndexer.getBookieToLedgerIndex.
+         */
+
+<span class="nc" id="L1620">        BookieLedgerIndexer bookieLedgerIndexer = new BookieLedgerIndexer(bkc.ledgerManager);</span>
+<span class="nc" id="L1621">        Map&lt;String, Set&lt;Long&gt;&gt; bookieToLedgersMap = bookieLedgerIndexer.getBookieToLedgerIndex();</span>
+<span class="nc" id="L1622">        Set&lt;Long&gt; ledgersStoredInThisBookie = bookieToLedgersMap.get(bookieAddress.toString());</span>
+<span class="nc bnc" id="L1623" title="All 4 branches missed.">        if ((ledgersStoredInThisBookie != null) &amp;&amp; (!ledgersStoredInThisBookie.isEmpty())) {</span>
+            /*
+             * wait until all the ledgers are replicated to other
+             * bookies by making sure that these ledgers metadata don't
+             * contain this bookie as part of their ensemble.
+             */
+<span class="nc" id="L1629">            waitForLedgersToBeReplicated(ledgersStoredInThisBookie, bookieAddress, bkc.ledgerManager);</span>
+        }
+
+        // for double-checking, check if any ledgers are listed as underreplicated because of this bookie
+<span class="nc" id="L1633">        Predicate&lt;List&lt;String&gt;&gt; predicate = replicasList -&gt; replicasList.contains(bookieAddress.toString());</span>
+<span class="nc" id="L1634">        Iterator&lt;UnderreplicatedLedger&gt; urLedgerIterator = underreplicationManager.listLedgersToRereplicate(predicate);</span>
+<span class="nc bnc" id="L1635" title="All 2 branches missed.">        if (urLedgerIterator.hasNext()) {</span>
+            //if there are any then wait and make sure those ledgers are replicated properly
+<span class="nc" id="L1637">            LOG.info(&quot;Still in some underreplicated ledgers metadata, this bookie is part of its ensemble. &quot;</span>
+                    + &quot;Have to make sure that those ledger fragments are rereplicated&quot;);
+<span class="nc" id="L1639">            List&lt;Long&gt; urLedgers = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1640">            urLedgerIterator.forEachRemaining((urLedger) -&gt; {</span>
+<span class="nc" id="L1641">                urLedgers.add(urLedger.getLedgerId());</span>
+<span class="nc" id="L1642">            });</span>
+<span class="nc" id="L1643">            waitForLedgersToBeReplicated(urLedgers, bookieAddress, bkc.ledgerManager);</span>
+        }
+<span class="nc" id="L1645">    }</span>
+
+    private void waitForLedgersToBeReplicated(Collection&lt;Long&gt; ledgers, BookieId thisBookieAddress,
+            LedgerManager ledgerManager) throws InterruptedException, TimeoutException {
+<span class="nc" id="L1649">        int maxSleepTimeInBetweenChecks = 5 * 60 * 1000; // 5 minutes</span>
+<span class="nc" id="L1650">        int sleepTimePerLedger = 3 * 1000; // 3 secs</span>
+<span class="nc bnc" id="L1651" title="All 2 branches missed.">        Predicate&lt;Long&gt; validateBookieIsNotPartOfEnsemble = ledgerId -&gt; !areEntriesOfLedgerStoredInTheBookie(ledgerId,</span>
+                thisBookieAddress, ledgerManager);
+<span class="nc" id="L1653">        ledgers.removeIf(validateBookieIsNotPartOfEnsemble);</span>
+
+<span class="nc bnc" id="L1655" title="All 2 branches missed.">        while (!ledgers.isEmpty()) {</span>
+<span class="nc bnc" id="L1656" title="All 2 branches missed.">            int sleepTimeForThisCheck = (long) ledgers.size() * sleepTimePerLedger &gt; maxSleepTimeInBetweenChecks</span>
+<span class="nc" id="L1657">                    ? maxSleepTimeInBetweenChecks : ledgers.size() * sleepTimePerLedger;</span>
+<span class="nc" id="L1658">            LOG.info(&quot;Count of Ledgers which need to be rereplicated: {}, waiting {} seconds for next check&quot;,</span>
+<span class="nc" id="L1659">                ledgers.size(), sleepTimeForThisCheck / 1000);</span>
+<span class="nc" id="L1660">            Thread.sleep(sleepTimeForThisCheck);</span>
+<span class="nc bnc" id="L1661" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1662">                LOG.debug(&quot;Making sure following ledgers replication to be completed: {}&quot;, ledgers);</span>
+            }
+<span class="nc" id="L1664">            ledgers.removeIf(validateBookieIsNotPartOfEnsemble);</span>
+<span class="nc" id="L1665">        }</span>
+<span class="nc" id="L1666">    }</span>
+
+    public static boolean areEntriesOfLedgerStoredInTheBookie(long ledgerId, BookieId bookieAddress,
+            LedgerManager ledgerManager) {
+        try {
+<span class="nc" id="L1671">            LedgerMetadata ledgerMetadata = ledgerManager.readLedgerMetadata(ledgerId).get().getValue();</span>
+<span class="nc" id="L1672">            return areEntriesOfLedgerStoredInTheBookie(ledgerId, bookieAddress, ledgerMetadata);</span>
+<span class="nc" id="L1673">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L1674">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1675">            throw new RuntimeException(ie);</span>
+<span class="nc" id="L1676">        } catch (ExecutionException e) {</span>
+<span class="nc bnc" id="L1677" title="All 2 branches missed.">            if (e.getCause() != null</span>
+<span class="nc" id="L1678">                    &amp;&amp; e.getCause().getClass()</span>
+<span class="nc bnc" id="L1679" title="All 2 branches missed.">                    .equals(BKException.BKNoSuchLedgerExistsOnMetadataServerException.class)) {</span>
+<span class="nc bnc" id="L1680" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1681">                    LOG.debug(&quot;Ledger: {} has been deleted&quot;, ledgerId);</span>
+                }
+<span class="nc" id="L1683">                return false;</span>
+            } else {
+<span class="nc" id="L1685">                LOG.error(&quot;Got exception while trying to read LedgerMetadata of &quot; + ledgerId, e);</span>
+<span class="nc" id="L1686">                throw new RuntimeException(e);</span>
+            }
+        }
+    }
+
+    public static boolean areEntriesOfLedgerStoredInTheBookie(long ledgerId, BookieId bookieAddress,
+            LedgerMetadata ledgerMetadata) {
+<span class="nc" id="L1693">        Collection&lt;? extends List&lt;BookieId&gt;&gt; ensemblesOfSegments = ledgerMetadata.getAllEnsembles().values();</span>
+<span class="nc" id="L1694">        Iterator&lt;? extends List&lt;BookieId&gt;&gt; ensemblesOfSegmentsIterator = ensemblesOfSegments.iterator();</span>
+        List&lt;BookieId&gt; ensemble;
+<span class="nc" id="L1696">        int segmentNo = 0;</span>
+<span class="nc bnc" id="L1697" title="All 2 branches missed.">        while (ensemblesOfSegmentsIterator.hasNext()) {</span>
+<span class="nc" id="L1698">            ensemble = ensemblesOfSegmentsIterator.next();</span>
+<span class="nc bnc" id="L1699" title="All 2 branches missed.">            if (ensemble.contains(bookieAddress)) {</span>
+<span class="nc bnc" id="L1700" title="All 2 branches missed.">                if (areEntriesOfSegmentStoredInTheBookie(ledgerMetadata, bookieAddress, segmentNo)) {</span>
+<span class="nc" id="L1701">                    return true;</span>
+                }
+            }
+<span class="nc" id="L1704">            segmentNo++;</span>
+        }
+<span class="nc" id="L1706">        return false;</span>
+    }
+
+    private static boolean areEntriesOfSegmentStoredInTheBookie(LedgerMetadata ledgerMetadata,
+            BookieId bookieAddress, int segmentNo) {
+<span class="nc" id="L1711">        boolean isLedgerClosed = ledgerMetadata.isClosed();</span>
+<span class="nc" id="L1712">        int ensembleSize = ledgerMetadata.getEnsembleSize();</span>
+<span class="nc" id="L1713">        int writeQuorumSize = ledgerMetadata.getWriteQuorumSize();</span>
+
+<span class="nc" id="L1715">        List&lt;Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt;&gt; segments =</span>
+<span class="nc" id="L1716">            new LinkedList&lt;&gt;(ledgerMetadata.getAllEnsembles().entrySet());</span>
+<span class="nc" id="L1717">        List&lt;BookieId&gt; currentSegmentEnsemble = segments.get(segmentNo).getValue();</span>
+<span class="nc bnc" id="L1718" title="All 2 branches missed.">        boolean lastSegment = (segmentNo == (segments.size() - 1));</span>
+
+        /*
+         * Checking the last segment of the ledger can be complicated in
+         * some cases. In the case that the ledger is closed, we can just
+         * check the fragments of the segment as normal, except in the case
+         * that no entry was ever written, to the ledger, in which case we
+         * check no fragments.
+         *
+         * Following the same approach as in LedgerChecker.checkLedger
+         */
+<span class="nc bnc" id="L1729" title="All 6 branches missed.">        if (lastSegment &amp;&amp; isLedgerClosed &amp;&amp; (ledgerMetadata.getLastEntryId() &lt; segments.get(segmentNo).getKey())) {</span>
+<span class="nc" id="L1730">            return false;</span>
+        }
+
+        /*
+         * If current segment ensemble doesn't contain this bookie then return
+         * false.
+         */
+<span class="nc bnc" id="L1737" title="All 2 branches missed.">        if (!currentSegmentEnsemble.contains(bookieAddress)) {</span>
+<span class="nc" id="L1738">            return false;</span>
+        }
+
+        /*
+         * if ensembleSize is equal to writeQuorumSize, then ofcourse all
+         * the entries of this segment are supposed to be stored in this
+         * bookie. If this is last segment of the ledger and if the ledger
+         * is not closed (this is a corner case), then we have to return
+         * true. For more info. Check BOOKKEEPER-237 and BOOKKEEPER-325.
+         */
+<span class="nc bnc" id="L1748" title="All 6 branches missed.">        if ((lastSegment &amp;&amp; !isLedgerClosed) || (ensembleSize == writeQuorumSize)) {</span>
+<span class="nc" id="L1749">            return true;</span>
+        }
+
+        /*
+         * the following check is required because ensembleSize can be
+         * greater than writeQuorumSize and in this case if there are only
+         * couple of entries then based on RoundRobinDistributionSchedule
+         * there might not be any entry copy in this bookie though this
+         * bookie is part of the ensemble of this segment. If no entry is
+         * stored in this bookie then we should return false, because
+         * ReplicationWorker wont take care of fixing the ledgerMetadata of
+         * this segment in this case.
+         *
+         * if ensembleSize &gt; writeQuorumSize, then in LedgerFragment.java
+         * firstEntryID may not be equal to firstStoredEntryId lastEntryId
+         * may not be equalto lastStoredEntryId. firstStoredEntryId and
+         * lastStoredEntryId will be LedgerHandle.INVALID_ENTRY_ID, if no
+         * entry of this segment stored in this bookie. In this case
+         * LedgerChecker.verifyLedgerFragment will not consider it as
+         * unavailable/bad fragment though this bookie is part of the
+         * ensemble of the segment and it is down.
+         */
+<span class="nc" id="L1771">        DistributionSchedule distributionSchedule = new RoundRobinDistributionSchedule(</span>
+<span class="nc" id="L1772">                ledgerMetadata.getWriteQuorumSize(), ledgerMetadata.getAckQuorumSize(),</span>
+<span class="nc" id="L1773">                ledgerMetadata.getEnsembleSize());</span>
+
+<span class="nc" id="L1775">        int thisBookieIndexInCurrentEnsemble = currentSegmentEnsemble.indexOf(bookieAddress);</span>
+<span class="nc" id="L1776">        long firstEntryId = segments.get(segmentNo).getKey();</span>
+<span class="nc bnc" id="L1777" title="All 2 branches missed.">        long lastEntryId = lastSegment ? ledgerMetadata.getLastEntryId() : segments.get(segmentNo + 1).getKey() - 1;</span>
+<span class="nc" id="L1778">        long firstStoredEntryId = LedgerHandle.INVALID_ENTRY_ID;</span>
+<span class="nc" id="L1779">        long firstEntryIter = firstEntryId;</span>
+        // following the same approach followed in LedgerFragment.getFirstStoredEntryId()
+<span class="nc bnc" id="L1781" title="All 4 branches missed.">        for (int i = 0; i &lt; ensembleSize &amp;&amp; firstEntryIter &lt;= lastEntryId; i++) {</span>
+<span class="nc bnc" id="L1782" title="All 2 branches missed.">            if (distributionSchedule.hasEntry(firstEntryIter, thisBookieIndexInCurrentEnsemble)) {</span>
+<span class="nc" id="L1783">                firstStoredEntryId = firstEntryIter;</span>
+<span class="nc" id="L1784">                break;</span>
+            } else {
+<span class="nc" id="L1786">                firstEntryIter++;</span>
+            }
+        }
+<span class="nc bnc" id="L1789" title="All 2 branches missed.">        return firstStoredEntryId != LedgerHandle.INVALID_ENTRY_ID;</span>
+    }
+
+    /**
+     * returns boolean value specifying if the ensemble of the segment is
+     * adhering to the ensemble placement policy for the given writeQuorumSize
+     * and ackQuorumSize.
+     *
+     * @param ensembleBookiesList
+     *            ensemble of the segment
+     * @param writeQuorumSize
+     *            writeQuorumSize of the ledger
+     * @param ackQuorumSize
+     *            ackQuorumSize of the ledger
+     * @return &lt;tt&gt;true&lt;/tt&gt; if the ledger is adhering to
+     *         EnsemblePlacementPolicy
+     */
+    public PlacementPolicyAdherence isEnsembleAdheringToPlacementPolicy(List&lt;BookieId&gt; ensembleBookiesList,
+            int writeQuorumSize, int ackQuorumSize) {
+<span class="nc" id="L1808">        return bkc.getPlacementPolicy().isEnsembleAdheringToPlacementPolicy(ensembleBookiesList, writeQuorumSize,</span>
+                ackQuorumSize);
+    }
+
+    public Map&lt;Integer, BookieId&gt; replaceNotAdheringPlacementPolicyBookie(List&lt;BookieId&gt; ensembleBookiesList,
+            int writeQuorumSize, int ackQuorumSize) {
+        try {
+<span class="nc" id="L1815">            EnsemblePlacementPolicy.PlacementResult&lt;List&lt;BookieId&gt;&gt; placementResult = bkc.getPlacementPolicy()</span>
+<span class="nc" id="L1816">                    .replaceToAdherePlacementPolicy(ensembleBookiesList.size(), writeQuorumSize, ackQuorumSize,</span>
+                            new HashSet&lt;&gt;(), ensembleBookiesList);
+<span class="nc bnc" id="L1818" title="All 2 branches missed.">            if (PlacementPolicyAdherence.FAIL != placementResult.getAdheringToPolicy()) {</span>
+<span class="nc" id="L1819">                Map&lt;Integer, BookieId&gt; targetMap = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L1820">                List&lt;BookieId&gt; newEnsembles = placementResult.getResult();</span>
+<span class="nc bnc" id="L1821" title="All 2 branches missed.">                for (int i = 0; i &lt; ensembleBookiesList.size(); i++) {</span>
+<span class="nc" id="L1822">                    BookieId originBookie = ensembleBookiesList.get(i);</span>
+<span class="nc" id="L1823">                    BookieId newBookie = newEnsembles.get(i);</span>
+<span class="nc bnc" id="L1824" title="All 2 branches missed.">                    if (!originBookie.equals(newBookie)) {</span>
+<span class="nc" id="L1825">                        targetMap.put(i, newBookie);</span>
+                    }
+                }
+<span class="nc" id="L1828">                return targetMap;</span>
+            }
+<span class="nc" id="L1830">        } catch (UnsupportedOperationException e) {</span>
+<span class="nc" id="L1831">            LOG.warn(&quot;The placement policy: {} didn't support replaceToAdherePlacementPolicy, &quot;</span>
+<span class="nc" id="L1832">                    + &quot;ignore replace not adhere bookie.&quot;, bkc.getPlacementPolicy().getClass().getName());</span>
+<span class="nc" id="L1833">        }</span>
+<span class="nc" id="L1834">        return Collections.emptyMap();</span>
+    }
+
+    /**
+     * Makes async request for getting list of entries of ledger from a bookie
+     * and returns Future for the result.
+     *
+     * @param address
+     *            BookieId of the bookie
+     * @param ledgerId
+     *            ledgerId
+     * @return returns Future
+     */
+    public CompletableFuture&lt;AvailabilityOfEntriesOfLedger&gt; asyncGetListOfEntriesOfLedger(BookieId address,
+            long ledgerId) {
+<span class="nc" id="L1849">        return bkc.getBookieClient().getListOfEntriesOfLedger(address, ledgerId);</span>
+    }
+
+    public BookieId getCurrentAuditor() throws IOException, InterruptedException {
+<span class="nc" id="L1853">        return getLedgerAuditorManager().getCurrentAuditor();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

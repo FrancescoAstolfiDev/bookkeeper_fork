@@ -1,0 +1,394 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AutoRecoveryMain.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">AutoRecoveryMain.java</span></div><h1>AutoRecoveryMain.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.replication;
+
+import static org.apache.bookkeeper.replication.ReplicationStats.AUDITOR_SCOPE;
+import static org.apache.bookkeeper.replication.ReplicationStats.REPLICATION_WORKER_SCOPE;
+
+import com.google.common.annotations.VisibleForTesting;
+import java.io.File;
+import java.io.IOException;
+import java.lang.Thread.UncaughtExceptionHandler;
+import java.net.MalformedURLException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import org.apache.bookkeeper.bookie.BookieCriticalThread;
+import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.bookie.ExitCode;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.BookKeeperClientStats;
+import org.apache.bookkeeper.common.component.ComponentStarter;
+import org.apache.bookkeeper.common.component.LifecycleComponent;
+import org.apache.bookkeeper.common.component.LifecycleComponentStack;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.MetadataClientDriver;
+import org.apache.bookkeeper.replication.ReplicationException.CompatibilityException;
+import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
+import org.apache.bookkeeper.server.conf.BookieConfiguration;
+import org.apache.bookkeeper.server.http.BKHttpServiceProvider;
+import org.apache.bookkeeper.server.service.AutoRecoveryService;
+import org.apache.bookkeeper.server.service.HttpService;
+import org.apache.bookkeeper.server.service.StatsProviderService;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.commons.cli.BasicParser;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import org.apache.commons.configuration2.ex.ConfigurationException;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Class to start/stop the AutoRecovery daemons Auditor and ReplicationWorker.
+ *
+ * &lt;p&gt;TODO: eliminate the direct usage of zookeeper here {@link https://github.com/apache/bookkeeper/issues/1332}
+ */
+public class AutoRecoveryMain {
+<span class="nc" id="L69">    private static final Logger LOG = LoggerFactory</span>
+<span class="nc" id="L70">            .getLogger(AutoRecoveryMain.class);</span>
+
+    private final ServerConfiguration conf;
+    final BookKeeper bkc;
+    final AuditorElector auditorElector;
+    final ReplicationWorker replicationWorker;
+    final AutoRecoveryDeathWatcher deathWatcher;
+    int exitCode;
+<span class="nc" id="L78">    private volatile boolean shuttingDown = false;</span>
+<span class="nc" id="L79">    private volatile boolean running = false;</span>
+
+    // Exception handler
+<span class="nc" id="L82">    private volatile UncaughtExceptionHandler uncaughtExceptionHandler = null;</span>
+
+    public AutoRecoveryMain(ServerConfiguration conf) throws IOException,
+            InterruptedException, KeeperException, UnavailableException,
+            CompatibilityException {
+<span class="nc" id="L87">        this(conf, NullStatsLogger.INSTANCE);</span>
+<span class="nc" id="L88">    }</span>
+
+    public AutoRecoveryMain(ServerConfiguration conf, StatsLogger statsLogger)
+            throws IOException, InterruptedException, KeeperException, UnavailableException,
+<span class="nc" id="L92">            CompatibilityException {</span>
+<span class="nc" id="L93">        this.conf = conf;</span>
+<span class="nc" id="L94">        this.bkc = Auditor.createBookKeeperClient(conf, statsLogger.scope(BookKeeperClientStats.CLIENT_SCOPE));</span>
+<span class="nc" id="L95">        MetadataClientDriver metadataClientDriver = bkc.getMetadataClientDriver();</span>
+<span class="nc" id="L96">        metadataClientDriver.setSessionStateListener(() -&gt; {</span>
+<span class="nc" id="L97">            LOG.error(&quot;Client connection to the Metadata server has expired, so shutting down AutoRecoveryMain!&quot;);</span>
+            // do not run &quot;shutdown&quot; in the main ZooKeeper client thread
+            // as it performs some blocking operations
+<span class="nc" id="L100">            CompletableFuture.runAsync(() -&gt; {</span>
+<span class="nc" id="L101">                shutdown(ExitCode.ZK_EXPIRED);</span>
+<span class="nc" id="L102">            });</span>
+<span class="nc" id="L103">        });</span>
+
+<span class="nc" id="L105">        auditorElector = new AuditorElector(</span>
+<span class="nc" id="L106">            BookieImpl.getBookieId(conf).toString(),</span>
+            conf,
+            bkc,
+<span class="nc" id="L109">            statsLogger.scope(AUDITOR_SCOPE),</span>
+            false);
+<span class="nc" id="L111">        replicationWorker = new ReplicationWorker(</span>
+            conf,
+            bkc,
+            false,
+<span class="nc" id="L115">            statsLogger.scope(REPLICATION_WORKER_SCOPE));</span>
+<span class="nc" id="L116">        deathWatcher = new AutoRecoveryDeathWatcher(this);</span>
+<span class="nc" id="L117">    }</span>
+
+    /*
+     * Start daemons
+     */
+    public void start() {
+<span class="nc" id="L123">        auditorElector.start();</span>
+<span class="nc" id="L124">        replicationWorker.start();</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (null != uncaughtExceptionHandler) {</span>
+<span class="nc" id="L126">            deathWatcher.setUncaughtExceptionHandler(uncaughtExceptionHandler);</span>
+        }
+<span class="nc" id="L128">        deathWatcher.start();</span>
+<span class="nc" id="L129">        running = true;</span>
+<span class="nc" id="L130">    }</span>
+
+    /*
+     * Waits till all daemons joins
+     */
+    public void join() throws InterruptedException {
+<span class="nc" id="L136">        deathWatcher.join();</span>
+<span class="nc" id="L137">    }</span>
+
+    /*
+     * Shutdown all daemons gracefully
+     */
+    public void shutdown() {
+<span class="nc" id="L143">        shutdown(ExitCode.OK);</span>
+<span class="nc" id="L144">    }</span>
+
+    private void shutdown(int exitCode) {
+<span class="nc" id="L147">        LOG.info(&quot;Shutting down auto recovery: {}&quot;, exitCode);</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (shuttingDown) {</span>
+<span class="nc" id="L149">            return;</span>
+        }
+<span class="nc" id="L151">        LOG.info(&quot;Shutting down AutoRecovery&quot;);</span>
+<span class="nc" id="L152">        shuttingDown = true;</span>
+<span class="nc" id="L153">        running = false;</span>
+<span class="nc" id="L154">        this.exitCode = exitCode;</span>
+
+        try {
+<span class="nc" id="L157">            auditorElector.shutdown();</span>
+<span class="nc" id="L158">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L159">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L160">            LOG.warn(&quot;Interrupted shutting down auditor elector&quot;, e);</span>
+<span class="nc" id="L161">        }</span>
+<span class="nc" id="L162">        replicationWorker.shutdown();</span>
+        try {
+<span class="nc" id="L164">            bkc.close();</span>
+<span class="nc" id="L165">        } catch (BKException e) {</span>
+<span class="nc" id="L166">            LOG.warn(&quot;Failed to close bookkeeper client for auto recovery&quot;, e);</span>
+<span class="nc" id="L167">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L168">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L169">            LOG.warn(&quot;Interrupted closing bookkeeper client for auto recovery&quot;, e);</span>
+<span class="nc" id="L170">        }</span>
+<span class="nc" id="L171">    }</span>
+
+    private int getExitCode() {
+<span class="nc" id="L174">        return exitCode;</span>
+    }
+
+    /**
+     * Currently the uncaught exception handler is used for DeathWatcher to notify
+     * lifecycle management that a bookie is dead for some reasons.
+     *
+     * &lt;p&gt;in future, we can register this &lt;tt&gt;exceptionHandler&lt;/tt&gt; to critical threads
+     * so when those threads are dead, it will automatically trigger lifecycle management
+     * to shutdown the process.
+     */
+    public void setExceptionHandler(UncaughtExceptionHandler exceptionHandler) {
+<span class="nc" id="L186">        this.uncaughtExceptionHandler = exceptionHandler;</span>
+<span class="nc" id="L187">    }</span>
+
+    @VisibleForTesting
+    public Auditor getAuditor() {
+<span class="nc" id="L191">        return auditorElector.getAuditor();</span>
+    }
+
+    @VisibleForTesting
+    public ReplicationWorker getReplicationWorker() {
+<span class="nc" id="L196">        return replicationWorker;</span>
+    }
+
+    /** Is auto-recovery service running? */
+    public boolean isAutoRecoveryRunning() {
+<span class="nc" id="L201">        return running;</span>
+    }
+
+    /*
+     * DeathWatcher for AutoRecovery daemons.
+     */
+    private class AutoRecoveryDeathWatcher extends BookieCriticalThread {
+        private int watchInterval;
+        private AutoRecoveryMain autoRecoveryMain;
+
+<span class="nc" id="L211">        public AutoRecoveryDeathWatcher(AutoRecoveryMain autoRecoveryMain) {</span>
+<span class="nc" id="L212">            super(&quot;AutoRecoveryDeathWatcher-&quot;</span>
+<span class="nc" id="L213">                    + autoRecoveryMain.conf.getBookiePort());</span>
+<span class="nc" id="L214">            this.autoRecoveryMain = autoRecoveryMain;</span>
+<span class="nc" id="L215">            watchInterval = autoRecoveryMain.conf.getDeathWatchInterval();</span>
+            // set a default uncaught exception handler to shutdown the AutoRecovery
+            // when it notices the AutoRecovery is not running any more.
+<span class="nc" id="L218">            setUncaughtExceptionHandler((thread, cause) -&gt; {</span>
+<span class="nc" id="L219">                LOG.info(&quot;AutoRecoveryDeathWatcher exited loop due to uncaught exception from thread {}&quot;,</span>
+<span class="nc" id="L220">                    thread.getName(), cause);</span>
+<span class="nc" id="L221">                shutdown();</span>
+<span class="nc" id="L222">            });</span>
+<span class="nc" id="L223">        }</span>
+
+        @Override
+        public void run() {
+            while (true) {
+                try {
+<span class="nc" id="L229">                    Thread.sleep(watchInterval);</span>
+<span class="nc" id="L230">                } catch (InterruptedException ie) {</span>
+<span class="nc" id="L231">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L232">                }</span>
+                // If any one service not running, then shutdown peer.
+<span class="nc bnc" id="L234" title="All 4 branches missed.">                if (!autoRecoveryMain.auditorElector.isRunning() || !autoRecoveryMain.replicationWorker.isRunning()) {</span>
+<span class="nc" id="L235">                    LOG.info(</span>
+                            &quot;AutoRecoveryDeathWatcher noticed the AutoRecovery is not running any more,&quot;
+                            + &quot;exiting the watch loop!&quot;);
+                    /*
+                     * death watcher has noticed that AutoRecovery is not
+                     * running any more throw an exception to fail the death
+                     * watcher thread and it will trigger the uncaught exception
+                     * handler to handle this &quot;AutoRecovery not running&quot;
+                     * situation.
+                     */
+<span class="nc" id="L245">                    throw new RuntimeException(&quot;AutoRecovery is not running any more&quot;);</span>
+                }
+            }
+        }
+    }
+
+<span class="nc" id="L251">    private static final Options opts = new Options();</span>
+    static {
+<span class="nc" id="L253">        opts.addOption(&quot;c&quot;, &quot;conf&quot;, true, &quot;Bookie server configuration&quot;);</span>
+<span class="nc" id="L254">        opts.addOption(&quot;h&quot;, &quot;help&quot;, false, &quot;Print help message&quot;);</span>
+<span class="nc" id="L255">    }</span>
+
+    /*
+     * Print usage
+     */
+    private static void printUsage() {
+<span class="nc" id="L261">        HelpFormatter hf = new HelpFormatter();</span>
+<span class="nc" id="L262">        hf.printHelp(&quot;AutoRecoveryMain [options]\n&quot;, opts);</span>
+<span class="nc" id="L263">    }</span>
+
+    /*
+     * load configurations from file.
+     */
+    private static void loadConfFile(ServerConfiguration conf, String confFile)
+            throws IllegalArgumentException {
+        try {
+<span class="nc" id="L271">            conf.loadConf(new File(confFile).toURI().toURL());</span>
+<span class="nc" id="L272">        } catch (MalformedURLException e) {</span>
+<span class="nc" id="L273">            LOG.error(&quot;Could not open configuration file: &quot; + confFile, e);</span>
+<span class="nc" id="L274">            throw new IllegalArgumentException();</span>
+<span class="nc" id="L275">        } catch (ConfigurationException e) {</span>
+<span class="nc" id="L276">            LOG.error(&quot;Malformed configuration file: &quot; + confFile, e);</span>
+<span class="nc" id="L277">            throw new IllegalArgumentException();</span>
+<span class="nc" id="L278">        }</span>
+<span class="nc" id="L279">        LOG.info(&quot;Using configuration file &quot; + confFile);</span>
+<span class="nc" id="L280">    }</span>
+
+    /*
+     * Parse console args
+     */
+    private static ServerConfiguration parseArgs(String[] args)
+            throws IllegalArgumentException {
+        try {
+<span class="nc" id="L288">            BasicParser parser = new BasicParser();</span>
+<span class="nc" id="L289">            CommandLine cmdLine = parser.parse(opts, args);</span>
+
+<span class="nc bnc" id="L291" title="All 2 branches missed.">            if (cmdLine.hasOption('h')) {</span>
+<span class="nc" id="L292">                throw new IllegalArgumentException();</span>
+            }
+
+<span class="nc" id="L295">            ServerConfiguration conf = new ServerConfiguration();</span>
+<span class="nc" id="L296">            String[] leftArgs = cmdLine.getArgs();</span>
+
+<span class="nc bnc" id="L298" title="All 2 branches missed.">            if (cmdLine.hasOption('c')) {</span>
+<span class="nc bnc" id="L299" title="All 4 branches missed.">                if (null != leftArgs &amp;&amp; leftArgs.length &gt; 0) {</span>
+<span class="nc" id="L300">                    throw new IllegalArgumentException(&quot;unexpected arguments [&quot; + String.join(&quot; &quot;, leftArgs) + &quot;]&quot;);</span>
+                }
+<span class="nc" id="L302">                String confFile = cmdLine.getOptionValue(&quot;c&quot;);</span>
+<span class="nc" id="L303">                loadConfFile(conf, confFile);</span>
+            }
+
+<span class="nc bnc" id="L306" title="All 4 branches missed.">            if (null != leftArgs &amp;&amp; leftArgs.length &gt; 0) {</span>
+<span class="nc" id="L307">                throw new IllegalArgumentException(&quot;unexpected arguments [&quot; + String.join(&quot; &quot;, leftArgs) + &quot;]&quot;);</span>
+            }
+<span class="nc" id="L309">            return conf;</span>
+<span class="nc" id="L310">        } catch (ParseException e) {</span>
+<span class="nc" id="L311">            throw new IllegalArgumentException(e);</span>
+        }
+    }
+
+    public static void main(String[] args) {
+<span class="nc" id="L316">        int retCode = doMain(args);</span>
+<span class="nc" id="L317">        Runtime.getRuntime().exit(retCode);</span>
+<span class="nc" id="L318">    }</span>
+
+    static int doMain(String[] args) {
+
+        ServerConfiguration conf;
+
+        // 0. parse command line
+        try {
+<span class="nc" id="L326">            conf = parseArgs(args);</span>
+<span class="nc" id="L327">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L328">            LOG.error(&quot;Error parsing command line arguments : &quot;, iae);</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            if (iae.getMessage() != null) {</span>
+<span class="nc" id="L330">                System.err.println(iae.getMessage());</span>
+            }
+<span class="nc" id="L332">            printUsage();</span>
+<span class="nc" id="L333">            return ExitCode.INVALID_CONF;</span>
+<span class="nc" id="L334">        }</span>
+
+        // 1. building the component stack:
+        LifecycleComponent server;
+        try {
+<span class="nc" id="L339">            server = buildAutoRecoveryServer(new BookieConfiguration(conf));</span>
+<span class="nc" id="L340">        } catch (Exception e) {</span>
+<span class="nc" id="L341">            LOG.error(&quot;Failed to build AutoRecovery Server&quot;, e);</span>
+<span class="nc" id="L342">            System.err.println(e.getMessage());</span>
+<span class="nc" id="L343">            return ExitCode.SERVER_EXCEPTION;</span>
+<span class="nc" id="L344">        }</span>
+
+        // 2. start the server
+        try {
+<span class="nc" id="L348">            ComponentStarter.startComponent(server).get();</span>
+<span class="nc" id="L349">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L350">            Thread.currentThread().interrupt();</span>
+            // the server is interrupted
+<span class="nc" id="L352">            LOG.info(&quot;AutoRecovery server is interrupted. Exiting ...&quot;);</span>
+<span class="nc" id="L353">            System.err.println(ie.getMessage());</span>
+<span class="nc" id="L354">        } catch (ExecutionException ee) {</span>
+<span class="nc" id="L355">            LOG.error(&quot;Error in bookie shutdown&quot;, ee.getCause());</span>
+<span class="nc" id="L356">            System.err.println(ee.getMessage());</span>
+<span class="nc" id="L357">            return ExitCode.SERVER_EXCEPTION;</span>
+<span class="nc" id="L358">        }</span>
+<span class="nc" id="L359">        return ExitCode.OK;</span>
+    }
+
+    public static LifecycleComponentStack buildAutoRecoveryServer(BookieConfiguration conf) throws Exception {
+<span class="nc" id="L363">        LifecycleComponentStack.Builder serverBuilder = LifecycleComponentStack.newBuilder()</span>
+<span class="nc" id="L364">                .withName(&quot;autorecovery-server&quot;);</span>
+
+        // 1. build stats provider
+<span class="nc" id="L367">        StatsProviderService statsProviderService = new StatsProviderService(conf);</span>
+<span class="nc" id="L368">        StatsLogger rootStatsLogger = statsProviderService.getStatsProvider().getStatsLogger(&quot;&quot;);</span>
+
+<span class="nc" id="L370">        serverBuilder.addComponent(statsProviderService);</span>
+<span class="nc" id="L371">        LOG.info(&quot;Load lifecycle component : {}&quot;, StatsProviderService.class.getName());</span>
+
+        // 2. build AutoRecovery server
+<span class="nc" id="L374">        AutoRecoveryService autoRecoveryService = new AutoRecoveryService(conf, rootStatsLogger);</span>
+
+<span class="nc" id="L376">        serverBuilder.addComponent(autoRecoveryService);</span>
+<span class="nc" id="L377">        LOG.info(&quot;Load lifecycle component : {}&quot;, AutoRecoveryService.class.getName());</span>
+
+        // 4. build http service
+<span class="nc bnc" id="L380" title="All 2 branches missed.">        if (conf.getServerConf().isHttpServerEnabled()) {</span>
+<span class="nc" id="L381">            BKHttpServiceProvider provider = new BKHttpServiceProvider.Builder()</span>
+<span class="nc" id="L382">                    .setAutoRecovery(autoRecoveryService.getAutoRecoveryServer())</span>
+<span class="nc" id="L383">                    .setServerConfiguration(conf.getServerConf())</span>
+<span class="nc" id="L384">                    .setStatsProvider(statsProviderService.getStatsProvider()).build();</span>
+<span class="nc" id="L385">            HttpService httpService = new HttpService(provider, conf, rootStatsLogger);</span>
+
+<span class="nc" id="L387">            serverBuilder.addComponent(httpService);</span>
+<span class="nc" id="L388">            LOG.info(&quot;Load lifecycle component : {}&quot;, HttpService.class.getName());</span>
+        }
+
+<span class="nc" id="L391">        return serverBuilder.build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

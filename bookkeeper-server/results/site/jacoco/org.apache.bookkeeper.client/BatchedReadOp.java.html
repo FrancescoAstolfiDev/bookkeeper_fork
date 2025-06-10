@@ -1,0 +1,322 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BatchedReadOp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">BatchedReadOp.java</span></div><h1>BatchedReadOp.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import io.netty.buffer.ByteBuf;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.client.api.LedgerEntry;
+import org.apache.bookkeeper.client.impl.LedgerEntriesImpl;
+import org.apache.bookkeeper.client.impl.LedgerEntryImpl;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookieProtocol;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.BatchedReadEntryCallback;
+import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.util.ByteBufList;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class BatchedReadOp extends ReadOpBase implements BatchedReadEntryCallback {
+
+<span class="nc" id="L42">    private static final Logger LOG = LoggerFactory.getLogger(BatchedReadOp.class);</span>
+
+    final int maxCount;
+    final long maxSize;
+
+    BatchedLedgerEntryRequest request;
+
+    BatchedReadOp(LedgerHandle lh,
+                  ClientContext clientCtx,
+                  long startEntryId,
+                  int maxCount,
+                  long maxSize,
+                  boolean isRecoveryRead) {
+<span class="nc" id="L55">        super(lh, clientCtx, startEntryId, -1L, isRecoveryRead);</span>
+<span class="nc" id="L56">        this.maxCount = maxCount;</span>
+<span class="nc" id="L57">        this.maxSize = maxSize;</span>
+<span class="nc" id="L58">    }</span>
+
+    @Override
+    void initiate() {
+<span class="nc" id="L62">        this.requestTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L63">        List&lt;BookieId&gt; ensemble = getLedgerMetadata().getEnsembleAt(startEntryId);</span>
+<span class="nc" id="L64">        request = new SequenceReadRequest(ensemble, lh.ledgerId, startEntryId, maxCount, maxSize);</span>
+<span class="nc" id="L65">        request.read();</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (clientCtx.getConf().readSpeculativeRequestPolicy.isPresent()) {</span>
+<span class="nc" id="L67">            speculativeTask = clientCtx.getConf().readSpeculativeRequestPolicy.get()</span>
+<span class="nc" id="L68">                    .initiateSpeculativeRequest(clientCtx.getScheduler(), request);</span>
+        }
+<span class="nc" id="L70">    }</span>
+
+    @Override
+    protected void submitCallback(int code) {
+        // ensure callback once
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (!complete.compareAndSet(false, true)) {</span>
+<span class="nc" id="L76">            return;</span>
+        }
+
+<span class="nc" id="L79">        cancelSpeculativeTask(true);</span>
+
+<span class="nc" id="L81">        long latencyNanos = MathUtils.elapsedNanos(requestTimeNanos);</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (code != BKException.Code.OK) {</span>
+<span class="nc" id="L83">            LOG.error(</span>
+                    &quot;Batch read of ledger entry failed: L{} E{}-E{}, Sent to {}, &quot;
+                            + &quot;Heard from {} : bitset = {}, Error = '{}'. First unread entry is ({}, rc = {})&quot;,
+<span class="nc" id="L86">                    lh.getId(), startEntryId, startEntryId + maxCount - 1, sentToHosts, heardFromHosts,</span>
+<span class="nc" id="L87">                    heardFromHostsBitSet, BKException.getMessage(code), startEntryId, code);</span>
+<span class="nc" id="L88">            clientCtx.getClientStats().getReadOpLogger().registerFailedEvent(latencyNanos, TimeUnit.NANOSECONDS);</span>
+            // release the entries
+
+<span class="nc" id="L91">            request.close();</span>
+<span class="nc" id="L92">            future.completeExceptionally(BKException.create(code));</span>
+        } else {
+<span class="nc" id="L94">            clientCtx.getClientStats().getReadOpLogger().registerSuccessfulEvent(latencyNanos, TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L95">            future.complete(LedgerEntriesImpl.create(request.entries));</span>
+        }
+<span class="nc" id="L97">    }</span>
+
+    @Override
+    public void readEntriesComplete(int rc, long ledgerId, long startEntryId, ByteBufList bufList, Object ctx) {
+<span class="nc" id="L101">        final ReadContext rctx = (ReadContext) ctx;</span>
+<span class="nc" id="L102">        final BatchedLedgerEntryRequest entry = (BatchedLedgerEntryRequest) rctx.entry;</span>
+
+<span class="nc bnc" id="L104" title="All 2 branches missed.">        if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L105">            entry.logErrorAndReattemptRead(rctx.bookieIndex, rctx.to, &quot;Error: &quot; + BKException.getMessage(rc), rc);</span>
+<span class="nc" id="L106">            return;</span>
+        }
+
+<span class="nc" id="L109">        heardFromHosts.add(rctx.to);</span>
+<span class="nc" id="L110">        heardFromHostsBitSet.set(rctx.bookieIndex, true);</span>
+
+<span class="nc" id="L112">        bufList.retain();</span>
+        // if entry has completed don't handle twice
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (entry.complete(rctx.bookieIndex, rctx.to, bufList)) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">            if (!isRecoveryRead) {</span>
+                // do not advance LastAddConfirmed for recovery reads
+<span class="nc" id="L117">                lh.updateLastConfirmed(rctx.getLastAddConfirmed(), 0L);</span>
+            }
+<span class="nc" id="L119">            submitCallback(BKException.Code.OK);</span>
+        } else {
+<span class="nc" id="L121">            bufList.release();</span>
+        }
+<span class="nc" id="L123">    }</span>
+
+    void sendReadTo(int bookieIndex, BookieId to, BatchedLedgerEntryRequest entry) throws InterruptedException {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (lh.throttler != null) {</span>
+<span class="nc" id="L127">            lh.throttler.acquire();</span>
+        }
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (isRecoveryRead) {</span>
+<span class="nc" id="L130">            int flags = BookieProtocol.FLAG_HIGH_PRIORITY | BookieProtocol.FLAG_DO_FENCING;</span>
+<span class="nc" id="L131">            clientCtx.getBookieClient().batchReadEntries(to, lh.ledgerId, entry.eId,</span>
+                    maxCount, maxSize, this, new ReadContext(bookieIndex, to, entry), flags, lh.ledgerKey);
+<span class="nc" id="L133">        } else {</span>
+<span class="nc" id="L134">            clientCtx.getBookieClient().batchReadEntries(to, lh.ledgerId, entry.eId, maxCount, maxSize,</span>
+                    this, new ReadContext(bookieIndex, to, entry), BookieProtocol.FLAG_NONE);
+        }
+<span class="nc" id="L137">    }</span>
+
+    abstract class BatchedLedgerEntryRequest extends LedgerEntryRequest {
+
+        //Indicate which ledger the BatchedLedgerEntryRequest is reading.
+        final long lId;
+        final int maxCount;
+        final long maxSize;
+
+        final List&lt;LedgerEntry&gt; entries;
+
+<span class="nc" id="L148">        BatchedLedgerEntryRequest(List&lt;BookieId&gt; ensemble, long lId, long eId, int maxCount, long maxSize) {</span>
+<span class="nc" id="L149">            super(ensemble, eId);</span>
+<span class="nc" id="L150">            this.lId = lId;</span>
+<span class="nc" id="L151">            this.maxCount = maxCount;</span>
+<span class="nc" id="L152">            this.maxSize = maxSize;</span>
+<span class="nc" id="L153">            this.entries = new ArrayList&lt;&gt;(maxCount);</span>
+<span class="nc" id="L154">        }</span>
+
+        boolean complete(int bookieIndex, BookieId host, final ByteBufList bufList) {
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            if (isComplete()) {</span>
+<span class="nc" id="L158">                return false;</span>
+            }
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (!complete.getAndSet(true)) {</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                for (int i = 0; i &lt; bufList.size(); i++) {</span>
+<span class="nc" id="L162">                    ByteBuf buffer = bufList.getBuffer(i);</span>
+                    ByteBuf content;
+                    try {
+<span class="nc" id="L165">                        content = lh.macManager.verifyDigestAndReturnData(eId + i, buffer);</span>
+<span class="nc" id="L166">                    } catch (BKException.BKDigestMatchException e) {</span>
+<span class="nc" id="L167">                        clientCtx.getClientStats().getReadOpDmCounter().inc();</span>
+<span class="nc" id="L168">                        logErrorAndReattemptRead(bookieIndex, host, &quot;Mac mismatch&quot;,</span>
+                                BKException.Code.DigestMatchException);
+<span class="nc" id="L170">                        return false;</span>
+<span class="nc" id="L171">                    }</span>
+<span class="nc" id="L172">                    rc = BKException.Code.OK;</span>
+                    /*
+                     * The length is a long and it is the last field of the metadata of an entry.
+                     * Consequently, we have to subtract 8 from METADATA_LENGTH to get the length.
+                     */
+<span class="nc" id="L177">                    LedgerEntryImpl entryImpl =  LedgerEntryImpl.create(lh.ledgerId, startEntryId + i);</span>
+<span class="nc" id="L178">                    entryImpl.setLength(buffer.getLong(DigestManager.METADATA_LENGTH - 8));</span>
+<span class="nc" id="L179">                    entryImpl.setEntryBuf(content);</span>
+<span class="nc" id="L180">                    entries.add(entryImpl);</span>
+                }
+<span class="nc" id="L182">                writeSet.recycle();</span>
+<span class="nc" id="L183">                return true;</span>
+            } else {
+<span class="nc" id="L185">                writeSet.recycle();</span>
+<span class="nc" id="L186">                return false;</span>
+            }
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L192">            return String.format(&quot;L%d-E%d~%d s-%d&quot;, lh.getId(), eId, eId + maxCount, maxSize);</span>
+        }
+    }
+
+    class SequenceReadRequest extends BatchedLedgerEntryRequest {
+
+        static final int NOT_FOUND = -1;
+<span class="nc" id="L199">        int nextReplicaIndexToReadFrom = 0;</span>
+        final BitSet sentReplicas;
+        final BitSet erroredReplicas;
+        SequenceReadRequest(List&lt;BookieId&gt; ensemble,
+                            long lId,
+                            long eId,
+                            int maxCount,
+<span class="nc" id="L206">                            long maxSize) {</span>
+<span class="nc" id="L207">            super(ensemble, lId, eId, maxCount, maxSize);</span>
+<span class="nc" id="L208">            this.sentReplicas = new BitSet(lh.getLedgerMetadata().getWriteQuorumSize());</span>
+<span class="nc" id="L209">            this.erroredReplicas = new BitSet(lh.getLedgerMetadata().getWriteQuorumSize());</span>
+<span class="nc" id="L210">        }</span>
+
+        @Override
+        void read() {
+<span class="nc" id="L214">            sendNextRead();</span>
+<span class="nc" id="L215">        }</span>
+
+        private synchronized int getNextReplicaIndexToReadFrom() {
+<span class="nc" id="L218">            return nextReplicaIndexToReadFrom;</span>
+        }
+
+        private BitSet getSentToBitSet() {
+<span class="nc" id="L222">            BitSet b = new BitSet(ensemble.size());</span>
+
+<span class="nc bnc" id="L224" title="All 2 branches missed.">            for (int i = 0; i &lt; sentReplicas.length(); i++) {</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                if (sentReplicas.get(i)) {</span>
+<span class="nc" id="L226">                    b.set(writeSet.get(i));</span>
+                }
+            }
+<span class="nc" id="L229">            return b;</span>
+        }
+
+        private boolean readsOutstanding() {
+<span class="nc bnc" id="L233" title="All 2 branches missed.">            return (sentReplicas.cardinality() - erroredReplicas.cardinality()) &gt; 0;</span>
+        }
+
+        @Override
+        synchronized BookieId maybeSendSpeculativeRead(BitSet heardFrom) {
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (nextReplicaIndexToReadFrom &gt;= getLedgerMetadata().getWriteQuorumSize()) {</span>
+<span class="nc" id="L239">                return null;</span>
+            }
+
+<span class="nc" id="L242">            BitSet sentTo = getSentToBitSet();</span>
+<span class="nc" id="L243">            sentTo.and(heardFrom);</span>
+
+            // only send another read if we have had no successful response at all
+            // (even for other entries) from any of the other bookies we have sent the
+            // request to
+<span class="nc bnc" id="L248" title="All 2 branches missed.">            if (sentTo.cardinality() == 0) {</span>
+<span class="nc" id="L249">                clientCtx.getClientStats().getSpeculativeReadCounter().inc();</span>
+<span class="nc" id="L250">                return sendNextRead();</span>
+            } else {
+<span class="nc" id="L252">                return null;</span>
+            }
+        }
+
+        synchronized BookieId sendNextRead() {
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            if (nextReplicaIndexToReadFrom &gt;= getLedgerMetadata().getWriteQuorumSize()) {</span>
+                // we are done, the read has failed from all replicas, just fail the
+                // read
+<span class="nc" id="L260">                fail(firstError);</span>
+<span class="nc" id="L261">                return null;</span>
+            }
+
+            // ToDo: pick replica with writable PCBC. ISSUE #1239
+            // https://github.com/apache/bookkeeper/issues/1239
+<span class="nc" id="L266">            int replica = nextReplicaIndexToReadFrom;</span>
+<span class="nc" id="L267">            int bookieIndex = writeSet.get(nextReplicaIndexToReadFrom);</span>
+<span class="nc" id="L268">            nextReplicaIndexToReadFrom++;</span>
+
+            try {
+<span class="nc" id="L271">                BookieId to = ensemble.get(bookieIndex);</span>
+<span class="nc" id="L272">                sendReadTo(bookieIndex, to, this);</span>
+<span class="nc" id="L273">                sentToHosts.add(to);</span>
+<span class="nc" id="L274">                sentReplicas.set(replica);</span>
+<span class="nc" id="L275">                return to;</span>
+<span class="nc" id="L276">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L277">                LOG.error(&quot;Interrupted reading entry &quot; + this, ie);</span>
+<span class="nc" id="L278">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L279">                fail(BKException.Code.InterruptedException);</span>
+<span class="nc" id="L280">                return null;</span>
+            }
+        }
+
+        @Override
+        synchronized void logErrorAndReattemptRead(int bookieIndex, BookieId host, String errMsg, int rc) {
+<span class="nc" id="L286">            super.logErrorAndReattemptRead(bookieIndex, host, errMsg, rc);</span>
+<span class="nc" id="L287">            int replica = writeSet.indexOf(bookieIndex);</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">            if (replica == NOT_FOUND) {</span>
+<span class="nc" id="L289">                LOG.error(&quot;Received error from a host which is not in the ensemble {} {}.&quot;, host, ensemble);</span>
+<span class="nc" id="L290">                return;</span>
+            }
+<span class="nc" id="L292">            erroredReplicas.set(replica);</span>
+<span class="nc bnc" id="L293" title="All 4 branches missed.">            if (isRecoveryRead &amp;&amp; (numBookiesMissingEntry &gt;= requiredBookiesMissingEntryForRecovery)) {</span>
+                /* For recovery, report NoSuchEntry as soon as wQ-aQ+1 bookies report that they do not
+                 * have the entry */
+<span class="nc" id="L296">                fail(BKException.Code.NoSuchEntryException);</span>
+<span class="nc" id="L297">                return;</span>
+            }
+
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            if (!readsOutstanding()) {</span>
+<span class="nc" id="L301">                sendNextRead();</span>
+            }
+<span class="nc" id="L303">        }</span>
+
+        @Override
+        boolean complete(int bookieIndex, BookieId host, final ByteBufList bufList) {
+<span class="nc" id="L307">            boolean completed = super.complete(bookieIndex, host, bufList);</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (completed) {</span>
+<span class="nc" id="L309">                int numReplicasTried = getNextReplicaIndexToReadFrom();</span>
+                // Check if any speculative reads were issued and mark any slow bookies before
+                // the first successful speculative read as &quot;slow&quot;
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                for (int i = 0; i &lt; numReplicasTried - 1; i++) {</span>
+<span class="nc" id="L313">                    int slowBookieIndex = writeSet.get(i);</span>
+<span class="nc" id="L314">                    BookieId slowBookieSocketAddress = ensemble.get(slowBookieIndex);</span>
+<span class="nc" id="L315">                    clientCtx.getPlacementPolicy().registerSlowBookie(slowBookieSocketAddress, eId);</span>
+                }
+            }
+<span class="nc" id="L318">            return completed;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

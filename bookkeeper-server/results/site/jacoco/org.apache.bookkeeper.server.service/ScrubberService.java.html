@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ScrubberService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.service</a> &gt; <span class="el_source">ScrubberService.java</span></div><h1>ScrubberService.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.server.service;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.bookkeeper.bookie.ScrubberStats.DETECTED_FATAL_SCRUB_ERRORS;
+import static org.apache.bookkeeper.bookie.ScrubberStats.DETECTED_SCRUB_ERRORS;
+import static org.apache.bookkeeper.bookie.ScrubberStats.RUN_DURATION;
+
+import com.google.common.util.concurrent.RateLimiter;
+import io.netty.util.concurrent.DefaultThreadFactory;
+import java.io.IOException;
+import java.util.List;
+import java.util.Optional;
+import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.bookkeeper.bookie.ExitCode;
+import org.apache.bookkeeper.bookie.LedgerStorage;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.server.component.ServerLifecycleComponent;
+import org.apache.bookkeeper.server.conf.BookieConfiguration;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A {@link org.apache.bookkeeper.common.component.LifecycleComponent} that runs the scrubber background service.
+ */
+public class ScrubberService extends ServerLifecycleComponent {
+<span class="nc" id="L53">    private static final Logger LOG = LoggerFactory.getLogger(ScrubberService.class);</span>
+
+    private static final String NAME = &quot;scrubber&quot;;
+    private final ScheduledExecutorService executor;
+<span class="nc" id="L57">    private final Random rng = new Random();</span>
+    private final long scrubPeriod;
+    private final Optional&lt;RateLimiter&gt; scrubRateLimiter;
+<span class="nc" id="L60">    private final AtomicBoolean stop = new AtomicBoolean(false);</span>
+    private final LedgerStorage ledgerStorage;
+
+    private final OpStatsLogger scrubCounter;
+    private final Counter errorCounter;
+    private final Counter fatalErrorCounter;
+
+    public ScrubberService(
+            StatsLogger logger,
+            BookieConfiguration conf,
+            LedgerStorage ledgerStorage) {
+<span class="nc" id="L71">        super(NAME, conf, logger);</span>
+<span class="nc" id="L72">        this.executor = Executors.newSingleThreadScheduledExecutor(</span>
+                new DefaultThreadFactory(&quot;ScrubThread&quot;));
+
+<span class="nc" id="L75">        this.scrubPeriod = conf.getServerConf().getLocalScrubPeriod();</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        checkArgument(</span>
+                scrubPeriod &gt; 0,
+                &quot;localScrubInterval must be &gt; 0 for ScrubberService to be used&quot;);
+
+<span class="nc" id="L80">        double rateLimit = conf.getServerConf().getLocalScrubRateLimit();</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        this.scrubRateLimiter = rateLimit == 0 ? Optional.empty() : Optional.of(RateLimiter.create(rateLimit));</span>
+
+<span class="nc" id="L83">        this.ledgerStorage = ledgerStorage;</span>
+
+<span class="nc" id="L85">        this.scrubCounter = logger.getOpStatsLogger(RUN_DURATION);</span>
+<span class="nc" id="L86">        this.errorCounter = logger.getCounter(DETECTED_SCRUB_ERRORS);</span>
+<span class="nc" id="L87">        this.fatalErrorCounter = logger.getCounter(DETECTED_FATAL_SCRUB_ERRORS);</span>
+<span class="nc" id="L88">    }</span>
+
+    private long getNextPeriodMS() {
+<span class="nc" id="L91">        return (long) (((double) scrubPeriod) * (1.5 - rng.nextDouble()) * 1000);</span>
+    }
+
+    private void doSchedule() {
+<span class="nc" id="L95">        executor.schedule(</span>
+                this::run,
+<span class="nc" id="L97">                getNextPeriodMS(),</span>
+                TimeUnit.MILLISECONDS);
+
+<span class="nc" id="L100">    }</span>
+
+    private void run() {
+<span class="nc" id="L103">        boolean success = false;</span>
+<span class="nc" id="L104">        long start = MathUtils.nowInNano();</span>
+        try {
+<span class="nc" id="L106">            List&lt;LedgerStorage.DetectedInconsistency&gt; errors = ledgerStorage.localConsistencyCheck(scrubRateLimiter);</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">            if (errors.size() &gt; 0) {</span>
+<span class="nc" id="L108">                errorCounter.addCount(errors.size());</span>
+<span class="nc" id="L109">                LOG.error(&quot;Found inconsistency during localConsistencyCheck:&quot;);</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                for (LedgerStorage.DetectedInconsistency error : errors) {</span>
+<span class="nc" id="L111">                    LOG.error(&quot;Ledger {}, entry {}: &quot;, error.getLedgerId(), error.getEntryId(), error.getException());</span>
+<span class="nc" id="L112">                }</span>
+            }
+<span class="nc" id="L114">            success = true;</span>
+<span class="nc" id="L115">        } catch (IOException e) {</span>
+<span class="nc" id="L116">            fatalErrorCounter.inc();</span>
+<span class="nc" id="L117">            LOG.error(&quot;Got fatal exception {} running localConsistencyCheck&quot;, e.toString());</span>
+<span class="nc" id="L118">        }</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (success) {</span>
+<span class="nc" id="L120">            scrubCounter.registerSuccessfulEvent(MathUtils.elapsedNanos(start), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L122">            scrubCounter.registerFailedEvent(MathUtils.elapsedNanos(start), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L123">            Runtime.getRuntime().exit(ExitCode.BOOKIE_EXCEPTION);</span>
+        }
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        if (!stop.get()) {</span>
+<span class="nc" id="L126">            doSchedule();</span>
+        }
+<span class="nc" id="L128">    }</span>
+
+    @Override
+    protected void doStart() {
+<span class="nc" id="L132">        doSchedule();</span>
+<span class="nc" id="L133">    }</span>
+
+    @Override
+    protected void doStop() {
+<span class="nc" id="L137">        stop.set(true);</span>
+<span class="nc" id="L138">        executor.shutdown();</span>
+<span class="nc" id="L139">    }</span>
+
+    @Override
+    protected void doClose() throws IOException {
+        // no-op
+<span class="nc" id="L144">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

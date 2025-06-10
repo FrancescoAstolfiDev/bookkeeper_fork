@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LedgerLayout.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">LedgerLayout.java</span></div><h1>LedgerLayout.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.ToString;
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * This class encapsulates ledger layout information that is persistently stored
+ * in registration service. It provides parsing and serialization methods of such
+ * information.
+ */
+<span class="nc" id="L32">@Slf4j</span>
+@Getter
+<span class="nc bnc" id="L34" title="All 18 branches missed.">@EqualsAndHashCode</span>
+<span class="nc" id="L35">@ToString</span>
+public class LedgerLayout {
+
+    // version of compatibility layout version
+    public static final int LAYOUT_MIN_COMPAT_VERSION = 1;
+    // version of ledger layout metadata
+    public static final int LAYOUT_FORMAT_VERSION = 2;
+
+    private static final String splitter = &quot;:&quot;;
+    private static final String lSplitter = &quot;\n&quot;;
+
+    // ledger manager factory class
+<span class="nc" id="L47">    private final String managerFactoryClass;</span>
+    // ledger manager version
+<span class="nc" id="L49">    private final int managerVersion;</span>
+
+    // layout version of how to store layout information
+<span class="nc" id="L52">    private final int layoutFormatVersion;</span>
+
+    /**
+     * Ledger Layout Constructor.
+     *
+     * @param managerFactoryCls
+     *          Ledger Manager Factory Class
+     * @param managerVersion
+     *          Ledger Manager Version
+     */
+    public LedgerLayout(String managerFactoryCls, int managerVersion) {
+<span class="nc" id="L63">        this(managerFactoryCls, managerVersion, LAYOUT_FORMAT_VERSION);</span>
+<span class="nc" id="L64">    }</span>
+
+    LedgerLayout(String managerFactoryCls, int managerVersion,
+<span class="nc" id="L67">                 int layoutVersion) {</span>
+<span class="nc" id="L68">        this.managerFactoryClass = managerFactoryCls;</span>
+<span class="nc" id="L69">        this.managerVersion = managerVersion;</span>
+<span class="nc" id="L70">        this.layoutFormatVersion = layoutVersion;</span>
+<span class="nc" id="L71">    }</span>
+
+    /**
+     * Generates a byte array based on the LedgerLayout object.
+     *
+     * @return byte[]
+     */
+    public byte[] serialize() throws IOException {
+<span class="nc" id="L79">        String s =</span>
+<span class="nc" id="L80">          new StringBuilder().append(layoutFormatVersion).append(lSplitter)</span>
+<span class="nc" id="L81">              .append(managerFactoryClass).append(splitter).append(managerVersion).toString();</span>
+
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L84">            log.debug(&quot;Serialized layout info: {}&quot;, s);</span>
+        }
+<span class="nc" id="L86">        return s.getBytes(StandardCharsets.UTF_8);</span>
+    }
+
+    /**
+     * Parses a given byte array and transforms into a LedgerLayout object.
+     *
+     * @param bytes
+     *          byte array to parse
+     * @return LedgerLayout
+     * @throws IOException
+     *             if the given byte[] cannot be parsed
+     */
+    public static LedgerLayout parseLayout(byte[] bytes) throws IOException {
+<span class="nc" id="L99">        String layout = new String(bytes, StandardCharsets.UTF_8);</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L101">            log.debug(&quot;Parsing Layout: {}&quot;, layout);</span>
+        }
+
+<span class="nc" id="L104">        String[] lines = layout.split(lSplitter);</span>
+
+        try {
+<span class="nc" id="L107">            int layoutFormatVersion = Integer.parseInt(lines[0]);</span>
+<span class="nc bnc" id="L108" title="All 4 branches missed.">            if (LAYOUT_FORMAT_VERSION &lt; layoutFormatVersion || LAYOUT_MIN_COMPAT_VERSION &gt; layoutFormatVersion) {</span>
+<span class="nc" id="L109">                throw new IOException(&quot;Metadata version not compatible. Expected &quot;</span>
+                        + LAYOUT_FORMAT_VERSION + &quot;, but got &quot; + layoutFormatVersion);
+            }
+
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (lines.length &lt; 2) {</span>
+<span class="nc" id="L114">                throw new IOException(&quot;Ledger manager and its version absent from layout: &quot; + layout);</span>
+            }
+
+<span class="nc" id="L117">            String[] parts = lines[1].split(splitter);</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            if (parts.length != 2) {</span>
+<span class="nc" id="L119">                throw new IOException(&quot;Invalid Ledger Manager defined in layout : &quot; + layout);</span>
+            }
+            // ledger manager factory class
+<span class="nc" id="L122">            String managerFactoryCls = parts[0];</span>
+            // ledger manager version
+<span class="nc" id="L124">            int managerVersion = Integer.parseInt(parts[1]);</span>
+<span class="nc" id="L125">            return new LedgerLayout(managerFactoryCls, managerVersion, layoutFormatVersion);</span>
+<span class="nc" id="L126">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L127">            throw new IOException(&quot;Could not parse layout '&quot; + layout + &quot;'&quot;, e);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

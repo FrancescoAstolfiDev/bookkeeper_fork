@@ -1,0 +1,692 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RegionAwareEnsemblePlacementPolicy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">RegionAwareEnsemblePlacementPolicy.java</span></div><h1>RegionAwareEnsemblePlacementPolicy.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.client;
+
+import io.netty.util.HashedWheelTimer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.feature.Feature;
+import org.apache.bookkeeper.feature.FeatureProvider;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.net.BookieNode;
+import org.apache.bookkeeper.net.DNSToSwitchMapping;
+import org.apache.bookkeeper.net.NetworkTopology;
+import org.apache.bookkeeper.net.NetworkTopologyImpl;
+import org.apache.bookkeeper.net.Node;
+import org.apache.bookkeeper.net.NodeBase;
+import org.apache.bookkeeper.proto.BookieAddressResolver;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.BookKeeperConstants;
+import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A placement policy use region information in the network topology for placing ensembles.
+ *
+ * @see EnsemblePlacementPolicy
+ */
+public class RegionAwareEnsemblePlacementPolicy extends RackawareEnsemblePlacementPolicy {
+<span class="nc" id="L54">    static final Logger LOG = LoggerFactory.getLogger(RegionAwareEnsemblePlacementPolicy.class);</span>
+
+    public static final String REPP_REGIONS_TO_WRITE = &quot;reppRegionsToWrite&quot;;
+    public static final String REPP_MINIMUM_REGIONS_FOR_DURABILITY = &quot;reppMinimumRegionsForDurability&quot;;
+    public static final String REPP_ENABLE_DURABILITY_ENFORCEMENT_IN_REPLACE =
+        &quot;reppEnableDurabilityEnforcementInReplace&quot;;
+    public static final String REPP_DISABLE_DURABILITY_FEATURE_NAME = &quot;reppDisableDurabilityFeatureName&quot;;
+    public static final String REPP_DISALLOW_BOOKIE_PLACEMENT_IN_REGION_FEATURE_NAME =
+        &quot;reppDisallowBookiePlacementInRegionFeatureName&quot;;
+    public static final String REPP_DISABLE_DURABILITY_ENFORCEMENT_FEATURE = &quot;reppDisableDurabilityEnforcementFeature&quot;;
+    public static final String REPP_ENABLE_VALIDATION = &quot;reppEnableValidation&quot;;
+    public static final String REGION_AWARE_ANOMALOUS_ENSEMBLE = &quot;region_aware_anomalous_ensemble&quot;;
+    static final int MINIMUM_REGIONS_FOR_DURABILITY_DEFAULT = 2;
+    static final int REGIONID_DISTANCE_FROM_LEAVES = 2;
+    static final String UNKNOWN_REGION = &quot;UnknownRegion&quot;;
+    static final int REMOTE_NODE_IN_REORDER_SEQUENCE = 2;
+
+    protected final Map&lt;String, TopologyAwareEnsemblePlacementPolicy&gt; perRegionPlacement;
+    protected final ConcurrentMap&lt;BookieId, String&gt; address2Region;
+    protected FeatureProvider featureProvider;
+    protected String disallowBookiePlacementInRegionFeatureName;
+<span class="nc" id="L75">    protected String myRegion = null;</span>
+<span class="nc" id="L76">    protected int minRegionsForDurability = 0;</span>
+<span class="nc" id="L77">    protected boolean enableValidation = true;</span>
+<span class="nc" id="L78">    protected boolean enforceDurabilityInReplace = false;</span>
+    protected Feature disableDurabilityFeature;
+<span class="nc" id="L80">    private int lastRegionIndex = 0;</span>
+
+    RegionAwareEnsemblePlacementPolicy() {
+<span class="nc" id="L83">        super();</span>
+<span class="nc" id="L84">        perRegionPlacement = new HashMap&lt;String, TopologyAwareEnsemblePlacementPolicy&gt;();</span>
+<span class="nc" id="L85">        address2Region = new ConcurrentHashMap&lt;BookieId, String&gt;();</span>
+<span class="nc" id="L86">    }</span>
+
+    protected String getLocalRegion(BookieNode node) {
+<span class="nc bnc" id="L89" title="All 4 branches missed.">        if (null == node || null == node.getAddr()) {</span>
+<span class="nc" id="L90">            return UNKNOWN_REGION;</span>
+        }
+<span class="nc" id="L92">        return getRegion(node.getAddr());</span>
+    }
+
+    protected String getRegion(BookieId addr) {
+<span class="nc" id="L96">        String region = address2Region.get(addr);</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        if (null == region) {</span>
+<span class="nc" id="L98">            region = parseBookieRegion(addr);</span>
+<span class="nc" id="L99">            address2Region.putIfAbsent(addr, region);</span>
+        }
+<span class="nc" id="L101">        return region;</span>
+    }
+
+    protected String parseBookieRegion(BookieId addr) {
+<span class="nc" id="L105">        String networkLocation = resolveNetworkLocation(addr);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        if (NetworkTopology.DEFAULT_REGION_AND_RACK.equals(networkLocation)) {</span>
+<span class="nc" id="L107">            return UNKNOWN_REGION;</span>
+        } else {
+<span class="nc" id="L109">            String[] parts = networkLocation.split(NodeBase.PATH_SEPARATOR_STR);</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">            if (parts.length &lt;= 1) {</span>
+<span class="nc" id="L111">                return UNKNOWN_REGION;</span>
+            } else {
+<span class="nc" id="L113">                return parts[1];</span>
+            }
+        }
+    }
+
+    @Override
+    public void handleBookiesThatLeft(Set&lt;BookieId&gt; leftBookies) {
+        // case 1: (In some situation, eg, Broker and bookie restart concurrently.)
+        //1. Bookie X join cluster for the first time, encounters a region exception, and `address2Region` record X's
+        // region as default-region.
+        //2. Bookie X left cluster and is removed from knownBookies, but address2Region retains the information of
+        // bookie X.
+        //3. update Bookie X's rack info, and calling `onBookieRackChange` will only update address2Region for
+        // addresses present in knownBookies; therefore, bookie X's region info is not updated.
+        //4. Bookie X join cluster again, since address2Region contains the previous default-region information,
+        // getRegion will directly use cached data, resulting of an incorrect region.
+
+        // The bookie region is initialized to &quot;default-region&quot; in address2Region.
+        // We should ensure that when a bookie leaves the cluster,
+        // we also clean up the corresponding region information for that bookie in address2Region,
+        // so that it can update the correct region for the bookie during onBookieRackChange and
+        // handleBookiesThatJoined.
+        // to avoid traffic skew in ensemble selection.
+<span class="nc" id="L136">        leftBookies.forEach(address2Region::remove);</span>
+<span class="nc" id="L137">        super.handleBookiesThatLeft(leftBookies);</span>
+
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        for (TopologyAwareEnsemblePlacementPolicy policy: perRegionPlacement.values()) {</span>
+<span class="nc" id="L140">            policy.handleBookiesThatLeft(leftBookies);</span>
+<span class="nc" id="L141">        }</span>
+<span class="nc" id="L142">    }</span>
+
+    @Override
+    public void handleBookiesThatJoined(Set&lt;BookieId&gt; joinedBookies) {
+<span class="nc" id="L146">        Map&lt;String, Set&lt;BookieId&gt;&gt; perRegionClusterChange = new HashMap&lt;String, Set&lt;BookieId&gt;&gt;();</span>
+
+        // node joined
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        for (BookieId addr : joinedBookies) {</span>
+<span class="nc" id="L150">            BookieNode node = createBookieNode(addr);</span>
+<span class="nc" id="L151">            topology.add(node);</span>
+<span class="nc" id="L152">            knownBookies.put(addr, node);</span>
+<span class="nc" id="L153">            historyBookies.put(addr, node);</span>
+<span class="nc" id="L154">            String region = getLocalRegion(node);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            if (null == perRegionPlacement.get(region)) {</span>
+<span class="nc" id="L156">                perRegionPlacement.put(region, new RackawareEnsemblePlacementPolicy()</span>
+<span class="nc" id="L157">                        .initialize(dnsResolver, timer, this.reorderReadsRandom, this.stabilizePeriodSeconds,</span>
+                                this.reorderThresholdPendingRequests, this.isWeighted, this.maxWeightMultiple,
+                                this.minNumRacksPerWriteQuorum, this.enforceMinNumRacksPerWriteQuorum,
+                                this.ignoreLocalNodeInPlacementPolicy,
+                                this.useHostnameResolveLocalNodePlacementPolicy, statsLogger, bookieAddressResolver)
+<span class="nc" id="L162">                        .withDefaultRack(NetworkTopology.DEFAULT_REGION_AND_RACK));</span>
+            }
+
+<span class="nc" id="L165">            Set&lt;BookieId&gt; regionSet = perRegionClusterChange.get(region);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if (null == regionSet) {</span>
+<span class="nc" id="L167">                regionSet = new HashSet&lt;BookieId&gt;();</span>
+<span class="nc" id="L168">                regionSet.add(addr);</span>
+<span class="nc" id="L169">                perRegionClusterChange.put(region, regionSet);</span>
+            } else {
+<span class="nc" id="L171">                regionSet.add(addr);</span>
+            }
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L175">                LOG.debug(&quot;Cluster changed : bookie {} joined the cluster.&quot;, addr);</span>
+            }
+<span class="nc" id="L177">        }</span>
+
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        for (Map.Entry&lt;String, TopologyAwareEnsemblePlacementPolicy&gt; regionEntry : perRegionPlacement.entrySet()) {</span>
+<span class="nc" id="L180">            Set&lt;BookieId&gt; regionSet = perRegionClusterChange.get(regionEntry.getKey());</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            if (null == regionSet) {</span>
+<span class="nc" id="L182">                regionSet = new HashSet&lt;BookieId&gt;();</span>
+            }
+<span class="nc" id="L184">            regionEntry.getValue().handleBookiesThatJoined(regionSet);</span>
+<span class="nc" id="L185">        }</span>
+<span class="nc" id="L186">    }</span>
+
+    @Override
+    public void onBookieRackChange(List&lt;BookieId&gt; bookieAddressList) {
+<span class="nc" id="L190">        rwLock.writeLock().lock();</span>
+        try {
+<span class="nc" id="L192">            bookieAddressList.forEach(bookieAddress -&gt; {</span>
+                try {
+<span class="nc" id="L194">                    BookieNode node = knownBookies.get(bookieAddress);</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                    if (node != null) {</span>
+                        // refresh the rack info if its a known bookie
+<span class="nc" id="L197">                        BookieNode newNode = createBookieNode(bookieAddress);</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                        if (!newNode.getNetworkLocation().equals(node.getNetworkLocation())) {</span>
+<span class="nc" id="L199">                            topology.remove(node);</span>
+<span class="nc" id="L200">                            topology.add(newNode);</span>
+<span class="nc" id="L201">                            knownBookies.put(bookieAddress, newNode);</span>
+<span class="nc" id="L202">                            historyBookies.put(bookieAddress, newNode);</span>
+                        }
+                        //Handle per region placement policy.
+<span class="nc" id="L205">                        String oldRegion = getRegion(bookieAddress);</span>
+<span class="nc" id="L206">                        String newRegion = parseBookieRegion(newNode.getAddr());</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                        if (oldRegion.equals(newRegion)) {</span>
+<span class="nc" id="L208">                            TopologyAwareEnsemblePlacementPolicy regionPlacement = perRegionPlacement.get(oldRegion);</span>
+<span class="nc" id="L209">                            regionPlacement.onBookieRackChange(Collections.singletonList(bookieAddress));</span>
+<span class="nc" id="L210">                        } else {</span>
+<span class="nc" id="L211">                            address2Region.put(bookieAddress, newRegion);</span>
+<span class="nc" id="L212">                            TopologyAwareEnsemblePlacementPolicy oldRegionPlacement = perRegionPlacement.get(oldRegion);</span>
+<span class="nc" id="L213">                            oldRegionPlacement.handleBookiesThatLeft(Collections.singleton(bookieAddress));</span>
+<span class="nc" id="L214">                            TopologyAwareEnsemblePlacementPolicy newRegionPlacement = perRegionPlacement.get(</span>
+                                    newRegion);
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                            if (newRegionPlacement == null) {</span>
+<span class="nc" id="L217">                                newRegionPlacement = new RackawareEnsemblePlacementPolicy()</span>
+<span class="nc" id="L218">                                        .initialize(dnsResolver, timer, this.reorderReadsRandom,</span>
+                                                this.stabilizePeriodSeconds, this.reorderThresholdPendingRequests,
+                                                this.isWeighted, this.maxWeightMultiple,
+                                                this.minNumRacksPerWriteQuorum, this.enforceMinNumRacksPerWriteQuorum,
+                                                this.ignoreLocalNodeInPlacementPolicy,
+                                                this.useHostnameResolveLocalNodePlacementPolicy, statsLogger,
+                                                bookieAddressResolver)
+<span class="nc" id="L225">                                        .withDefaultRack(NetworkTopology.DEFAULT_REGION_AND_RACK);</span>
+<span class="nc" id="L226">                                perRegionPlacement.put(newRegion, newRegionPlacement);</span>
+                            }
+<span class="nc" id="L228">                            newRegionPlacement.handleBookiesThatJoined(Collections.singleton(bookieAddress));</span>
+                        }
+                    }
+<span class="nc" id="L231">                } catch (IllegalArgumentException | NetworkTopologyImpl.InvalidTopologyException e) {</span>
+<span class="nc" id="L232">                    LOG.error(&quot;Failed to update bookie rack info: {} &quot;, bookieAddress, e);</span>
+<span class="nc" id="L233">                }</span>
+<span class="nc" id="L234">            });</span>
+        } finally {
+<span class="nc" id="L236">            rwLock.writeLock().unlock();</span>
+        }
+<span class="nc" id="L238">    }</span>
+
+    @Override
+    public RegionAwareEnsemblePlacementPolicy initialize(ClientConfiguration conf,
+                                                         Optional&lt;DNSToSwitchMapping&gt; optionalDnsResolver,
+                                                         HashedWheelTimer timer,
+                                                         FeatureProvider featureProvider,
+                                                         StatsLogger statsLogger,
+                                                         BookieAddressResolver bookieAddressResolver) {
+<span class="nc" id="L247">        super.initialize(conf, optionalDnsResolver, timer, featureProvider, statsLogger, bookieAddressResolver)</span>
+<span class="nc" id="L248">                .withDefaultRack(NetworkTopology.DEFAULT_REGION_AND_RACK);</span>
+<span class="nc" id="L249">        myRegion = getLocalRegion(localNode);</span>
+<span class="nc" id="L250">        enableValidation = conf.getBoolean(REPP_ENABLE_VALIDATION, true);</span>
+        // We have to statically provide regions we want the writes to go through and how many regions
+        // are required for durability. This decision cannot be driven by the active bookies as the
+        // current topology will not be indicative of constraints that must be enforced for durability
+<span class="nc" id="L254">        String regionsString = conf.getString(REPP_REGIONS_TO_WRITE, null);</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (null != regionsString) {</span>
+            // Regions are specified as
+            // R1;R2;...
+<span class="nc" id="L258">            String[] regions = regionsString.split(&quot;;&quot;);</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">            for (String region : regions) {</span>
+<span class="nc" id="L260">                perRegionPlacement.put(region, new RackawareEnsemblePlacementPolicy(true)</span>
+<span class="nc" id="L261">                        .initialize(dnsResolver, timer, this.reorderReadsRandom, this.stabilizePeriodSeconds,</span>
+                                this.reorderThresholdPendingRequests, this.isWeighted, this.maxWeightMultiple,
+                                this.minNumRacksPerWriteQuorum, this.enforceMinNumRacksPerWriteQuorum,
+                                this.ignoreLocalNodeInPlacementPolicy, this.useHostnameResolveLocalNodePlacementPolicy,
+                                statsLogger, bookieAddressResolver)
+<span class="nc" id="L266">                        .withDefaultRack(NetworkTopology.DEFAULT_REGION_AND_RACK));</span>
+            }
+<span class="nc" id="L268">            minRegionsForDurability = conf.getInt(REPP_MINIMUM_REGIONS_FOR_DURABILITY,</span>
+                    MINIMUM_REGIONS_FOR_DURABILITY_DEFAULT);
+<span class="nc bnc" id="L270" title="All 2 branches missed.">            if (minRegionsForDurability &gt; 0) {</span>
+<span class="nc" id="L271">                enforceDurability = true;</span>
+<span class="nc" id="L272">                enforceDurabilityInReplace = conf.getBoolean(REPP_ENABLE_DURABILITY_ENFORCEMENT_IN_REPLACE, true);</span>
+            }
+<span class="nc bnc" id="L274" title="All 2 branches missed.">            if (regions.length &lt; minRegionsForDurability) {</span>
+<span class="nc" id="L275">                throw new IllegalArgumentException(</span>
+                        &quot;Regions provided are insufficient to meet the durability constraints&quot;);
+            }
+        }
+<span class="nc" id="L279">        this.featureProvider = featureProvider;</span>
+<span class="nc" id="L280">        this.disallowBookiePlacementInRegionFeatureName =</span>
+<span class="nc" id="L281">            conf.getString(REPP_DISALLOW_BOOKIE_PLACEMENT_IN_REGION_FEATURE_NAME);</span>
+<span class="nc" id="L282">        this.disableDurabilityFeature = conf.getFeature(REPP_DISABLE_DURABILITY_ENFORCEMENT_FEATURE, null);</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (null == disableDurabilityFeature) {</span>
+<span class="nc" id="L284">            this.disableDurabilityFeature =</span>
+<span class="nc" id="L285">                    featureProvider.getFeature(</span>
+<span class="nc" id="L286">                        conf.getString(REPP_DISABLE_DURABILITY_FEATURE_NAME,</span>
+                                BookKeeperConstants.FEATURE_REPP_DISABLE_DURABILITY_ENFORCEMENT));
+        }
+<span class="nc" id="L289">        return this;</span>
+    }
+
+    protected List&lt;BookieNode&gt; selectRandomFromRegions(Set&lt;String&gt; availableRegions,
+                                            int numBookies,
+                                            Set&lt;Node&gt; excludeBookies,
+                                            Predicate&lt;BookieNode&gt; predicate,
+                                            Ensemble&lt;BookieNode&gt; ensemble)
+        throws BKException.BKNotEnoughBookiesException {
+<span class="nc" id="L298">        List&lt;BookieNode&gt; availableBookies = new ArrayList&lt;BookieNode&gt;();</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        for (BookieNode bookieNode: knownBookies.values()) {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            if (availableRegions.contains(getLocalRegion(bookieNode))) {</span>
+<span class="nc" id="L301">                availableBookies.add(bookieNode);</span>
+            }
+<span class="nc" id="L303">        }</span>
+
+<span class="nc" id="L305">        return selectRandomInternal(availableBookies,  numBookies, excludeBookies, predicate, ensemble);</span>
+    }
+
+
+    @Override
+    public PlacementResult&lt;List&lt;BookieId&gt;&gt; newEnsemble(int ensembleSize, int writeQuorumSize,
+            int ackQuorumSize, Map&lt;String, byte[]&gt; customMetadata, Set&lt;BookieId&gt; excludedBookies)
+            throws BKException.BKNotEnoughBookiesException {
+
+<span class="nc bnc" id="L314" title="All 2 branches missed.">        int effectiveMinRegionsForDurability = disableDurabilityFeature.isAvailable() ? 1 : minRegionsForDurability;</span>
+
+        // All of these conditions indicate bad configuration
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (ackQuorumSize &lt; effectiveMinRegionsForDurability) {</span>
+<span class="nc" id="L318">            throw new IllegalArgumentException(</span>
+                    &quot;Ack Quorum size provided are insufficient to meet the durability constraints&quot;);
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        } else if (ensembleSize &lt; writeQuorumSize) {</span>
+<span class="nc" id="L321">            throw new IllegalArgumentException(</span>
+                    &quot;write quorum (&quot; + writeQuorumSize + &quot;) cannot exceed ensemble size (&quot; + ensembleSize + &quot;)&quot;);
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        } else if (writeQuorumSize &lt; ackQuorumSize) {</span>
+<span class="nc" id="L324">            throw new IllegalArgumentException(</span>
+                    &quot;ack quorum (&quot; + ackQuorumSize + &quot;) cannot exceed write quorum size (&quot; + writeQuorumSize + &quot;)&quot;);
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        } else if (effectiveMinRegionsForDurability &gt; 0) {</span>
+            // We must survive the failure of numRegions - effectiveMinRegionsForDurability. When these
+            // regions have failed we would spread the replicas over the remaining
+            // effectiveMinRegionsForDurability regions; we have to make sure that the ack quorum is large
+            // enough such that there is a configuration for spreading the replicas across
+            // effectiveMinRegionsForDurability - 1 regions
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            if (ackQuorumSize &lt;= (writeQuorumSize - (writeQuorumSize / effectiveMinRegionsForDurability))) {</span>
+<span class="nc" id="L333">                throw new IllegalArgumentException(&quot;ack quorum (&quot; + ackQuorumSize + &quot;) &quot;</span>
+                    + &quot;violates the requirement to satisfy durability constraints when running in degraded mode&quot;);
+            }
+        }
+
+<span class="nc" id="L338">        rwLock.readLock().lock();</span>
+        try {
+<span class="nc" id="L340">            Set&lt;BookieId&gt; comprehensiveExclusionBookiesSet = addDefaultRackBookiesIfMinNumRacksIsEnforced(</span>
+                    excludedBookies);
+<span class="nc" id="L342">            Set&lt;Node&gt; excludeNodes = convertBookiesToNodes(comprehensiveExclusionBookiesSet);</span>
+<span class="nc" id="L343">            List&lt;String&gt; availableRegions = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">            for (Map.Entry&lt;String, TopologyAwareEnsemblePlacementPolicy&gt; entry : perRegionPlacement.entrySet()) {</span>
+<span class="nc" id="L345">                String region = entry.getKey();</span>
+<span class="nc bnc" id="L346" title="All 4 branches missed.">                if (!entry.getValue().knownBookies.isEmpty() &amp;&amp; (null == disallowBookiePlacementInRegionFeatureName</span>
+<span class="nc" id="L347">                        || !featureProvider.scope(region).getFeature(disallowBookiePlacementInRegionFeatureName)</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">                            .isAvailable())) {</span>
+<span class="nc" id="L349">                    availableRegions.add(region);</span>
+                }
+<span class="nc" id="L351">            }</span>
+<span class="nc" id="L352">            int numRegionsAvailable = availableRegions.size();</span>
+
+            // If we were unable to get region information or all regions are disallowed which is
+            // an invalid configuration; default to random selection from the set of nodes
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            if (numRegionsAvailable &lt; 1) {</span>
+                // We cant disallow all regions; if we did, raise an alert to draw attention
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                if (perRegionPlacement.keySet().size() &gt;= 1) {</span>
+<span class="nc" id="L359">                    LOG.error(&quot;No regions available, invalid configuration&quot;);</span>
+                }
+<span class="nc" id="L361">                List&lt;BookieNode&gt; bns = selectRandom(ensembleSize, excludeNodes, TruePredicate.INSTANCE,</span>
+                    EnsembleForReplacementWithNoConstraints.INSTANCE);
+<span class="nc" id="L363">                ArrayList&lt;BookieId&gt; addrs = new ArrayList&lt;BookieId&gt;(ensembleSize);</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">                for (BookieNode bn : bns) {</span>
+<span class="nc" id="L365">                    addrs.add(bn.getAddr());</span>
+<span class="nc" id="L366">                }</span>
+<span class="nc" id="L367">                return PlacementResult.of(addrs,</span>
+<span class="nc" id="L368">                                          isEnsembleAdheringToPlacementPolicy(</span>
+                                                  addrs, writeQuorumSize, ackQuorumSize));
+            }
+
+            // Single region, fall back to RackAwareEnsemblePlacement
+<span class="nc bnc" id="L373" title="All 2 branches missed.">            if (numRegionsAvailable &lt; 2) {</span>
+<span class="nc" id="L374">                RRTopologyAwareCoverageEnsemble ensemble = new RRTopologyAwareCoverageEnsemble(ensembleSize,</span>
+                        writeQuorumSize, ackQuorumSize, REGIONID_DISTANCE_FROM_LEAVES,
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                        effectiveMinRegionsForDurability &gt; 0 ? new HashSet&lt;&gt;(perRegionPlacement.keySet()) : null,</span>
+                        effectiveMinRegionsForDurability, minNumRacksPerWriteQuorum);
+<span class="nc" id="L378">                TopologyAwareEnsemblePlacementPolicy nextPolicy = perRegionPlacement.get(</span>
+<span class="nc" id="L379">                        availableRegions.iterator().next());</span>
+<span class="nc" id="L380">                return nextPolicy.newEnsemble(ensembleSize, writeQuorumSize, writeQuorumSize,</span>
+                        comprehensiveExclusionBookiesSet, ensemble, ensemble);
+            }
+
+<span class="nc" id="L384">            int remainingEnsemble = ensembleSize;</span>
+<span class="nc" id="L385">            int remainingWriteQuorum = writeQuorumSize;</span>
+
+            // Equally distribute the nodes across all regions to whatever extent possible
+            // with the hierarchy in mind
+            // Try and place as many nodes in a region as possible, the ones that cannot be
+            // accommodated are placed on other regions
+            // Within each region try and follow rack aware placement
+<span class="nc" id="L392">            Map&lt;String, Pair&lt;Integer, Integer&gt;&gt; regionsWiseAllocation = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">            for (String region: availableRegions) {</span>
+<span class="nc" id="L394">                regionsWiseAllocation.put(region, Pair.of(0, 0));</span>
+<span class="nc" id="L395">            }</span>
+            int remainingEnsembleBeforeIteration;
+            int numRemainingRegions;
+<span class="nc" id="L398">            Set&lt;String&gt; regionsReachedMaxAllocation = new HashSet&lt;String&gt;();</span>
+            RRTopologyAwareCoverageEnsemble ensemble;
+            do {
+<span class="nc" id="L401">                numRemainingRegions = numRegionsAvailable - regionsReachedMaxAllocation.size();</span>
+<span class="nc" id="L402">                ensemble = new RRTopologyAwareCoverageEnsemble(ensembleSize, writeQuorumSize, ackQuorumSize,</span>
+                        REGIONID_DISTANCE_FROM_LEAVES,
+                        // We pass all regions we know off to the coverage ensemble as
+                        // regardless of regions that are available; constraints are
+                        // always applied based on all possible regions
+<span class="nc bnc" id="L407" title="All 2 branches missed.">                        effectiveMinRegionsForDurability &gt; 0 ? new HashSet&lt;&gt;(perRegionPlacement.keySet()) : null,</span>
+                        effectiveMinRegionsForDurability, minNumRacksPerWriteQuorum);
+<span class="nc" id="L409">                remainingEnsembleBeforeIteration = remainingEnsemble;</span>
+<span class="nc" id="L410">                int regionsToAllocate = numRemainingRegions;</span>
+<span class="nc" id="L411">                int startRegionIndex = lastRegionIndex % numRegionsAvailable;</span>
+<span class="nc" id="L412">                int localRegionIndex = -1;</span>
+<span class="nc bnc" id="L413" title="All 4 branches missed.">                if (myRegion != null &amp;&amp; !UNKNOWN_REGION.equals(myRegion)) {</span>
+<span class="nc" id="L414">                    localRegionIndex = availableRegions.indexOf(myRegion);</span>
+                }
+<span class="nc" id="L416">                String region = myRegion;</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                for (int i = 0; i &lt; numRegionsAvailable; ++i) {</span>
+                    // select the local region first, and for the rest region select, use round-robin selection.
+<span class="nc bnc" id="L419" title="All 4 branches missed.">                    if (i &gt; 0 || localRegionIndex == -1) {</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">                        if (startRegionIndex % numRegionsAvailable == localRegionIndex) {</span>
+<span class="nc" id="L421">                            startRegionIndex++;</span>
+                        }
+<span class="nc" id="L423">                        region = availableRegions.get(startRegionIndex % numRegionsAvailable);</span>
+<span class="nc" id="L424">                        startRegionIndex++;</span>
+                    }
+<span class="nc" id="L426">                    final Pair&lt;Integer, Integer&gt; currentAllocation = regionsWiseAllocation.get(region);</span>
+<span class="nc" id="L427">                    TopologyAwareEnsemblePlacementPolicy policyWithinRegion = perRegionPlacement.get(region);</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">                    if (!regionsReachedMaxAllocation.contains(region)) {</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">                        if (numRemainingRegions &lt;= 0) {</span>
+<span class="nc" id="L430">                            LOG.error(&quot;Inconsistent State: This should never happen&quot;);</span>
+<span class="nc" id="L431">                            throw new BKException.BKNotEnoughBookiesException();</span>
+                        }
+                        // try to place the bookies as balance as possible across all the regions
+<span class="nc" id="L434">                        int addToEnsembleSize = Math.min(remainingEnsemble, remainingEnsemble / regionsToAllocate</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">                                + (remainingEnsemble % regionsToAllocate == 0 ? 0 : 1));</span>
+<span class="nc" id="L436">                        boolean success = false;</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">                        while (addToEnsembleSize &gt; 0) {</span>
+<span class="nc" id="L438">                            int addToWriteQuorum = Math.max(1, Math.min(remainingWriteQuorum,</span>
+<span class="nc" id="L439">                                        Math.round(1.0f * writeQuorumSize * addToEnsembleSize / ensembleSize)));</span>
+                            // Temp ensemble will be merged back into the ensemble only if we are able to successfully
+                            // allocate the target number of bookies in this region; if we fail because we dont have
+                            // enough bookies; then we retry the process with a smaller target
+<span class="nc" id="L443">                            RRTopologyAwareCoverageEnsemble tempEnsemble =</span>
+                                new RRTopologyAwareCoverageEnsemble(ensemble);
+<span class="nc" id="L445">                            int newEnsembleSize = currentAllocation.getLeft() + addToEnsembleSize;</span>
+<span class="nc" id="L446">                            int newWriteQuorumSize = currentAllocation.getRight() + addToWriteQuorum;</span>
+                            try {
+<span class="nc" id="L448">                                List&lt;BookieId&gt; allocated = policyWithinRegion</span>
+<span class="nc" id="L449">                                        .newEnsemble(newEnsembleSize, newWriteQuorumSize, newWriteQuorumSize,</span>
+                                                comprehensiveExclusionBookiesSet, tempEnsemble, tempEnsemble)
+<span class="nc" id="L451">                                        .getResult();</span>
+<span class="nc" id="L452">                                ensemble = tempEnsemble;</span>
+<span class="nc" id="L453">                                remainingEnsemble -= addToEnsembleSize;</span>
+<span class="nc" id="L454">                                remainingWriteQuorum -= addToWriteQuorum;</span>
+<span class="nc" id="L455">                                regionsWiseAllocation.put(region, Pair.of(newEnsembleSize, newWriteQuorumSize));</span>
+<span class="nc" id="L456">                                success = true;</span>
+<span class="nc" id="L457">                                regionsToAllocate--;</span>
+<span class="nc" id="L458">                                lastRegionIndex = startRegionIndex;</span>
+<span class="nc" id="L459">                                LOG.info(&quot;Region {} allocating bookies with ensemble size {} &quot;</span>
+                                        + &quot;and write quorum size {} : {}&quot;,
+<span class="nc" id="L461">                                        region, newEnsembleSize, newWriteQuorumSize, allocated);</span>
+<span class="nc" id="L462">                                break;</span>
+<span class="nc" id="L463">                            } catch (BKException.BKNotEnoughBookiesException exc) {</span>
+<span class="nc" id="L464">                                LOG.warn(&quot;Could not allocate {} bookies in region {}, try allocating {} bookies&quot;,</span>
+<span class="nc" id="L465">                                        newEnsembleSize, region, (newEnsembleSize - 1));</span>
+<span class="nc" id="L466">                                addToEnsembleSize--;</span>
+                            }
+<span class="nc" id="L468">                        }</span>
+
+                        // we couldn't allocate additional bookies from the region,
+                        // it should have reached its max allocation.
+<span class="nc bnc" id="L472" title="All 2 branches missed.">                        if (!success) {</span>
+<span class="nc" id="L473">                            regionsReachedMaxAllocation.add(region);</span>
+                        }
+                    }
+
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                    if (regionsReachedMaxAllocation.contains(region)) {</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">                        if (currentAllocation.getLeft() &gt; 0) {</span>
+<span class="nc" id="L479">                            LOG.info(&quot;Allocating {} bookies in region {} : ensemble {} exclude {}&quot;,</span>
+<span class="nc" id="L480">                                    currentAllocation.getLeft(), region, comprehensiveExclusionBookiesSet, ensemble);</span>
+<span class="nc" id="L481">                            policyWithinRegion.newEnsemble(</span>
+<span class="nc" id="L482">                                    currentAllocation.getLeft(),</span>
+<span class="nc" id="L483">                                    currentAllocation.getRight(),</span>
+<span class="nc" id="L484">                                    currentAllocation.getRight(),</span>
+                                    comprehensiveExclusionBookiesSet,
+                                    ensemble,
+                                    ensemble);
+<span class="nc" id="L488">                            LOG.info(&quot;Allocated {} bookies in region {} : {}&quot;,</span>
+<span class="nc" id="L489">                                    currentAllocation.getLeft(), region, ensemble);</span>
+                        }
+                    }
+                }
+
+<span class="nc bnc" id="L494" title="All 2 branches missed.">                if (regionsReachedMaxAllocation.containsAll(regionsWiseAllocation.keySet())) {</span>
+<span class="nc" id="L495">                    break;</span>
+                }
+<span class="nc bnc" id="L497" title="All 4 branches missed.">            } while ((remainingEnsemble &gt; 0) &amp;&amp; (remainingEnsemble &lt; remainingEnsembleBeforeIteration));</span>
+
+<span class="nc" id="L499">            List&lt;BookieId&gt; bookieList = ensemble.toList();</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">            if (ensembleSize != bookieList.size()) {</span>
+<span class="nc" id="L501">                LOG.error(&quot;Not enough {} bookies are available to form an ensemble : {}.&quot;,</span>
+<span class="nc" id="L502">                          ensembleSize, bookieList);</span>
+<span class="nc" id="L503">                throw new BKException.BKNotEnoughBookiesException();</span>
+            }
+
+<span class="nc bnc" id="L506" title="All 4 branches missed.">            if (enableValidation &amp;&amp; !ensemble.validate()) {</span>
+<span class="nc" id="L507">                LOG.error(&quot;Not enough {} bookies are available to form a valid ensemble : {}.&quot;,</span>
+<span class="nc" id="L508">                    ensembleSize, bookieList);</span>
+<span class="nc" id="L509">                throw new BKException.BKNotEnoughBookiesException();</span>
+            }
+<span class="nc" id="L511">            LOG.info(&quot;Bookies allocated successfully {}&quot;, ensemble);</span>
+<span class="nc" id="L512">            List&lt;BookieId&gt; ensembleList = ensemble.toList();</span>
+<span class="nc" id="L513">            return PlacementResult.of(ensembleList,</span>
+<span class="nc" id="L514">                    isEnsembleAdheringToPlacementPolicy(ensembleList, writeQuorumSize, ackQuorumSize));</span>
+        } finally {
+<span class="nc" id="L516">            rwLock.readLock().unlock();</span>
+        }
+    }
+
+    @Override
+    public PlacementResult&lt;BookieId&gt; replaceBookie(int ensembleSize, int writeQuorumSize, int ackQuorumSize,
+            Map&lt;String, byte[]&gt; customMetadata, List&lt;BookieId&gt; currentEnsemble,
+            BookieId bookieToReplace, Set&lt;BookieId&gt; excludeBookies)
+            throws BKException.BKNotEnoughBookiesException {
+<span class="nc" id="L525">        rwLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L527" title="All 4 branches missed.">            boolean enforceDurability = enforceDurabilityInReplace &amp;&amp; !disableDurabilityFeature.isAvailable();</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">            int effectiveMinRegionsForDurability = enforceDurability ? minRegionsForDurability : 1;</span>
+<span class="nc" id="L529">            Set&lt;BookieId&gt; comprehensiveExclusionBookiesSet = addDefaultRackBookiesIfMinNumRacksIsEnforced(</span>
+                    excludeBookies);
+<span class="nc" id="L531">            Set&lt;Node&gt; excludeNodes = convertBookiesToNodes(comprehensiveExclusionBookiesSet);</span>
+<span class="nc" id="L532">            RRTopologyAwareCoverageEnsemble ensemble = new RRTopologyAwareCoverageEnsemble(ensembleSize,</span>
+                writeQuorumSize,
+                ackQuorumSize,
+                REGIONID_DISTANCE_FROM_LEAVES,
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                effectiveMinRegionsForDurability &gt; 0 ? new HashSet&lt;String&gt;(perRegionPlacement.keySet()) : null,</span>
+                effectiveMinRegionsForDurability, minNumRacksPerWriteQuorum);
+
+<span class="nc" id="L539">            BookieNode bookieNodeToReplace = knownBookies.get(bookieToReplace);</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">            if (null == bookieNodeToReplace) {</span>
+<span class="nc" id="L541">                bookieNodeToReplace = createBookieNode(bookieToReplace);</span>
+            }
+<span class="nc" id="L543">            excludeNodes.add(bookieNodeToReplace);</span>
+
+<span class="nc bnc" id="L545" title="All 2 branches missed.">            for (BookieId bookieAddress: currentEnsemble) {</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">                if (bookieAddress.equals(bookieToReplace)) {</span>
+<span class="nc" id="L547">                    continue;</span>
+                }
+
+<span class="nc" id="L550">                BookieNode bn = knownBookies.get(bookieAddress);</span>
+<span class="nc bnc" id="L551" title="All 2 branches missed.">                if (null == bn) {</span>
+<span class="nc" id="L552">                    bn = createBookieNode(bookieAddress);</span>
+                }
+
+<span class="nc" id="L555">                excludeNodes.add(bn);</span>
+
+<span class="nc bnc" id="L557" title="All 2 branches missed.">                if (!ensemble.apply(bn, ensemble)) {</span>
+<span class="nc" id="L558">                    LOG.warn(&quot;Anomalous ensemble detected&quot;);</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">                    if (null != statsLogger) {</span>
+<span class="nc" id="L560">                        statsLogger.getCounter(REGION_AWARE_ANOMALOUS_ENSEMBLE).inc();</span>
+                    }
+<span class="nc" id="L562">                    enforceDurability = false;</span>
+                }
+
+<span class="nc" id="L565">                ensemble.addNode(bn);</span>
+<span class="nc" id="L566">            }</span>
+
+<span class="nc bnc" id="L568" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L569">                LOG.debug(&quot;Try to choose a new bookie to replace {}, excluding {}.&quot;, bookieToReplace,</span>
+                    excludeNodes);
+            }
+            // pick a candidate from same rack to replace
+<span class="nc" id="L573">            BookieNode candidate = replaceFromRack(bookieNodeToReplace, excludeNodes,</span>
+                ensemble, ensemble, enforceDurability);
+<span class="nc bnc" id="L575" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L576">                LOG.debug(&quot;Bookie {} is chosen to replace bookie {}.&quot;, candidate, bookieNodeToReplace);</span>
+            }
+<span class="nc" id="L578">            BookieId candidateAddr = candidate.getAddr();</span>
+<span class="nc" id="L579">            List&lt;BookieId&gt; newEnsemble = new ArrayList&lt;BookieId&gt;(currentEnsemble);</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">            if (currentEnsemble.isEmpty()) {</span>
+                /*
+                 * in testing code there are test cases which would pass empty
+                 * currentEnsemble
+                 */
+<span class="nc" id="L585">                newEnsemble.add(candidateAddr);</span>
+            } else {
+<span class="nc" id="L587">                newEnsemble.set(currentEnsemble.indexOf(bookieToReplace), candidateAddr);</span>
+            }
+<span class="nc" id="L589">            return PlacementResult.of(candidateAddr,</span>
+<span class="nc" id="L590">                    isEnsembleAdheringToPlacementPolicy(newEnsemble, writeQuorumSize, ackQuorumSize));</span>
+        } finally {
+<span class="nc" id="L592">            rwLock.readLock().unlock();</span>
+        }
+    }
+
+    protected BookieNode replaceFromRack(BookieNode bookieNodeToReplace,
+                                         Set&lt;Node&gt; excludeBookies,
+                                         Predicate&lt;BookieNode&gt; predicate,
+                                         Ensemble&lt;BookieNode&gt; ensemble,
+                                         boolean enforceDurability)
+        throws BKException.BKNotEnoughBookiesException {
+<span class="nc" id="L602">        Set&lt;String&gt; availableRegions = new HashSet&lt;String&gt;();</span>
+<span class="nc bnc" id="L603" title="All 2 branches missed.">        for (String region: perRegionPlacement.keySet()) {</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">            if ((null == disallowBookiePlacementInRegionFeatureName)</span>
+<span class="nc" id="L605">                    || !featureProvider.scope(region).getFeature(disallowBookiePlacementInRegionFeatureName)</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">                        .isAvailable()) {</span>
+<span class="nc" id="L607">                availableRegions.add(region);</span>
+            }
+<span class="nc" id="L609">        }</span>
+<span class="nc" id="L610">        String regionForBookieToReplace = getLocalRegion(bookieNodeToReplace);</span>
+<span class="nc bnc" id="L611" title="All 2 branches missed.">        if (availableRegions.contains(regionForBookieToReplace)) {</span>
+<span class="nc" id="L612">            TopologyAwareEnsemblePlacementPolicy regionPolicy = perRegionPlacement.get(regionForBookieToReplace);</span>
+<span class="nc bnc" id="L613" title="All 2 branches missed.">            if (null != regionPolicy) {</span>
+                try {
+                    // select one from local rack =&gt; it falls back to selecting a node from the region
+                    // if the rack does not have an available node, selecting from the same region
+                    // should not violate durability constraints so we can simply not have to check
+                    // for that.
+<span class="nc" id="L619">                    return regionPolicy.selectFromNetworkLocation(</span>
+<span class="nc" id="L620">                        bookieNodeToReplace.getNetworkLocation(),</span>
+                        excludeBookies,
+                        TruePredicate.INSTANCE,
+                        EnsembleForReplacementWithNoConstraints.INSTANCE,
+                        true);
+<span class="nc" id="L625">                } catch (BKException.BKNotEnoughBookiesException e) {</span>
+<span class="nc" id="L626">                    LOG.warn(&quot;Failed to choose a bookie from {} : &quot;</span>
+                            + &quot;excluded {}, fallback to choose bookie randomly from the cluster.&quot;,
+<span class="nc" id="L628">                        bookieNodeToReplace.getNetworkLocation(), excludeBookies);</span>
+                }
+            }
+        }
+
+        // randomly choose one from all the regions that are available, ignore the provided predicate if we are not
+        // enforcing durability.
+<span class="nc" id="L635">        return selectRandomFromRegions(availableRegions, 1,</span>
+            excludeBookies,
+<span class="nc bnc" id="L637" title="All 2 branches missed.">            enforceDurability ? predicate : TruePredicate.INSTANCE,</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">            enforceDurability ? ensemble : EnsembleForReplacementWithNoConstraints.INSTANCE).get(0);</span>
+    }
+
+    @Override
+    public final DistributionSchedule.WriteSet reorderReadSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc bnc" id="L646" title="All 2 branches missed.">        if (UNKNOWN_REGION.equals(myRegion)) {</span>
+<span class="nc" id="L647">            return super.reorderReadSequence(ensemble, bookiesHealthInfo, writeSet);</span>
+        } else {
+<span class="nc" id="L649">            Map&lt;Integer, String&gt; writeSetWithRegion = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L650" title="All 2 branches missed.">            for (int i = 0; i &lt; writeSet.size(); i++) {</span>
+<span class="nc" id="L651">                int idx = writeSet.get(i);</span>
+<span class="nc" id="L652">                writeSetWithRegion.put(idx, getRegion(ensemble.get(idx)));</span>
+            }
+<span class="nc" id="L654">            return super.reorderReadSequenceWithRegion(ensemble, writeSet, writeSetWithRegion,</span>
+                bookiesHealthInfo, true, myRegion, REMOTE_NODE_IN_REORDER_SEQUENCE);
+        }
+    }
+
+    @Override
+    public final DistributionSchedule.WriteSet reorderReadLACSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc bnc" id="L664" title="All 2 branches missed.">        if (UNKNOWN_REGION.equals(myRegion)) {</span>
+<span class="nc" id="L665">            return super.reorderReadLACSequence(ensemble, bookiesHealthInfo, writeSet);</span>
+        }
+<span class="nc" id="L667">        DistributionSchedule.WriteSet finalList = reorderReadSequence(ensemble, bookiesHealthInfo, writeSet);</span>
+<span class="nc" id="L668">        finalList.addMissingIndices(ensemble.size());</span>
+<span class="nc" id="L669">        return finalList;</span>
+    }
+
+    @Override
+    public PlacementPolicyAdherence isEnsembleAdheringToPlacementPolicy(List&lt;BookieId&gt; ensembleList,
+            int writeQuorumSize, int ackQuorumSize) {
+        /**
+         * TODO: have to implement actual logic for this method for
+         * RegionAwareEnsemblePlacementPolicy. For now return true value.
+         *
+         * - https://github.com/apache/bookkeeper/issues/1898
+         */
+<span class="nc" id="L681">        return PlacementPolicyAdherence.MEETS_STRICT;</span>
+    }
+
+    @Override
+    public void updateBookieInfo(Map&lt;BookieId, BookieInfoReader.BookieInfo&gt; bookieInfoMap) {
+<span class="nc" id="L686">        super.updateBookieInfo(bookieInfoMap);</span>
+<span class="nc bnc" id="L687" title="All 2 branches missed.">        for (TopologyAwareEnsemblePlacementPolicy policy : perRegionPlacement.values()) {</span>
+<span class="nc" id="L688">            policy.updateBookieInfo(bookieInfoMap);</span>
+<span class="nc" id="L689">        }</span>
+<span class="nc" id="L690">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

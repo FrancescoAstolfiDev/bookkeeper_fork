@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractHierarchicalLedgerManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">AbstractHierarchicalLedgerManager.java</span></div><h1>AbstractHierarchicalLedgerManager.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.NavigableSet;
+import java.util.TreeSet;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.util.StringUtils;
+import org.apache.zookeeper.AsyncCallback;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.KeeperException.Code;
+import org.apache.zookeeper.ZooKeeper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * An abstract class for managing hierarchical ledgers.
+ */
+public abstract class AbstractHierarchicalLedgerManager extends AbstractZkLedgerManager {
+
+<span class="nc" id="L41">    private static final Logger LOG = LoggerFactory.getLogger(AbstractHierarchicalLedgerManager.class);</span>
+
+    /**
+     * Constructor.
+     *
+     * @param conf
+     *          Configuration object
+     * @param zk
+     *          ZooKeeper Client Handle
+     */
+    public AbstractHierarchicalLedgerManager(AbstractConfiguration conf, ZooKeeper zk) {
+<span class="nc" id="L52">        super(conf, zk);</span>
+<span class="nc" id="L53">    }</span>
+
+    /**
+     * Process hash nodes in a given path.
+     */
+    void asyncProcessLevelNodes(
+        final String path, final Processor&lt;String&gt; processor,
+        final AsyncCallback.VoidCallback finalCb, final Object context,
+        final int successRc, final int failureRc) {
+<span class="nc" id="L62">        zk.sync(path, new AsyncCallback.VoidCallback() {</span>
+            @Override
+            public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L65" title="All 2 branches missed.">                if (rc == Code.NONODE.intValue()) {</span>
+                    // Raced with node removal
+<span class="nc" id="L67">                    finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L68">                    return;</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">                } else if (rc != Code.OK.intValue()) {</span>
+<span class="nc" id="L70">                    LOG.error(&quot;Error syncing path &quot; + path + &quot; when getting its children: &quot;,</span>
+<span class="nc" id="L71">                              KeeperException.create(Code.get(rc), path));</span>
+<span class="nc" id="L72">                    finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L73">                    return;</span>
+                }
+
+<span class="nc" id="L76">                zk.getChildren(path, false, new ChildrenCallback() {</span>
+                    @Override
+                    public void processResult(int rc, String path, Object ctx,
+                                              List&lt;String&gt; levelNodes) {
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                        if (rc == Code.NONODE.intValue()) {</span>
+                            // Raced with node removal
+<span class="nc" id="L82">                            finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L83">                            return;</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                        } else if (rc != Code.OK.intValue()) {</span>
+<span class="nc" id="L85">                            LOG.error(&quot;Error polling hash nodes of &quot; + path,</span>
+<span class="nc" id="L86">                                      KeeperException.create(Code.get(rc), path));</span>
+<span class="nc" id="L87">                            finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L88">                            return;</span>
+                        }
+<span class="nc" id="L90">                        AsyncListProcessor&lt;String&gt; listProcessor =</span>
+                                new AsyncListProcessor&lt;String&gt;(scheduler);
+                        // process its children
+<span class="nc" id="L93">                        listProcessor.process(levelNodes, processor, finalCb,</span>
+                                              context, successRc, failureRc);
+<span class="nc" id="L95">                    }</span>
+                }, null);
+<span class="nc" id="L97">            }</span>
+        }, null);
+<span class="nc" id="L99">    }</span>
+
+    /**
+     * Process list one by one in asynchronous way. Process will be stopped immediately
+     * when error occurred.
+     */
+    private static class AsyncListProcessor&lt;T&gt; {
+        // use this to prevent long stack chains from building up in callbacks
+        ScheduledExecutorService scheduler;
+
+        /**
+         * Constructor.
+         *
+         * @param scheduler
+         *          Executor used to prevent long stack chains
+         */
+<span class="nc" id="L115">        public AsyncListProcessor(ScheduledExecutorService scheduler) {</span>
+<span class="nc" id="L116">            this.scheduler = scheduler;</span>
+<span class="nc" id="L117">        }</span>
+
+        /**
+         * Process list of items.
+         *
+         * @param data
+         *          List of data to process
+         * @param processor
+         *          Callback to process element of list when success
+         * @param finalCb
+         *          Final callback to be called after all elements in the list are processed
+         * @param context
+         *          Context of final callback
+         * @param successRc
+         *          RC passed to final callback on success
+         * @param failureRc
+         *          RC passed to final callback on failure
+         */
+        public void process(final List&lt;T&gt; data, final Processor&lt;T&gt; processor,
+                            final AsyncCallback.VoidCallback finalCb, final Object context,
+                            final int successRc, final int failureRc) {
+<span class="nc bnc" id="L138" title="All 4 branches missed.">            if (data == null || data.size() == 0) {</span>
+<span class="nc" id="L139">                finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L140">                return;</span>
+            }
+<span class="nc" id="L142">            final int size = data.size();</span>
+<span class="nc" id="L143">            final AtomicInteger current = new AtomicInteger(0);</span>
+<span class="nc" id="L144">            AsyncCallback.VoidCallback stubCallback = new AsyncCallback.VoidCallback() {</span>
+                @Override
+                public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                    if (rc != successRc) {</span>
+                        // terminal immediately
+<span class="nc" id="L149">                        finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L150">                        return;</span>
+                    }
+                    // process next element
+<span class="nc" id="L153">                    int next = current.incrementAndGet();</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                    if (next &gt;= size) { // reach the end of list</span>
+<span class="nc" id="L155">                        finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L156">                        return;</span>
+                    }
+<span class="nc" id="L158">                    final T dataToProcess = data.get(next);</span>
+<span class="nc" id="L159">                    final VoidCallback stub = this;</span>
+<span class="nc" id="L160">                    scheduler.submit(new Runnable() {</span>
+                        @Override
+                        public void run() {
+<span class="nc" id="L163">                            processor.process(dataToProcess, stub);</span>
+<span class="nc" id="L164">                        }</span>
+                    });
+<span class="nc" id="L166">                }</span>
+            };
+<span class="nc" id="L168">            T firstElement = data.get(0);</span>
+<span class="nc" id="L169">            processor.process(firstElement, stubCallback);</span>
+<span class="nc" id="L170">        }</span>
+    }
+
+    // get ledger from all level nodes
+    long getLedgerId(String...levelNodes) throws IOException {
+<span class="nc" id="L175">        return StringUtils.stringToHierarchicalLedgerId(levelNodes);</span>
+    }
+
+    /**
+     * Get all ledger ids in the given zk path.
+     *
+     * @param ledgerNodes
+     *          List of ledgers in the given path
+     *          example:- {L1652, L1653, L1650}
+     * @param path
+     *          The zookeeper path of the ledger ids. The path should start with {@ledgerRootPath}
+     *          example (with ledgerRootPath = /ledgers):- /ledgers/00/0053
+     */
+    @Override
+    protected NavigableSet&lt;Long&gt; ledgerListToSet(List&lt;String&gt; ledgerNodes, String path) {
+<span class="nc" id="L190">        NavigableSet&lt;Long&gt; zkActiveLedgers = new TreeSet&lt;Long&gt;();</span>
+
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        if (!path.startsWith(ledgerRootPath)) {</span>
+<span class="nc" id="L193">            LOG.warn(&quot;Ledger path [{}] is not a valid path name, it should start with {}&quot;, path, ledgerRootPath);</span>
+<span class="nc" id="L194">            return zkActiveLedgers;</span>
+        }
+
+<span class="nc" id="L197">        long ledgerIdPrefix = 0;</span>
+        char ch;
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        for (int i = ledgerRootPath.length() + 1; i &lt; path.length(); i++) {</span>
+<span class="nc" id="L200">            ch = path.charAt(i);</span>
+<span class="nc bnc" id="L201" title="All 4 branches missed.">            if (ch &lt; '0' || ch &gt; '9') {</span>
+<span class="nc" id="L202">                continue;</span>
+            }
+<span class="nc" id="L204">            ledgerIdPrefix = ledgerIdPrefix * 10 + (ch - '0');</span>
+        }
+
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        for (String ledgerNode : ledgerNodes) {</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if (isSpecialZnode(ledgerNode)) {</span>
+<span class="nc" id="L209">                continue;</span>
+            }
+<span class="nc" id="L211">            long ledgerId = ledgerIdPrefix;</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            for (int i = 0; i &lt; ledgerNode.length(); i++) {</span>
+<span class="nc" id="L213">                ch = ledgerNode.charAt(i);</span>
+<span class="nc bnc" id="L214" title="All 4 branches missed.">                if (ch &lt; '0' || ch &gt; '9') {</span>
+<span class="nc" id="L215">                    continue;</span>
+                }
+<span class="nc" id="L217">                ledgerId = ledgerId * 10 + (ch - '0');</span>
+            }
+<span class="nc" id="L219">            zkActiveLedgers.add(ledgerId);</span>
+<span class="nc" id="L220">        }</span>
+<span class="nc" id="L221">        return zkActiveLedgers;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

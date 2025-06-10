@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AuditorStats.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">AuditorStats.java</span></div><h1>AuditorStats.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.replication;
+
+import static org.apache.bookkeeper.replication.ReplicationStats.AUDITOR_SCOPE;
+import static org.apache.bookkeeper.replication.ReplicationStats.AUDIT_BOOKIES_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.BOOKIE_TO_LEDGERS_MAP_CREATION_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.CHECK_ALL_LEDGERS_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_BOOKIES_PER_LEDGER;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_BOOKIE_AUDITS_DELAYED;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_DELAYED_BOOKIE_AUDITS_DELAYES_CANCELLED;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_FRAGMENTS_PER_LEDGER;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_CHECKED;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_AQ_REPLICAS_OF_AN_ENTRY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_WQ_REPLICAS_OF_AN_ENTRY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_HAVING_NO_REPLICA_OF_AN_ENTRY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_NOT_ADHERING_TO_PLACEMENT_POLICY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_SOFTLY_ADHERING_TO_PLACEMENT_POLICY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_SKIPPING_CHECK_TASK_TIMES;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_UNDERREPLICATED_LEDGERS_ELAPSED_RECOVERY_GRACE_PERIOD;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_UNDER_REPLICATED_LEDGERS;
+import static org.apache.bookkeeper.replication.ReplicationStats.PLACEMENT_POLICY_CHECK_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.REPLICAS_CHECK_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.UNDER_REPLICATED_LEDGERS_TOTAL_SIZE;
+import static org.apache.bookkeeper.replication.ReplicationStats.URL_PUBLISH_TIME_FOR_LOST_BOOKIE;
+
+import java.util.concurrent.atomic.AtomicInteger;
+import lombok.Getter;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+
+@StatsDoc(
+        name = AUDITOR_SCOPE,
+        help = &quot;Auditor related stats&quot;
+)
+@Getter
+public class AuditorStats {
+
+<span class="nc" id="L57">    private final AtomicInteger ledgersNotAdheringToPlacementPolicyGuageValue;</span>
+<span class="nc" id="L58">    private final AtomicInteger ledgersSoftlyAdheringToPlacementPolicyGuageValue;</span>
+<span class="nc" id="L59">    private final AtomicInteger numOfURLedgersElapsedRecoveryGracePeriodGuageValue;</span>
+<span class="nc" id="L60">    private final AtomicInteger numLedgersHavingNoReplicaOfAnEntryGuageValue;</span>
+<span class="nc" id="L61">    private final AtomicInteger numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue;</span>
+<span class="nc" id="L62">    private final AtomicInteger numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue;</span>
+<span class="nc" id="L63">    private final AtomicInteger underReplicatedLedgersGuageValue;</span>
+<span class="nc" id="L64">    private final StatsLogger statsLogger;</span>
+    @StatsDoc(
+            name = NUM_UNDER_REPLICATED_LEDGERS,
+            help = &quot;the distribution of num under_replicated ledgers on each auditor run&quot;
+    )
+<span class="nc" id="L69">    private final OpStatsLogger numUnderReplicatedLedger;</span>
+
+    @StatsDoc(
+            name = UNDER_REPLICATED_LEDGERS_TOTAL_SIZE,
+            help = &quot;the distribution of under_replicated ledgers total size on each auditor run&quot;
+    )
+<span class="nc" id="L75">    private final OpStatsLogger underReplicatedLedgerTotalSize;</span>
+    @StatsDoc(
+            name = URL_PUBLISH_TIME_FOR_LOST_BOOKIE,
+            help = &quot;the latency distribution of publishing under replicated ledgers for lost bookies&quot;
+    )
+<span class="nc" id="L80">    private final OpStatsLogger uRLPublishTimeForLostBookies;</span>
+    @StatsDoc(
+            name = BOOKIE_TO_LEDGERS_MAP_CREATION_TIME,
+            help = &quot;the latency distribution of creating bookies-to-ledgers map&quot;
+    )
+<span class="nc" id="L85">    private final OpStatsLogger bookieToLedgersMapCreationTime;</span>
+    @StatsDoc(
+            name = CHECK_ALL_LEDGERS_TIME,
+            help = &quot;the latency distribution of checking all ledgers&quot;
+    )
+<span class="nc" id="L90">    private final OpStatsLogger checkAllLedgersTime;</span>
+    @StatsDoc(
+            name = PLACEMENT_POLICY_CHECK_TIME,
+            help = &quot;the latency distribution of placementPolicy check&quot;
+    )
+<span class="nc" id="L95">    private final OpStatsLogger placementPolicyCheckTime;</span>
+    @StatsDoc(
+            name = REPLICAS_CHECK_TIME,
+            help = &quot;the latency distribution of replicas check&quot;
+    )
+<span class="nc" id="L100">    private final OpStatsLogger replicasCheckTime;</span>
+    @StatsDoc(
+            name = AUDIT_BOOKIES_TIME,
+            help = &quot;the latency distribution of auditing all the bookies&quot;
+    )
+<span class="nc" id="L105">    private final OpStatsLogger auditBookiesTime;</span>
+    @StatsDoc(
+            name = NUM_LEDGERS_CHECKED,
+            help = &quot;the number of ledgers checked by the auditor&quot;
+    )
+<span class="nc" id="L110">    private final Counter numLedgersChecked;</span>
+    @StatsDoc(
+            name = NUM_FRAGMENTS_PER_LEDGER,
+            help = &quot;the distribution of number of fragments per ledger&quot;
+    )
+<span class="nc" id="L115">    private final OpStatsLogger numFragmentsPerLedger;</span>
+    @StatsDoc(
+            name = NUM_BOOKIES_PER_LEDGER,
+            help = &quot;the distribution of number of bookies per ledger&quot;
+    )
+<span class="nc" id="L120">    private final OpStatsLogger numBookiesPerLedger;</span>
+    @StatsDoc(
+            name = NUM_BOOKIE_AUDITS_DELAYED,
+            help = &quot;the number of bookie-audits delayed&quot;
+    )
+<span class="nc" id="L125">    private final Counter numBookieAuditsDelayed;</span>
+    @StatsDoc(
+            name = NUM_DELAYED_BOOKIE_AUDITS_DELAYES_CANCELLED,
+            help = &quot;the number of delayed-bookie-audits cancelled&quot;
+    )
+<span class="nc" id="L130">    private final Counter numDelayedBookieAuditsCancelled;</span>
+    @StatsDoc(
+            name = NUM_LEDGERS_NOT_ADHERING_TO_PLACEMENT_POLICY,
+            help = &quot;Gauge for number of ledgers not adhering to placement policy found in placement policy check&quot;
+    )
+<span class="nc" id="L135">    private final Gauge&lt;Integer&gt; numLedgersNotAdheringToPlacementPolicy;</span>
+    @StatsDoc(
+            name = NUM_LEDGERS_SOFTLY_ADHERING_TO_PLACEMENT_POLICY,
+            help = &quot;Gauge for number of ledgers softly adhering to placement policy found in placement policy check&quot;
+    )
+<span class="nc" id="L140">    private final Gauge&lt;Integer&gt; numLedgersSoftlyAdheringToPlacementPolicy;</span>
+    @StatsDoc(
+            name = NUM_UNDERREPLICATED_LEDGERS_ELAPSED_RECOVERY_GRACE_PERIOD,
+            help = &quot;Gauge for number of underreplicated ledgers elapsed recovery grace period&quot;
+    )
+<span class="nc" id="L145">    private final Gauge&lt;Integer&gt; numUnderreplicatedLedgersElapsedRecoveryGracePeriod;</span>
+    @StatsDoc(
+            name = NUM_LEDGERS_HAVING_NO_REPLICA_OF_AN_ENTRY,
+            help = &quot;Gauge for number of ledgers having an entry with all the replicas missing&quot;
+    )
+<span class="nc" id="L150">    private final Gauge&lt;Integer&gt; numLedgersHavingNoReplicaOfAnEntry;</span>
+    @StatsDoc(
+            name = NUM_LEDGERS_HAVING_LESS_THAN_AQ_REPLICAS_OF_AN_ENTRY,
+            help = &quot;Gauge for number of ledgers having an entry with less than AQ number of replicas&quot;
+                    + &quot;, this doesn't include ledgers counted towards numLedgersHavingNoReplicaOfAnEntry&quot;
+    )
+<span class="nc" id="L156">    private final Gauge&lt;Integer&gt; numLedgersHavingLessThanAQReplicasOfAnEntry;</span>
+    @StatsDoc(
+            name = NUM_LEDGERS_HAVING_LESS_THAN_WQ_REPLICAS_OF_AN_ENTRY,
+            help = &quot;Gauge for number of ledgers having an entry with less than WQ number of replicas&quot;
+                    + &quot;, this doesn't include ledgers counted towards numLedgersHavingLessThanAQReplicasOfAnEntry&quot;
+    )
+<span class="nc" id="L162">    private final Gauge&lt;Integer&gt; numLedgersHavingLessThanWQReplicasOfAnEntry;</span>
+    @StatsDoc(
+            name = NUM_SKIPPING_CHECK_TASK_TIMES,
+            help = &quot;the times of auditor check task skipped&quot;
+    )
+<span class="nc" id="L167">    private final Counter numSkippingCheckTaskTimes;</span>
+
+<span class="nc" id="L169">    public AuditorStats(StatsLogger statsLogger) {</span>
+<span class="nc" id="L170">        this.statsLogger = statsLogger;</span>
+<span class="nc" id="L171">        this.ledgersNotAdheringToPlacementPolicyGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L172">        this.ledgersSoftlyAdheringToPlacementPolicyGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L173">        this.numOfURLedgersElapsedRecoveryGracePeriodGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L174">        this.numLedgersHavingNoReplicaOfAnEntryGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L175">        this.numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L176">        this.numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L177">        this.underReplicatedLedgersGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L178">        numUnderReplicatedLedger = this.statsLogger.getOpStatsLogger(ReplicationStats.NUM_UNDER_REPLICATED_LEDGERS);</span>
+<span class="nc" id="L179">        underReplicatedLedgerTotalSize = this.statsLogger.getOpStatsLogger(UNDER_REPLICATED_LEDGERS_TOTAL_SIZE);</span>
+<span class="nc" id="L180">        uRLPublishTimeForLostBookies = this.statsLogger</span>
+<span class="nc" id="L181">                .getOpStatsLogger(ReplicationStats.URL_PUBLISH_TIME_FOR_LOST_BOOKIE);</span>
+<span class="nc" id="L182">        bookieToLedgersMapCreationTime = this.statsLogger</span>
+<span class="nc" id="L183">                .getOpStatsLogger(ReplicationStats.BOOKIE_TO_LEDGERS_MAP_CREATION_TIME);</span>
+<span class="nc" id="L184">        checkAllLedgersTime = this.statsLogger.getOpStatsLogger(ReplicationStats.CHECK_ALL_LEDGERS_TIME);</span>
+<span class="nc" id="L185">        placementPolicyCheckTime = this.statsLogger.getOpStatsLogger(ReplicationStats.PLACEMENT_POLICY_CHECK_TIME);</span>
+<span class="nc" id="L186">        replicasCheckTime = this.statsLogger.getOpStatsLogger(ReplicationStats.REPLICAS_CHECK_TIME);</span>
+<span class="nc" id="L187">        auditBookiesTime = this.statsLogger.getOpStatsLogger(ReplicationStats.AUDIT_BOOKIES_TIME);</span>
+<span class="nc" id="L188">        numLedgersChecked = this.statsLogger.getCounter(ReplicationStats.NUM_LEDGERS_CHECKED);</span>
+<span class="nc" id="L189">        numFragmentsPerLedger = this.statsLogger.getOpStatsLogger(ReplicationStats.NUM_FRAGMENTS_PER_LEDGER);</span>
+<span class="nc" id="L190">        numBookiesPerLedger = this.statsLogger.getOpStatsLogger(ReplicationStats.NUM_BOOKIES_PER_LEDGER);</span>
+<span class="nc" id="L191">        numBookieAuditsDelayed = this.statsLogger.getCounter(ReplicationStats.NUM_BOOKIE_AUDITS_DELAYED);</span>
+<span class="nc" id="L192">        numDelayedBookieAuditsCancelled = this.statsLogger</span>
+<span class="nc" id="L193">                .getCounter(ReplicationStats.NUM_DELAYED_BOOKIE_AUDITS_DELAYES_CANCELLED);</span>
+<span class="nc" id="L194">        numSkippingCheckTaskTimes = this.statsLogger.getCounter(NUM_SKIPPING_CHECK_TASK_TIMES);</span>
+<span class="nc" id="L195">        numLedgersNotAdheringToPlacementPolicy = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L198">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L203">                return ledgersNotAdheringToPlacementPolicyGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L206">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_NOT_ADHERING_TO_PLACEMENT_POLICY,</span>
+                numLedgersNotAdheringToPlacementPolicy);
+<span class="nc" id="L208">        numLedgersSoftlyAdheringToPlacementPolicy = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L211">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L216">                return ledgersSoftlyAdheringToPlacementPolicyGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L219">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_SOFTLY_ADHERING_TO_PLACEMENT_POLICY,</span>
+                numLedgersSoftlyAdheringToPlacementPolicy);
+
+<span class="nc" id="L222">        numUnderreplicatedLedgersElapsedRecoveryGracePeriod = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L225">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L230">                return numOfURLedgersElapsedRecoveryGracePeriodGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L233">        this.statsLogger.registerGauge(ReplicationStats.NUM_UNDERREPLICATED_LEDGERS_ELAPSED_RECOVERY_GRACE_PERIOD,</span>
+                numUnderreplicatedLedgersElapsedRecoveryGracePeriod);
+
+<span class="nc" id="L236">        numLedgersHavingNoReplicaOfAnEntry = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L239">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L244">                return numLedgersHavingNoReplicaOfAnEntryGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L247">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_HAVING_NO_REPLICA_OF_AN_ENTRY,</span>
+                numLedgersHavingNoReplicaOfAnEntry);
+<span class="nc" id="L249">        numLedgersHavingLessThanAQReplicasOfAnEntry = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L252">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L257">                return numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L260">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_AQ_REPLICAS_OF_AN_ENTRY,</span>
+                numLedgersHavingLessThanAQReplicasOfAnEntry);
+<span class="nc" id="L262">        numLedgersHavingLessThanWQReplicasOfAnEntry = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L265">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L270">                return numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L273">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_WQ_REPLICAS_OF_AN_ENTRY,</span>
+                numLedgersHavingLessThanWQReplicasOfAnEntry);
+<span class="nc" id="L275">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

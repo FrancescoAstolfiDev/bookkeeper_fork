@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestStats.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">RequestStats.java</span></div><h1>RequestStats.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.proto;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ADD_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ADD_ENTRY_BLOCKED;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ADD_ENTRY_BLOCKED_WAIT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ADD_ENTRY_IN_PROGRESS;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ADD_ENTRY_REJECTED;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ADD_ENTRY_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.CATEGORY_SERVER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.CHANNEL_WRITE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.FORCE_LEDGER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.FORCE_LEDGER_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.GET_BOOKIE_INFO;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.GET_BOOKIE_INFO_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.GET_LIST_OF_ENTRIES_OF_LEDGER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.GET_LIST_OF_ENTRIES_OF_LEDGER_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_BLOCKED;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_BLOCKED_WAIT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_FENCE_READ;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_FENCE_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_FENCE_WAIT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_IN_PROGRESS;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_LONG_POLL_PRE_WAIT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_LONG_POLL_READ;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_LONG_POLL_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_LONG_POLL_WAIT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_REJECTED;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_ENTRY_SCHEDULING_DELAY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_LAC;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_LAC_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.READ_LAST_ENTRY_NOENTRY_ERROR;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SERVER_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.WRITE_LAC;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.WRITE_LAC_REQUEST;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.WRITE_THREAD_QUEUED_LATENCY;
+
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import lombok.Getter;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+
+/**
+ * A umbrella class for request related stats.
+ */
+@StatsDoc(
+    name = SERVER_SCOPE,
+    category = CATEGORY_SERVER,
+    help = &quot;Bookie request stats&quot;
+)
+@Getter
+public class RequestStats {
+
+<span class="nc" id="L78">    final AtomicInteger addsInProgress = new AtomicInteger(0);</span>
+<span class="nc" id="L79">    final AtomicInteger maxAddsInProgress = new AtomicInteger(0);</span>
+<span class="nc" id="L80">    final AtomicInteger addsBlocked = new AtomicInteger(0);</span>
+<span class="nc" id="L81">    final AtomicInteger readsInProgress = new AtomicInteger(0);</span>
+<span class="nc" id="L82">    final AtomicInteger readsBlocked = new AtomicInteger(0);</span>
+<span class="nc" id="L83">    final AtomicInteger maxReadsInProgress = new AtomicInteger(0);</span>
+
+    @StatsDoc(
+        name = ADD_ENTRY_REQUEST,
+        help = &quot;request stats of AddEntry on a bookie&quot;
+    )
+<span class="nc" id="L89">    private final OpStatsLogger addRequestStats;</span>
+    @StatsDoc(
+        name = ADD_ENTRY,
+        help = &quot;operation stats of AddEntry on a bookie&quot;,
+        parent = ADD_ENTRY_REQUEST
+    )
+<span class="nc" id="L95">    private final OpStatsLogger addEntryStats;</span>
+
+    @StatsDoc(
+            name = WRITE_THREAD_QUEUED_LATENCY,
+            help = &quot;operation stats of enqueuing requests to write threadpool queue&quot;,
+            parent = ADD_ENTRY_REQUEST
+    )
+<span class="nc" id="L102">    private final OpStatsLogger writeThreadQueuedLatency;</span>
+
+    @StatsDoc(
+            name = ADD_ENTRY_REJECTED,
+            help = &quot;Counter for rejected adds on a bookie&quot;,
+            parent = ADD_ENTRY_REQUEST
+    )
+<span class="nc" id="L109">    private final Counter addEntryRejectedCounter;</span>
+    @StatsDoc(
+        name = READ_ENTRY_REQUEST,
+        help = &quot;request stats of ReadEntry on a bookie&quot;
+    )
+<span class="nc" id="L114">    final OpStatsLogger readRequestStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY,
+        help = &quot;operation stats of ReadEntry on a bookie&quot;,
+        parent = READ_ENTRY_REQUEST
+    )
+<span class="nc" id="L120">    final OpStatsLogger readEntryStats;</span>
+    @StatsDoc(
+            name = READ_ENTRY_REJECTED,
+            help = &quot;Counter for rejected reads on a bookie&quot;,
+            parent = READ_ENTRY_REQUEST
+    )
+<span class="nc" id="L126">    private final Counter readEntryRejectedCounter;</span>
+    @StatsDoc(
+        name = FORCE_LEDGER,
+        help = &quot;operation stats of ForceLedger on a bookie&quot;,
+        parent = FORCE_LEDGER_REQUEST
+    )
+<span class="nc" id="L132">    final OpStatsLogger forceLedgerStats;</span>
+    @StatsDoc(
+        name = FORCE_LEDGER_REQUEST,
+        help = &quot;request stats of ForceLedger on a bookie&quot;
+    )
+<span class="nc" id="L137">    final OpStatsLogger forceLedgerRequestStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_FENCE_REQUEST,
+        help = &quot;request stats of FenceRead on a bookie&quot;
+    )
+<span class="nc" id="L142">    final OpStatsLogger fenceReadRequestStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_FENCE_READ,
+        help = &quot;operation stats of FenceRead on a bookie&quot;,
+        parent = READ_ENTRY_FENCE_REQUEST,
+        happensAfter = READ_ENTRY_FENCE_WAIT
+    )
+<span class="nc" id="L149">    final OpStatsLogger fenceReadEntryStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_FENCE_WAIT,
+        help = &quot;operation stats of FenceReadWait on a bookie&quot;,
+        parent = READ_ENTRY_FENCE_REQUEST
+    )
+<span class="nc" id="L155">    final OpStatsLogger fenceReadWaitStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_SCHEDULING_DELAY,
+        help = &quot;operation stats of ReadEntry scheduling delays on a bookie&quot;
+    )
+<span class="nc" id="L160">    final OpStatsLogger readEntrySchedulingDelayStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_LONG_POLL_PRE_WAIT,
+        help = &quot;operation stats of LongPoll Reads pre wait time on a bookie&quot;,
+        parent = READ_ENTRY_LONG_POLL_REQUEST
+    )
+<span class="nc" id="L166">    final OpStatsLogger longPollPreWaitStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_LONG_POLL_WAIT,
+        help = &quot;operation stats of LongPoll Reads wait time on a bookie&quot;,
+        happensAfter = READ_ENTRY_LONG_POLL_PRE_WAIT,
+        parent = READ_ENTRY_LONG_POLL_REQUEST
+    )
+<span class="nc" id="L173">    final OpStatsLogger longPollWaitStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_LONG_POLL_READ,
+        help = &quot;operation stats of LongPoll Reads on a bookie&quot;,
+        happensAfter = READ_ENTRY_LONG_POLL_WAIT,
+        parent = READ_ENTRY_LONG_POLL_REQUEST
+    )
+<span class="nc" id="L180">    final OpStatsLogger longPollReadStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_LONG_POLL_REQUEST,
+        help = &quot;request stats of LongPoll Reads on a bookie&quot;
+    )
+<span class="nc" id="L185">    final OpStatsLogger longPollReadRequestStats;</span>
+    @StatsDoc(
+        name = READ_LAST_ENTRY_NOENTRY_ERROR,
+        help = &quot;total NOENTRY errors of reading last entry on a bookie&quot;
+    )
+<span class="nc" id="L190">    final Counter readLastEntryNoEntryErrorCounter;</span>
+    @StatsDoc(
+        name = WRITE_LAC_REQUEST,
+        help = &quot;request stats of WriteLac on a bookie&quot;
+    )
+<span class="nc" id="L195">    final OpStatsLogger writeLacRequestStats;</span>
+    @StatsDoc(
+        name = WRITE_LAC,
+        help = &quot;operation stats of WriteLac on a bookie&quot;,
+        parent = WRITE_LAC_REQUEST
+    )
+<span class="nc" id="L201">    final OpStatsLogger writeLacStats;</span>
+    @StatsDoc(
+        name = READ_LAC_REQUEST,
+        help = &quot;request stats of ReadLac on a bookie&quot;
+    )
+<span class="nc" id="L206">    final OpStatsLogger readLacRequestStats;</span>
+    @StatsDoc(
+        name = READ_LAC,
+        help = &quot;operation stats of ReadLac on a bookie&quot;,
+        parent = READ_LAC_REQUEST
+    )
+<span class="nc" id="L212">    final OpStatsLogger readLacStats;</span>
+    @StatsDoc(
+        name = GET_BOOKIE_INFO_REQUEST,
+        help = &quot;request stats of GetBookieInfo on a bookie&quot;
+    )
+<span class="nc" id="L217">    final OpStatsLogger getBookieInfoRequestStats;</span>
+    @StatsDoc(
+        name = GET_BOOKIE_INFO,
+        help = &quot;operation stats of GetBookieInfo on a bookie&quot;
+    )
+<span class="nc" id="L222">    final OpStatsLogger getBookieInfoStats;</span>
+    @StatsDoc(
+        name = CHANNEL_WRITE,
+        help = &quot;channel write stats on a bookie&quot;
+    )
+<span class="nc" id="L227">    final OpStatsLogger channelWriteStats;</span>
+    @StatsDoc(
+        name = ADD_ENTRY_BLOCKED,
+        help = &quot;operation stats of AddEntry blocked on a bookie&quot;
+    )
+<span class="nc" id="L232">    final OpStatsLogger addEntryBlockedStats;</span>
+    @StatsDoc(
+        name = READ_ENTRY_BLOCKED,
+        help = &quot;operation stats of ReadEntry blocked on a bookie&quot;
+    )
+<span class="nc" id="L237">    final OpStatsLogger readEntryBlockedStats;</span>
+    @StatsDoc(
+            name = GET_LIST_OF_ENTRIES_OF_LEDGER_REQUEST,
+            help = &quot;request stats of GetListOfEntriesOfLedger on a bookie&quot;
+    )
+<span class="nc" id="L242">    final OpStatsLogger getListOfEntriesOfLedgerRequestStats;</span>
+    @StatsDoc(
+            name = &quot;GET_LIST_OF_ENTRIES_OF_LEDGER&quot;,
+            help = &quot;operation stats of GetListOfEntriesOfLedger&quot;,
+            parent = GET_LIST_OF_ENTRIES_OF_LEDGER_REQUEST
+    )
+<span class="nc" id="L248">    final OpStatsLogger getListOfEntriesOfLedgerStats;</span>
+
+<span class="nc" id="L250">    public RequestStats(StatsLogger statsLogger) {</span>
+<span class="nc" id="L251">        this.addEntryStats = statsLogger.getThreadScopedOpStatsLogger(ADD_ENTRY);</span>
+<span class="nc" id="L252">        this.writeThreadQueuedLatency = statsLogger.getThreadScopedOpStatsLogger(WRITE_THREAD_QUEUED_LATENCY);</span>
+<span class="nc" id="L253">        this.addRequestStats = statsLogger.getOpStatsLogger(ADD_ENTRY_REQUEST);</span>
+<span class="nc" id="L254">        this.addEntryRejectedCounter = statsLogger.getCounter(ADD_ENTRY_REJECTED);</span>
+<span class="nc" id="L255">        this.readEntryStats = statsLogger.getThreadScopedOpStatsLogger(READ_ENTRY);</span>
+<span class="nc" id="L256">        this.readEntryRejectedCounter = statsLogger.getCounter(READ_ENTRY_REJECTED);</span>
+<span class="nc" id="L257">        this.forceLedgerStats = statsLogger.getOpStatsLogger(FORCE_LEDGER);</span>
+<span class="nc" id="L258">        this.forceLedgerRequestStats = statsLogger.getOpStatsLogger(FORCE_LEDGER_REQUEST);</span>
+<span class="nc" id="L259">        this.readRequestStats = statsLogger.getOpStatsLogger(READ_ENTRY_REQUEST);</span>
+<span class="nc" id="L260">        this.fenceReadEntryStats = statsLogger.getOpStatsLogger(READ_ENTRY_FENCE_READ);</span>
+<span class="nc" id="L261">        this.fenceReadRequestStats = statsLogger.getOpStatsLogger(READ_ENTRY_FENCE_REQUEST);</span>
+<span class="nc" id="L262">        this.fenceReadWaitStats = statsLogger.getOpStatsLogger(READ_ENTRY_FENCE_WAIT);</span>
+<span class="nc" id="L263">        this.readEntrySchedulingDelayStats = statsLogger.getOpStatsLogger(READ_ENTRY_SCHEDULING_DELAY);</span>
+<span class="nc" id="L264">        this.longPollPreWaitStats = statsLogger.getOpStatsLogger(READ_ENTRY_LONG_POLL_PRE_WAIT);</span>
+<span class="nc" id="L265">        this.longPollWaitStats = statsLogger.getOpStatsLogger(READ_ENTRY_LONG_POLL_WAIT);</span>
+<span class="nc" id="L266">        this.longPollReadStats = statsLogger.getOpStatsLogger(READ_ENTRY_LONG_POLL_READ);</span>
+<span class="nc" id="L267">        this.longPollReadRequestStats = statsLogger.getOpStatsLogger(READ_ENTRY_LONG_POLL_REQUEST);</span>
+<span class="nc" id="L268">        this.readLastEntryNoEntryErrorCounter = statsLogger.getCounter(READ_LAST_ENTRY_NOENTRY_ERROR);</span>
+<span class="nc" id="L269">        this.writeLacStats = statsLogger.getOpStatsLogger(WRITE_LAC);</span>
+<span class="nc" id="L270">        this.writeLacRequestStats = statsLogger.getOpStatsLogger(WRITE_LAC_REQUEST);</span>
+<span class="nc" id="L271">        this.readLacStats = statsLogger.getOpStatsLogger(READ_LAC);</span>
+<span class="nc" id="L272">        this.readLacRequestStats = statsLogger.getOpStatsLogger(READ_LAC_REQUEST);</span>
+<span class="nc" id="L273">        this.getBookieInfoStats = statsLogger.getOpStatsLogger(GET_BOOKIE_INFO);</span>
+<span class="nc" id="L274">        this.getBookieInfoRequestStats = statsLogger.getOpStatsLogger(GET_BOOKIE_INFO_REQUEST);</span>
+<span class="nc" id="L275">        this.channelWriteStats = statsLogger.getOpStatsLogger(CHANNEL_WRITE);</span>
+
+<span class="nc" id="L277">        this.addEntryBlockedStats = statsLogger.getOpStatsLogger(ADD_ENTRY_BLOCKED_WAIT);</span>
+<span class="nc" id="L278">        this.readEntryBlockedStats = statsLogger.getOpStatsLogger(READ_ENTRY_BLOCKED_WAIT);</span>
+
+<span class="nc" id="L280">        this.getListOfEntriesOfLedgerStats = statsLogger.getOpStatsLogger(GET_LIST_OF_ENTRIES_OF_LEDGER);</span>
+<span class="nc" id="L281">        this.getListOfEntriesOfLedgerRequestStats =</span>
+<span class="nc" id="L282">                statsLogger.getOpStatsLogger(GET_LIST_OF_ENTRIES_OF_LEDGER_REQUEST);</span>
+
+<span class="nc" id="L284">        statsLogger.registerGauge(ADD_ENTRY_IN_PROGRESS, new Gauge&lt;Number&gt;() {</span>
+            @Override
+            public Number getDefaultValue() {
+<span class="nc" id="L287">                return 0;</span>
+            }
+
+            @Override
+            public Number getSample() {
+<span class="nc" id="L292">                return addsInProgress;</span>
+            }
+        });
+
+<span class="nc" id="L296">        statsLogger.registerGauge(ADD_ENTRY_BLOCKED, new Gauge&lt;Number&gt;() {</span>
+            @Override
+            public Number getDefaultValue() {
+<span class="nc" id="L299">                return 0;</span>
+            }
+
+            @Override
+            public Number getSample() {
+<span class="nc" id="L304">                return addsBlocked;</span>
+            }
+        });
+
+<span class="nc" id="L308">        statsLogger.registerGauge(READ_ENTRY_IN_PROGRESS, new Gauge&lt;Number&gt;() {</span>
+            @Override
+            public Number getDefaultValue() {
+<span class="nc" id="L311">                return 0;</span>
+            }
+
+            @Override
+            public Number getSample() {
+<span class="nc" id="L316">                return readsInProgress;</span>
+            }
+        });
+
+<span class="nc" id="L320">        statsLogger.registerGauge(READ_ENTRY_BLOCKED, new Gauge&lt;Number&gt;() {</span>
+            @Override
+            public Number getDefaultValue() {
+<span class="nc" id="L323">                return 0;</span>
+            }
+
+            @Override
+            public Number getSample() {
+<span class="nc" id="L328">                return readsBlocked;</span>
+            }
+        });
+<span class="nc" id="L331">    }</span>
+
+    //
+    // Add requests
+    //
+
+    void blockAddRequest() {
+<span class="nc" id="L338">        addsBlocked.incrementAndGet();</span>
+<span class="nc" id="L339">    }</span>
+
+    void unblockAddRequest(long delayNanos) {
+<span class="nc" id="L342">        addEntryBlockedStats.registerSuccessfulEvent(delayNanos, TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L343">        addsBlocked.decrementAndGet();</span>
+<span class="nc" id="L344">    }</span>
+
+    void trackAddRequest() {
+<span class="nc" id="L347">        final int curr = addsInProgress.incrementAndGet();</span>
+<span class="nc" id="L348">        maxAddsInProgress.accumulateAndGet(curr, Integer::max);</span>
+<span class="nc" id="L349">    }</span>
+
+    void untrackAddRequest() {
+<span class="nc" id="L352">        addsInProgress.decrementAndGet();</span>
+<span class="nc" id="L353">    }</span>
+
+    int maxAddsInProgressCount() {
+<span class="nc" id="L356">        return maxAddsInProgress.get();</span>
+    }
+
+    //
+    // Read requests
+    //
+
+    void blockReadRequest() {
+<span class="nc" id="L364">        readsBlocked.incrementAndGet();</span>
+<span class="nc" id="L365">    }</span>
+
+    void unblockReadRequest(long delayNanos) {
+<span class="nc" id="L368">        readEntryBlockedStats.registerSuccessfulEvent(delayNanos, TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L369">        readsBlocked.decrementAndGet();</span>
+<span class="nc" id="L370">    }</span>
+
+    void trackReadRequest() {
+<span class="nc" id="L373">        final int curr = readsInProgress.incrementAndGet();</span>
+<span class="nc" id="L374">        maxReadsInProgress.accumulateAndGet(curr, Integer::max);</span>
+<span class="nc" id="L375">    }</span>
+
+    void untrackReadRequest() {
+<span class="nc" id="L378">        readsInProgress.decrementAndGet();</span>
+<span class="nc" id="L379">    }</span>
+
+    int maxReadsInProgressCount() {
+<span class="nc" id="L382">        return maxReadsInProgress.get();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

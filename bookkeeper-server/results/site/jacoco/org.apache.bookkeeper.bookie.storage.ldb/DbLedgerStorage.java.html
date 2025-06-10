@@ -1,0 +1,663 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DbLedgerStorage.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">DbLedgerStorage.java</span></div><h1>DbLedgerStorage.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+// CHECKSTYLE.OFF: IllegalImport
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.util.concurrent.DefaultThreadFactory;
+import io.netty.util.internal.PlatformDependent;
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.PrimitiveIterator.OfLong;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.CheckpointSource;
+import org.apache.bookkeeper.bookie.CheckpointSource.Checkpoint;
+import org.apache.bookkeeper.bookie.Checkpointer;
+import org.apache.bookkeeper.bookie.DefaultEntryLogger;
+import org.apache.bookkeeper.bookie.GarbageCollectionStatus;
+import org.apache.bookkeeper.bookie.LastAddConfirmedUpdateNotification;
+import org.apache.bookkeeper.bookie.LedgerCache;
+import org.apache.bookkeeper.bookie.LedgerDirsManager;
+import org.apache.bookkeeper.bookie.LedgerStorage;
+import org.apache.bookkeeper.bookie.StateManager;
+import org.apache.bookkeeper.bookie.storage.EntryLogger;
+import org.apache.bookkeeper.bookie.storage.directentrylogger.DirectEntryLogger;
+import org.apache.bookkeeper.bookie.storage.directentrylogger.EntryLogIdsImpl;
+import org.apache.bookkeeper.bookie.storage.ldb.KeyValueStorageFactory.DbConfigType;
+import org.apache.bookkeeper.bookie.storage.ldb.SingleDirectoryDbLedgerStorage.LedgerLoggerProcessor;
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.common.util.Watcher;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.slogger.slf4j.Slf4jSlogger;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+import org.apache.bookkeeper.util.DiskChecker;
+import org.apache.commons.lang3.StringUtils;
+// CHECKSTYLE.ON: IllegalImport
+
+
+/**
+ * Implementation of LedgerStorage that uses RocksDB to keep the indexes for entries stored in EntryLogs.
+ */
+<span class="nc" id="L80">@Slf4j</span>
+<span class="nc" id="L81">public class DbLedgerStorage implements LedgerStorage {</span>
+
+    public static final String WRITE_CACHE_MAX_SIZE_MB = &quot;dbStorage_writeCacheMaxSizeMb&quot;;
+    public static final String READ_AHEAD_CACHE_MAX_SIZE_MB = &quot;dbStorage_readAheadCacheMaxSizeMb&quot;;
+    public static final String DIRECT_IO_ENTRYLOGGER = &quot;dbStorage_directIOEntryLogger&quot;;
+    public static final String DIRECT_IO_ENTRYLOGGER_TOTAL_WRITEBUFFER_SIZE_MB =
+        &quot;dbStorage_directIOEntryLoggerTotalWriteBufferSizeMB&quot;;
+    public static final String DIRECT_IO_ENTRYLOGGER_TOTAL_READBUFFER_SIZE_MB =
+        &quot;dbStorage_directIOEntryLoggerTotalReadBufferSizeMB&quot;;
+    public static final String DIRECT_IO_ENTRYLOGGER_READBUFFER_SIZE_MB =
+        &quot;dbStorage_directIOEntryLoggerReadBufferSizeMB&quot;;
+    public static final String DIRECT_IO_ENTRYLOGGER_MAX_FD_CACHE_TIME_SECONDS =
+        &quot;dbStorage_directIOEntryLoggerMaxFdCacheTimeSeconds&quot;;
+
+    static final String MAX_THROTTLE_TIME_MILLIS = &quot;dbStorage_maxThrottleTimeMs&quot;;
+
+    private static final int MB = 1024 * 1024;
+
+<span class="nc" id="L99">    private static final long DEFAULT_WRITE_CACHE_MAX_SIZE_MB =</span>
+<span class="nc" id="L100">        (long) (0.25 * PlatformDependent.estimateMaxDirectMemory()) / MB;</span>
+<span class="nc" id="L101">    private static final long DEFAULT_READ_CACHE_MAX_SIZE_MB =</span>
+<span class="nc" id="L102">        (long) (0.25 * PlatformDependent.estimateMaxDirectMemory()) / MB;</span>
+
+    static final String READ_AHEAD_CACHE_BATCH_SIZE = &quot;dbStorage_readAheadCacheBatchSize&quot;;
+    static final String READ_AHEAD_CACHE_BATCH_BYTES_SIZE = &quot;dbStorage_readAheadCacheBatchBytesSize&quot;;
+    private static final int DEFAULT_READ_AHEAD_CACHE_BATCH_SIZE = 100;
+    // the default value is -1. this feature(limit of read ahead bytes) is disabled
+    private static final int DEFAULT_READ_AHEAD_CACHE_BATCH_BYTES_SIZE = -1;
+
+<span class="nc" id="L110">    private static final long DEFAULT_DIRECT_IO_TOTAL_WRITEBUFFER_SIZE_MB =</span>
+<span class="nc" id="L111">        (long) (0.125 * PlatformDependent.estimateMaxDirectMemory())</span>
+            / MB;
+<span class="nc" id="L113">    private static final long DEFAULT_DIRECT_IO_TOTAL_READBUFFER_SIZE_MB =</span>
+<span class="nc" id="L114">        (long) (0.125 * PlatformDependent.estimateMaxDirectMemory())</span>
+            / MB;
+    private static final long DEFAULT_DIRECT_IO_READBUFFER_SIZE_MB = 8;
+
+    private static final int DEFAULT_DIRECT_IO_MAX_FD_CACHE_TIME_SECONDS = 300;
+
+    // use the storage assigned to ledger 0 for flags.
+    // if the storage configuration changes, the flags may be lost
+    // but in that case data integrity should kick off anyhow.
+    private static final long STORAGE_FLAGS_KEY = 0L;
+    private int numberOfDirs;
+    private List&lt;SingleDirectoryDbLedgerStorage&gt; ledgerStorageList;
+
+<span class="nc" id="L127">    private ExecutorService entryLoggerWriteExecutor = null;</span>
+<span class="nc" id="L128">    private ExecutorService entryLoggerFlushExecutor = null;</span>
+
+    protected ByteBufAllocator allocator;
+
+    // parent DbLedgerStorage stats (not per directory)
+    private static final String MAX_READAHEAD_BATCH_SIZE = &quot;readahead-max-batch-size&quot;;
+    private static final String MAX_WRITE_CACHE_SIZE = &quot;write-cache-max-size&quot;;
+
+    @StatsDoc(
+            name = MAX_READAHEAD_BATCH_SIZE,
+            help = &quot;the configured readahead batch size&quot;
+    )
+    private Gauge&lt;Integer&gt; readaheadBatchSizeGauge;
+
+    @StatsDoc(
+            name = MAX_WRITE_CACHE_SIZE,
+            help = &quot;the configured write cache size&quot;
+    )
+    private Gauge&lt;Long&gt; writeCacheSizeGauge;
+
+    @Override
+    public void initialize(ServerConfiguration conf, LedgerManager ledgerManager, LedgerDirsManager ledgerDirsManager,
+                           LedgerDirsManager indexDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator)
+            throws IOException {
+<span class="nc" id="L152">        long writeCacheMaxSize = getLongVariableOrDefault(conf, WRITE_CACHE_MAX_SIZE_MB,</span>
+                DEFAULT_WRITE_CACHE_MAX_SIZE_MB) * MB;
+<span class="nc" id="L154">        long readCacheMaxSize = getLongVariableOrDefault(conf, READ_AHEAD_CACHE_MAX_SIZE_MB,</span>
+                DEFAULT_READ_CACHE_MAX_SIZE_MB) * MB;
+<span class="nc" id="L156">        boolean directIOEntryLogger = getBooleanVariableOrDefault(conf, DIRECT_IO_ENTRYLOGGER, false);</span>
+
+<span class="nc" id="L158">        this.allocator = allocator;</span>
+<span class="nc" id="L159">        this.numberOfDirs = ledgerDirsManager.getAllLedgerDirs().size();</span>
+
+<span class="nc" id="L161">        log.info(&quot;Started Db Ledger Storage&quot;);</span>
+<span class="nc" id="L162">        log.info(&quot; - Number of directories: {}&quot;, numberOfDirs);</span>
+<span class="nc" id="L163">        log.info(&quot; - Write cache size: {} MB&quot;, writeCacheMaxSize / MB);</span>
+<span class="nc" id="L164">        log.info(&quot; - Read Cache: {} MB&quot;, readCacheMaxSize / MB);</span>
+
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (readCacheMaxSize + writeCacheMaxSize &gt; PlatformDependent.estimateMaxDirectMemory()) {</span>
+<span class="nc" id="L167">            throw new IOException(&quot;Read and write cache sizes exceed the configured max direct memory size&quot;);</span>
+        }
+
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (ledgerDirsManager.getAllLedgerDirs().size() != indexDirsManager.getAllLedgerDirs().size()) {</span>
+<span class="nc" id="L171">            throw new IOException(&quot;ledger and index dirs size not matched&quot;);</span>
+        }
+
+<span class="nc" id="L174">        long perDirectoryWriteCacheSize = writeCacheMaxSize / numberOfDirs;</span>
+<span class="nc" id="L175">        long perDirectoryReadCacheSize = readCacheMaxSize / numberOfDirs;</span>
+<span class="nc" id="L176">        int readAheadCacheBatchSize = conf.getInt(READ_AHEAD_CACHE_BATCH_SIZE, DEFAULT_READ_AHEAD_CACHE_BATCH_SIZE);</span>
+<span class="nc" id="L177">        long readAheadCacheBatchBytesSize = conf.getInt(READ_AHEAD_CACHE_BATCH_BYTES_SIZE,</span>
+                DEFAULT_READ_AHEAD_CACHE_BATCH_BYTES_SIZE);
+
+<span class="nc" id="L180">        ledgerStorageList = Lists.newArrayList();</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        for (int i = 0; i &lt; ledgerDirsManager.getAllLedgerDirs().size(); i++) {</span>
+<span class="nc" id="L182">            File ledgerDir = ledgerDirsManager.getAllLedgerDirs().get(i);</span>
+<span class="nc" id="L183">            File indexDir = indexDirsManager.getAllLedgerDirs().get(i);</span>
+            // Create a ledger dirs manager for the single directory
+<span class="nc" id="L185">            File[] lDirs = new File[1];</span>
+            // Remove the `/current` suffix which will be appended again by LedgersDirManager
+<span class="nc" id="L187">            lDirs[0] = ledgerDir.getParentFile();</span>
+<span class="nc" id="L188">            LedgerDirsManager ldm = new LedgerDirsManager(conf, lDirs, ledgerDirsManager.getDiskChecker(),</span>
+                    NullStatsLogger.INSTANCE);
+
+            // Create a index dirs manager for the single directory
+<span class="nc" id="L192">            File[] iDirs = new File[1];</span>
+            // Remove the `/current` suffix which will be appended again by LedgersDirManager
+<span class="nc" id="L194">            iDirs[0] = indexDir.getParentFile();</span>
+<span class="nc" id="L195">            LedgerDirsManager idm = new LedgerDirsManager(conf, iDirs, indexDirsManager.getDiskChecker(),</span>
+                    NullStatsLogger.INSTANCE);
+
+            EntryLogger entrylogger;
+<span class="nc bnc" id="L199" title="All 2 branches missed.">            if (directIOEntryLogger) {</span>
+<span class="nc" id="L200">                long perDirectoryTotalWriteBufferSize = MB * getLongVariableOrDefault(</span>
+                    conf,
+                    DIRECT_IO_ENTRYLOGGER_TOTAL_WRITEBUFFER_SIZE_MB,
+                    DEFAULT_DIRECT_IO_TOTAL_WRITEBUFFER_SIZE_MB) / numberOfDirs;
+<span class="nc" id="L204">                long perDirectoryTotalReadBufferSize = MB * getLongVariableOrDefault(</span>
+                    conf,
+                    DIRECT_IO_ENTRYLOGGER_TOTAL_READBUFFER_SIZE_MB,
+                    DEFAULT_DIRECT_IO_TOTAL_READBUFFER_SIZE_MB) / numberOfDirs;
+<span class="nc" id="L208">                int readBufferSize = MB * (int) getLongVariableOrDefault(</span>
+                    conf,
+                    DIRECT_IO_ENTRYLOGGER_READBUFFER_SIZE_MB,
+                    DEFAULT_DIRECT_IO_READBUFFER_SIZE_MB);
+<span class="nc" id="L212">                int maxFdCacheTimeSeconds = (int) getLongVariableOrDefault(</span>
+                    conf,
+                    DIRECT_IO_ENTRYLOGGER_MAX_FD_CACHE_TIME_SECONDS,
+                    DEFAULT_DIRECT_IO_MAX_FD_CACHE_TIME_SECONDS);
+<span class="nc" id="L216">                Slf4jSlogger slog = new Slf4jSlogger(DbLedgerStorage.class);</span>
+<span class="nc" id="L217">                entryLoggerWriteExecutor = Executors.newSingleThreadExecutor(</span>
+                    new DefaultThreadFactory(&quot;EntryLoggerWrite&quot;));
+<span class="nc" id="L219">                entryLoggerFlushExecutor = Executors.newSingleThreadExecutor(</span>
+                    new DefaultThreadFactory(&quot;EntryLoggerFlush&quot;));
+
+<span class="nc" id="L222">                int numReadThreads = conf.getNumReadWorkerThreads();</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                if (numReadThreads == 0) {</span>
+<span class="nc" id="L224">                    numReadThreads = conf.getServerNumIOThreads();</span>
+                }
+
+<span class="nc" id="L227">                entrylogger = new DirectEntryLogger(ledgerDir, new EntryLogIdsImpl(ldm, slog),</span>
+                    new NativeIOImpl(),
+                    allocator, entryLoggerWriteExecutor, entryLoggerFlushExecutor,
+<span class="nc" id="L230">                    conf.getEntryLogSizeLimit(),</span>
+<span class="nc" id="L231">                    conf.getNettyMaxFrameSizeBytes() - 500,</span>
+                    perDirectoryTotalWriteBufferSize,
+                    perDirectoryTotalReadBufferSize,
+                    readBufferSize,
+                    numReadThreads,
+                    maxFdCacheTimeSeconds,
+                    slog, statsLogger);
+<span class="nc" id="L238">            } else {</span>
+<span class="nc" id="L239">                entrylogger = new DefaultEntryLogger(conf, ldm, null, statsLogger, allocator);</span>
+            }
+<span class="nc" id="L241">            ledgerStorageList.add(newSingleDirectoryDbLedgerStorage(conf, ledgerManager, ldm,</span>
+                idm, entrylogger,
+                statsLogger, perDirectoryWriteCacheSize,
+                perDirectoryReadCacheSize,
+                readAheadCacheBatchSize, readAheadCacheBatchBytesSize));
+<span class="nc" id="L246">            ldm.getListeners().forEach(ledgerDirsManager::addLedgerDirsListener);</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">            if (!lDirs[0].getPath().equals(iDirs[0].getPath())) {</span>
+<span class="nc" id="L248">                idm.getListeners().forEach(indexDirsManager::addLedgerDirsListener);</span>
+            }
+        }
+
+        // parent DbLedgerStorage stats (not per directory)
+<span class="nc" id="L253">        readaheadBatchSizeGauge = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L256">                return readAheadCacheBatchSize;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L261">                return readAheadCacheBatchSize;</span>
+            }
+        };
+<span class="nc" id="L264">        statsLogger.registerGauge(MAX_READAHEAD_BATCH_SIZE, readaheadBatchSizeGauge);</span>
+
+<span class="nc" id="L266">        writeCacheSizeGauge = new Gauge&lt;Long&gt;() {</span>
+            @Override
+            public Long getDefaultValue() {
+<span class="nc" id="L269">                return perDirectoryWriteCacheSize;</span>
+            }
+
+            @Override
+            public Long getSample() {
+<span class="nc" id="L274">                return perDirectoryWriteCacheSize;</span>
+            }
+        };
+<span class="nc" id="L277">        statsLogger.registerGauge(MAX_WRITE_CACHE_SIZE, writeCacheSizeGauge);</span>
+<span class="nc" id="L278">    }</span>
+
+    @VisibleForTesting
+    protected SingleDirectoryDbLedgerStorage newSingleDirectoryDbLedgerStorage(ServerConfiguration conf,
+            LedgerManager ledgerManager, LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager,
+            EntryLogger entryLogger, StatsLogger statsLogger, long writeCacheSize, long readCacheSize,
+            int readAheadCacheBatchSize, long readAheadCacheBatchBytesSize)
+            throws IOException {
+<span class="nc" id="L286">        return new SingleDirectoryDbLedgerStorage(conf, ledgerManager, ledgerDirsManager, indexDirsManager, entryLogger,</span>
+                                                  statsLogger, allocator, writeCacheSize, readCacheSize,
+                                                  readAheadCacheBatchSize, readAheadCacheBatchBytesSize);
+    }
+
+    @Override
+    public void setStateManager(StateManager stateManager) {
+<span class="nc" id="L293">        ledgerStorageList.forEach(s -&gt; s.setStateManager(stateManager));</span>
+<span class="nc" id="L294">    }</span>
+    @Override
+    public void setCheckpointSource(CheckpointSource checkpointSource) {
+<span class="nc" id="L297">        ledgerStorageList.forEach(s -&gt; s.setCheckpointSource(checkpointSource));</span>
+<span class="nc" id="L298">    }</span>
+    @Override
+    public void setCheckpointer(Checkpointer checkpointer) {
+<span class="nc" id="L301">        ledgerStorageList.forEach(s -&gt; s.setCheckpointer(checkpointer));</span>
+<span class="nc" id="L302">    }</span>
+
+    @Override
+    public void start() {
+<span class="nc" id="L306">        ledgerStorageList.forEach(LedgerStorage::start);</span>
+<span class="nc" id="L307">    }</span>
+
+    @Override
+    public void shutdown() throws InterruptedException {
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        for (LedgerStorage ls : ledgerStorageList) {</span>
+<span class="nc" id="L312">            ls.shutdown();</span>
+<span class="nc" id="L313">        }</span>
+
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        if (entryLoggerWriteExecutor != null) {</span>
+<span class="nc" id="L316">            entryLoggerWriteExecutor.shutdown();</span>
+        }
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        if (entryLoggerFlushExecutor != null) {</span>
+<span class="nc" id="L319">            entryLoggerFlushExecutor.shutdown();</span>
+        }
+<span class="nc" id="L321">    }</span>
+
+    @Override
+    public boolean ledgerExists(long ledgerId) throws IOException {
+<span class="nc" id="L325">        return getLedgerStorage(ledgerId).ledgerExists(ledgerId);</span>
+    }
+
+    @Override
+    public boolean entryExists(long ledgerId, long entryId) throws IOException, BookieException {
+<span class="nc" id="L330">        return getLedgerStorage(ledgerId).entryExists(ledgerId, entryId);</span>
+    }
+
+    @Override
+    public boolean setFenced(long ledgerId) throws IOException {
+<span class="nc" id="L335">        return getLedgerStorage(ledgerId).setFenced(ledgerId);</span>
+    }
+
+    @Override
+    public boolean isFenced(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L340">        return getLedgerStorage(ledgerId).isFenced(ledgerId);</span>
+    }
+
+    @Override
+    public void setMasterKey(long ledgerId, byte[] masterKey) throws IOException {
+<span class="nc" id="L345">        getLedgerStorage(ledgerId).setMasterKey(ledgerId, masterKey);</span>
+<span class="nc" id="L346">    }</span>
+
+    @Override
+    public byte[] readMasterKey(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L350">        return getLedgerStorage(ledgerId).readMasterKey(ledgerId);</span>
+    }
+
+    @Override
+    public long addEntry(ByteBuf entry) throws IOException, BookieException {
+<span class="nc" id="L355">        long ledgerId = entry.getLong(entry.readerIndex());</span>
+<span class="nc" id="L356">        return getLedgerStorage(ledgerId).addEntry(entry);</span>
+    }
+
+    @Override
+    public ByteBuf getEntry(long ledgerId, long entryId) throws IOException, BookieException {
+<span class="nc" id="L361">        return getLedgerStorage(ledgerId).getEntry(ledgerId, entryId);</span>
+    }
+
+    @Override
+    public long getLastAddConfirmed(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L366">        return getLedgerStorage(ledgerId).getLastAddConfirmed(ledgerId);</span>
+    }
+
+    @Override
+    public boolean waitForLastAddConfirmedUpdate(long ledgerId, long previousLAC,
+            Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher) throws IOException {
+<span class="nc" id="L372">        return getLedgerStorage(ledgerId).waitForLastAddConfirmedUpdate(ledgerId, previousLAC, watcher);</span>
+    }
+
+    @Override
+    public void cancelWaitForLastAddConfirmedUpdate(long ledgerId,
+                                                    Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher)
+            throws IOException {
+<span class="nc" id="L379">        getLedgerStorage(ledgerId).cancelWaitForLastAddConfirmedUpdate(ledgerId, watcher);</span>
+<span class="nc" id="L380">    }</span>
+
+    @Override
+    public void flush() throws IOException {
+<span class="nc bnc" id="L384" title="All 2 branches missed.">        for (LedgerStorage ls : ledgerStorageList) {</span>
+<span class="nc" id="L385">            ls.flush();</span>
+<span class="nc" id="L386">        }</span>
+<span class="nc" id="L387">    }</span>
+
+    @Override
+    public void checkpoint(Checkpoint checkpoint) throws IOException {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        for (LedgerStorage ls : ledgerStorageList) {</span>
+<span class="nc" id="L392">            ls.checkpoint(checkpoint);</span>
+<span class="nc" id="L393">        }</span>
+<span class="nc" id="L394">    }</span>
+
+    @Override
+    public void deleteLedger(long ledgerId) throws IOException {
+<span class="nc" id="L398">        getLedgerStorage(ledgerId).deleteLedger(ledgerId);</span>
+<span class="nc" id="L399">    }</span>
+
+    @Override
+    public void registerLedgerDeletionListener(LedgerDeletionListener listener) {
+<span class="nc" id="L403">        ledgerStorageList.forEach(ls -&gt; ls.registerLedgerDeletionListener(listener));</span>
+<span class="nc" id="L404">    }</span>
+
+    @Override
+    public void setExplicitLac(long ledgerId, ByteBuf lac) throws IOException {
+<span class="nc" id="L408">        getLedgerStorage(ledgerId).setExplicitLac(ledgerId, lac);</span>
+<span class="nc" id="L409">    }</span>
+
+    @Override
+    public ByteBuf getExplicitLac(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L413">        return getLedgerStorage(ledgerId).getExplicitLac(ledgerId);</span>
+    }
+
+    public long addLedgerToIndex(long ledgerId, boolean isFenced, byte[] masterKey,
+                                 LedgerCache.PageEntriesIterable pages) throws Exception {
+<span class="nc" id="L418">        return getLedgerStorage(ledgerId).addLedgerToIndex(ledgerId, isFenced, masterKey, pages);</span>
+    }
+
+    public long getLastEntryInLedger(long ledgerId) throws IOException {
+<span class="nc" id="L422">        return getLedgerStorage(ledgerId).getEntryLocationIndex().getLastEntryInLedger(ledgerId);</span>
+    }
+
+    public long getLocation(long ledgerId, long entryId) throws IOException {
+<span class="nc" id="L426">        return getLedgerStorage(ledgerId).getEntryLocationIndex().getLocation(ledgerId, entryId);</span>
+    }
+
+    private SingleDirectoryDbLedgerStorage getLedgerStorage(long ledgerId) {
+<span class="nc" id="L430">        return ledgerStorageList.get(MathUtils.signSafeMod(ledgerId, numberOfDirs));</span>
+    }
+
+    public Iterable&lt;Long&gt; getActiveLedgersInRange(long firstLedgerId, long lastLedgerId) throws IOException {
+<span class="nc" id="L434">        List&lt;Iterable&lt;Long&gt;&gt; listIt = new ArrayList&lt;&gt;(numberOfDirs);</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">        for (SingleDirectoryDbLedgerStorage ls : ledgerStorageList) {</span>
+<span class="nc" id="L436">            listIt.add(ls.getActiveLedgersInRange(firstLedgerId, lastLedgerId));</span>
+<span class="nc" id="L437">        }</span>
+
+<span class="nc" id="L439">        return Iterables.concat(listIt);</span>
+    }
+
+    public ByteBuf getLastEntry(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L443">        return getLedgerStorage(ledgerId).getLastEntry(ledgerId);</span>
+    }
+
+    @VisibleForTesting
+    boolean isFlushRequired() {
+<span class="nc" id="L448">        return ledgerStorageList.stream().allMatch(SingleDirectoryDbLedgerStorage::isFlushRequired);</span>
+    }
+
+    @VisibleForTesting
+    List&lt;SingleDirectoryDbLedgerStorage&gt; getLedgerStorageList() {
+<span class="nc" id="L453">        return ledgerStorageList;</span>
+    }
+
+    /**
+     * Reads ledger index entries to get list of entry-logger that contains given ledgerId.
+     *
+     * @param ledgerId
+     * @param serverConf
+     * @param processor
+     * @throws IOException
+     */
+    public static void readLedgerIndexEntries(long ledgerId, ServerConfiguration serverConf,
+            LedgerLoggerProcessor processor) throws IOException {
+
+<span class="nc" id="L467">        checkNotNull(serverConf, &quot;ServerConfiguration can't be null&quot;);</span>
+<span class="nc" id="L468">        checkNotNull(processor, &quot;LedgerLogger info processor can't null&quot;);</span>
+
+<span class="nc" id="L470">        DiskChecker diskChecker = new DiskChecker(serverConf.getDiskUsageThreshold(),</span>
+<span class="nc" id="L471">                serverConf.getDiskUsageWarnThreshold());</span>
+<span class="nc" id="L472">        LedgerDirsManager ledgerDirsManager = new LedgerDirsManager(serverConf,</span>
+<span class="nc" id="L473">                serverConf.getLedgerDirs(), diskChecker);</span>
+<span class="nc" id="L474">        LedgerDirsManager indexDirsManager = ledgerDirsManager;</span>
+<span class="nc" id="L475">        File[] idxDirs = serverConf.getIndexDirs();</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">        if (null != idxDirs) {</span>
+<span class="nc" id="L477">            indexDirsManager = new LedgerDirsManager(serverConf, idxDirs, diskChecker);</span>
+        }
+<span class="nc" id="L479">        List&lt;File&gt; ledgerDirs = ledgerDirsManager.getAllLedgerDirs();</span>
+<span class="nc" id="L480">        List&lt;File&gt; indexDirs = indexDirsManager.getAllLedgerDirs();</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">        if (ledgerDirs.size() != indexDirs.size()) {</span>
+<span class="nc" id="L482">            throw new IOException(&quot;ledger and index dirs size not matched&quot;);</span>
+        }
+<span class="nc" id="L484">        int dirIndex = MathUtils.signSafeMod(ledgerId, ledgerDirs.size());</span>
+<span class="nc" id="L485">        String indexBasePath = indexDirs.get(dirIndex).toString();</span>
+
+<span class="nc" id="L487">        EntryLocationIndex entryLocationIndex = new EntryLocationIndex(serverConf,</span>
+                (basePath, subPath, dbConfigType, conf1) -&gt;
+<span class="nc" id="L489">                        new KeyValueStorageRocksDB(basePath, subPath, DbConfigType.Default, conf1, true),</span>
+                indexBasePath, NullStatsLogger.INSTANCE);
+        try {
+<span class="nc" id="L492">            long lastEntryId = entryLocationIndex.getLastEntryInLedger(ledgerId);</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">            for (long currentEntry = 0; currentEntry &lt;= lastEntryId; currentEntry++) {</span>
+<span class="nc" id="L494">                long offset = entryLocationIndex.getLocation(ledgerId, currentEntry);</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">                if (offset &lt;= 0) {</span>
+                    // entry not found in this bookie
+<span class="nc" id="L497">                    continue;</span>
+                }
+<span class="nc" id="L499">                long entryLogId = offset &gt;&gt; 32L;</span>
+<span class="nc" id="L500">                long position = offset &amp; 0xffffffffL;</span>
+<span class="nc" id="L501">                processor.process(currentEntry, entryLogId, position);</span>
+            }
+        } finally {
+<span class="nc" id="L504">            entryLocationIndex.close();</span>
+        }
+<span class="nc" id="L506">    }</span>
+
+    @Override
+    public void forceGC() {
+<span class="nc" id="L510">        ledgerStorageList.stream().forEach(SingleDirectoryDbLedgerStorage::forceGC);</span>
+<span class="nc" id="L511">    }</span>
+
+    @Override
+    public void forceGC(boolean forceMajor, boolean forceMinor) {
+<span class="nc" id="L515">        ledgerStorageList.stream().forEach(s -&gt; s.forceGC(forceMajor, forceMinor));</span>
+<span class="nc" id="L516">    }</span>
+
+    @Override
+    public boolean isInForceGC() {
+<span class="nc" id="L520">        return ledgerStorageList.stream().anyMatch(SingleDirectoryDbLedgerStorage::isInForceGC);</span>
+    }
+
+    @Override
+    public void suspendMinorGC() {
+<span class="nc" id="L525">        ledgerStorageList.stream().forEach(SingleDirectoryDbLedgerStorage::suspendMinorGC);</span>
+<span class="nc" id="L526">    }</span>
+
+    @Override
+    public void suspendMajorGC() {
+<span class="nc" id="L530">        ledgerStorageList.stream().forEach(SingleDirectoryDbLedgerStorage::suspendMajorGC);</span>
+<span class="nc" id="L531">    }</span>
+
+    @Override
+    public void resumeMinorGC() {
+<span class="nc" id="L535">        ledgerStorageList.stream().forEach(SingleDirectoryDbLedgerStorage::resumeMinorGC);</span>
+<span class="nc" id="L536">    }</span>
+
+    @Override
+    public void resumeMajorGC() {
+<span class="nc" id="L540">        ledgerStorageList.stream().forEach(SingleDirectoryDbLedgerStorage::resumeMajorGC);</span>
+<span class="nc" id="L541">    }</span>
+
+    @Override
+    public boolean isMajorGcSuspended() {
+<span class="nc" id="L545">        return ledgerStorageList.stream().allMatch(SingleDirectoryDbLedgerStorage::isMajorGcSuspended);</span>
+    }
+
+    @Override
+    public boolean isMinorGcSuspended() {
+<span class="nc" id="L550">        return ledgerStorageList.stream().allMatch(SingleDirectoryDbLedgerStorage::isMinorGcSuspended);</span>
+    }
+
+    @Override
+    public void entryLocationCompact() {
+<span class="nc" id="L555">        ledgerStorageList.forEach(SingleDirectoryDbLedgerStorage::entryLocationCompact);</span>
+<span class="nc" id="L556">    }</span>
+
+    @Override
+    public void entryLocationCompact(List&lt;String&gt; locations) {
+<span class="nc bnc" id="L560" title="All 2 branches missed.">        for (SingleDirectoryDbLedgerStorage ledgerStorage : ledgerStorageList) {</span>
+<span class="nc" id="L561">            String entryLocation = ledgerStorage.getEntryLocationDBPath().get(0);</span>
+<span class="nc bnc" id="L562" title="All 2 branches missed.">            if (locations.contains(entryLocation)) {</span>
+<span class="nc" id="L563">                ledgerStorage.entryLocationCompact();</span>
+            }
+<span class="nc" id="L565">        }</span>
+<span class="nc" id="L566">    }</span>
+
+    @Override
+    public boolean isEntryLocationCompacting() {
+<span class="nc" id="L570">        return ledgerStorageList.stream().anyMatch(SingleDirectoryDbLedgerStorage::isEntryLocationCompacting);</span>
+    }
+
+    @Override
+    public Map&lt;String, Boolean&gt; isEntryLocationCompacting(List&lt;String&gt; locations) {
+<span class="nc" id="L575">        HashMap&lt;String, Boolean&gt; isCompacting = Maps.newHashMap();</span>
+<span class="nc bnc" id="L576" title="All 2 branches missed.">        for (SingleDirectoryDbLedgerStorage ledgerStorage : ledgerStorageList) {</span>
+<span class="nc" id="L577">            String entryLocation = ledgerStorage.getEntryLocationDBPath().get(0);</span>
+<span class="nc bnc" id="L578" title="All 2 branches missed.">            if (locations.contains(entryLocation)) {</span>
+<span class="nc" id="L579">                isCompacting.put(entryLocation, ledgerStorage.isEntryLocationCompacting());</span>
+            }
+<span class="nc" id="L581">        }</span>
+<span class="nc" id="L582">        return isCompacting;</span>
+    }
+
+    @Override
+    public List&lt;String&gt; getEntryLocationDBPath() {
+<span class="nc" id="L587">        List&lt;String&gt; allEntryLocationDBPath = Lists.newArrayList();</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">        for (SingleDirectoryDbLedgerStorage ledgerStorage : ledgerStorageList) {</span>
+<span class="nc" id="L589">            allEntryLocationDBPath.addAll(ledgerStorage.getEntryLocationDBPath());</span>
+<span class="nc" id="L590">        }</span>
+<span class="nc" id="L591">        return allEntryLocationDBPath;</span>
+    }
+
+    @Override
+    public List&lt;GarbageCollectionStatus&gt; getGarbageCollectionStatus() {
+<span class="nc" id="L596">        return ledgerStorageList.stream()</span>
+<span class="nc" id="L597">            .map(single -&gt; single.getGarbageCollectionStatus().get(0)).collect(Collectors.toList());</span>
+    }
+
+    static long getLongVariableOrDefault(ServerConfiguration conf, String keyName, long defaultValue) {
+<span class="nc" id="L601">        Object obj = conf.getProperty(keyName);</span>
+<span class="nc bnc" id="L602" title="All 2 branches missed.">        if (obj instanceof Number) {</span>
+<span class="nc" id="L603">            return ((Number) obj).longValue();</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">        } else if (obj == null) {</span>
+<span class="nc" id="L605">            return defaultValue;</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">        } else if (StringUtils.isEmpty(conf.getString(keyName))) {</span>
+<span class="nc" id="L607">            return defaultValue;</span>
+        } else {
+<span class="nc" id="L609">            return conf.getLong(keyName);</span>
+        }
+    }
+
+    static boolean getBooleanVariableOrDefault(ServerConfiguration conf, String keyName, boolean defaultValue) {
+<span class="nc" id="L614">        Object obj = conf.getProperty(keyName);</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">        if (obj instanceof Boolean) {</span>
+<span class="nc" id="L616">            return (Boolean) obj;</span>
+<span class="nc bnc" id="L617" title="All 2 branches missed.">        } else if (obj == null) {</span>
+<span class="nc" id="L618">            return defaultValue;</span>
+<span class="nc bnc" id="L619" title="All 2 branches missed.">        } else if (StringUtils.isEmpty(conf.getString(keyName))) {</span>
+<span class="nc" id="L620">            return defaultValue;</span>
+        } else {
+<span class="nc" id="L622">            return conf.getBoolean(keyName);</span>
+        }
+    }
+
+    @Override
+    public OfLong getListOfEntriesOfLedger(long ledgerId) throws IOException {
+        // check Issue #2078
+<span class="nc" id="L629">        throw new UnsupportedOperationException(</span>
+                &quot;getListOfEntriesOfLedger method is currently unsupported for DbLedgerStorage&quot;);
+    }
+
+    @Override
+    public void setLimboState(long ledgerId) throws IOException {
+<span class="nc" id="L635">        getLedgerStorage(ledgerId).setLimboState(ledgerId);</span>
+<span class="nc" id="L636">    }</span>
+
+    @Override
+    public boolean hasLimboState(long ledgerId) throws IOException {
+<span class="nc" id="L640">        return getLedgerStorage(ledgerId).hasLimboState(ledgerId);</span>
+    }
+
+    @Override
+    public void clearLimboState(long ledgerId) throws IOException {
+<span class="nc" id="L645">        getLedgerStorage(ledgerId).clearLimboState(ledgerId);</span>
+<span class="nc" id="L646">    }</span>
+
+    @Override
+    public EnumSet&lt;StorageState&gt; getStorageStateFlags() throws IOException {
+<span class="nc" id="L650">        return getLedgerStorage(STORAGE_FLAGS_KEY).getStorageStateFlags();</span>
+    }
+
+    @Override
+    public void setStorageStateFlag(StorageState flag) throws IOException {
+<span class="nc" id="L655">        getLedgerStorage(STORAGE_FLAGS_KEY).setStorageStateFlag(flag);</span>
+<span class="nc" id="L656">    }</span>
+
+    @Override
+    public void clearStorageStateFlag(StorageState flag) throws IOException {
+<span class="nc" id="L660">        getLedgerStorage(STORAGE_FLAGS_KEY).clearStorageStateFlag(flag);</span>
+<span class="nc" id="L661">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

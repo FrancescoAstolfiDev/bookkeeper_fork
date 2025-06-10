@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BufferedChannelBase.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">BufferedChannelBase.java</span></div><h1>BufferedChannelBase.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie;
+
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+
+/**
+ * A {@code BufferedChannelBase} adds functionality to an existing file channel, the ability
+ * to buffer the input and output data. This class is a base class for wrapping the {@link FileChannel}.
+ */
+public abstract class BufferedChannelBase {
+    static class BufferedChannelClosedException extends IOException {
+        BufferedChannelClosedException() {
+<span class="nc" id="L30">            super(&quot;Attempting to access a file channel that has already been closed&quot;);</span>
+<span class="nc" id="L31">        }</span>
+    }
+
+    protected final FileChannel fileChannel;
+
+<span class="nc" id="L36">    protected BufferedChannelBase(FileChannel fc) {</span>
+<span class="nc" id="L37">        this.fileChannel = fc;</span>
+<span class="nc" id="L38">    }</span>
+
+    protected FileChannel validateAndGetFileChannel() throws IOException {
+        // Even if we have BufferedChannelBase objects in the cache, higher layers should
+        // guarantee that once a log file has been closed and possibly deleted during garbage
+        // collection, attempts will not be made to read from it
+<span class="nc bnc" id="L44" title="All 2 branches missed.">        if (!fileChannel.isOpen()) {</span>
+<span class="nc" id="L45">            throw new BufferedChannelClosedException();</span>
+        }
+<span class="nc" id="L47">        return fileChannel;</span>
+    }
+
+    /**
+     * Get the current size of the underlying FileChannel.
+     * @return
+     */
+    public long size() throws IOException {
+<span class="nc" id="L55">        return validateAndGetFileChannel().size();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,556 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DataIntegrityCheckImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.datainteg</a> &gt; <span class="el_source">DataIntegrityCheckImpl.java</span></div><h1>DataIntegrityCheckImpl.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.bookie.datainteg;
+
+import com.google.common.collect.ImmutableSortedMap;
+import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.core.Maybe;
+import io.reactivex.rxjava3.core.Scheduler;
+import io.reactivex.rxjava3.core.Single;
+import io.reactivex.rxjava3.disposables.Disposable;
+import java.io.IOException;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.NavigableMap;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.LedgerStorage;
+import org.apache.bookkeeper.bookie.LedgerStorage.StorageState;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.net.BookieId;
+
+/**
+ * An implementation of the DataIntegrityCheck interface.
+ */
+<span class="nc" id="L57">@Slf4j</span>
+public class DataIntegrityCheckImpl implements DataIntegrityCheck {
+    private static final int MAX_INFLIGHT = 300;
+    private static final int MAX_ENTRIES_INFLIGHT = 3000;
+    private static final int ZK_TIMEOUT_S = 30;
+    private final BookieId bookieId;
+    private final LedgerManager ledgerManager;
+    private final LedgerStorage ledgerStorage;
+    private final EntryCopier entryCopier;
+    private final BookKeeperAdmin admin;
+    private final Scheduler scheduler;
+<span class="nc" id="L68">    private final AtomicReference&lt;Map&lt;Long, LedgerMetadata&gt;&gt; ledgersCacheRef =</span>
+        new AtomicReference&lt;&gt;(null);
+    private CompletableFuture&lt;Void&gt; preBootFuture;
+
+    public DataIntegrityCheckImpl(BookieId bookieId,
+                                  LedgerManager ledgerManager,
+                                  LedgerStorage ledgerStorage,
+                                  EntryCopier entryCopier,
+                                  BookKeeperAdmin admin,
+<span class="nc" id="L77">                                  Scheduler scheduler) {</span>
+<span class="nc" id="L78">        this.bookieId = bookieId;</span>
+<span class="nc" id="L79">        this.ledgerManager = ledgerManager;</span>
+<span class="nc" id="L80">        this.ledgerStorage = ledgerStorage;</span>
+<span class="nc" id="L81">        this.entryCopier = entryCopier;</span>
+<span class="nc" id="L82">        this.admin = admin;</span>
+<span class="nc" id="L83">        this.scheduler = scheduler;</span>
+<span class="nc" id="L84">    }</span>
+
+    @Override
+    public synchronized CompletableFuture&lt;Void&gt; runPreBootCheck(String reason) {
+        // we only run this once, it could be kicked off by different checks
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (preBootFuture == null) {</span>
+<span class="nc" id="L90">            preBootFuture = runPreBootSequence(reason);</span>
+        }
+<span class="nc" id="L92">        return preBootFuture;</span>
+
+    }
+
+    private CompletableFuture&lt;Void&gt; runPreBootSequence(String reason) {
+<span class="nc" id="L97">        String runId = UUID.randomUUID().toString();</span>
+<span class="nc" id="L98">        log.info(&quot;Event: {}, RunId: {}, Reason: {}&quot;, Events.PREBOOT_START, runId, reason);</span>
+        try {
+<span class="nc" id="L100">            this.ledgerStorage.setStorageStateFlag(StorageState.NEEDS_INTEGRITY_CHECK);</span>
+<span class="nc" id="L101">        } catch (IOException ioe) {</span>
+<span class="nc" id="L102">            log.error(&quot;Event: {}, RunId: {}&quot;, Events.PREBOOT_ERROR, runId, ioe);</span>
+<span class="nc" id="L103">            return FutureUtils.exception(ioe);</span>
+<span class="nc" id="L104">        }</span>
+
+<span class="nc" id="L106">        MetadataAsyncIterator iter = new MetadataAsyncIterator(scheduler,</span>
+                ledgerManager, MAX_INFLIGHT, ZK_TIMEOUT_S, TimeUnit.SECONDS);
+<span class="nc" id="L108">        CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L109">        Map&lt;Long, LedgerMetadata&gt; ledgersCache =</span>
+<span class="nc" id="L110">            new ConcurrentSkipListMap&lt;&gt;(Comparator.&lt;Long&gt;naturalOrder().reversed());</span>
+<span class="nc" id="L111">        iter.forEach((ledgerId, metadata) -&gt; {</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                if (ensemblesContainBookie(metadata, bookieId)) {</span>
+<span class="nc" id="L113">                    ledgersCache.put(ledgerId, metadata);</span>
+                    try {
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                        if (!ledgerStorage.ledgerExists(ledgerId)) {</span>
+<span class="nc" id="L116">                            ledgerStorage.setMasterKey(ledgerId, new byte[0]);</span>
+                        }
+<span class="nc" id="L118">                    } catch (IOException ioe) {</span>
+<span class="nc" id="L119">                        log.error(&quot;Event: {}, RunId: {}, LedgerId: {}&quot;,</span>
+                                Events.ENSURE_LEDGER_ERROR, runId, ledgerId, ioe);
+<span class="nc" id="L121">                        return FutureUtils.exception(ioe);</span>
+<span class="nc" id="L122">                    }</span>
+                }
+<span class="nc" id="L124">                return processPreBoot(ledgerId, metadata, runId);</span>
+            })
+<span class="nc" id="L126">            .whenComplete((ignore, exception) -&gt; {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                    if (exception != null) {</span>
+<span class="nc" id="L128">                        log.error(&quot;Event: {}, runId: {}&quot;, Events.PREBOOT_ERROR, runId, exception);</span>
+<span class="nc" id="L129">                        promise.completeExceptionally(exception);</span>
+                    } else {
+                        try {
+<span class="nc" id="L132">                            this.ledgerStorage.flush();</span>
+
+<span class="nc" id="L134">                            updateMetadataCache(ledgersCache);</span>
+
+<span class="nc" id="L136">                            log.info(&quot;Event: {}, runId: {}, processed: {}&quot;,</span>
+<span class="nc" id="L137">                                    Events.PREBOOT_END, runId, ledgersCache.size());</span>
+<span class="nc" id="L138">                            promise.complete(null);</span>
+<span class="nc" id="L139">                        } catch (Throwable t) {</span>
+<span class="nc" id="L140">                            log.error(&quot;Event: {}, runId: {}&quot;, Events.PREBOOT_ERROR, runId, t);</span>
+<span class="nc" id="L141">                            promise.completeExceptionally(t);</span>
+<span class="nc" id="L142">                        }</span>
+                    }
+<span class="nc" id="L144">                });</span>
+<span class="nc" id="L145">        return promise;</span>
+    }
+
+    @Override
+    public boolean needsFullCheck() throws IOException {
+<span class="nc" id="L150">        return this.ledgerStorage.getStorageStateFlags()</span>
+<span class="nc" id="L151">            .contains(StorageState.NEEDS_INTEGRITY_CHECK);</span>
+    }
+
+    @Override
+    public CompletableFuture&lt;Void&gt; runFullCheck() {
+<span class="nc" id="L156">        String runId = UUID.randomUUID().toString();</span>
+
+<span class="nc" id="L158">        log.info(&quot;Event: {}, runId: {}&quot;, Events.FULL_CHECK_INIT, runId);</span>
+<span class="nc" id="L159">        return getCachedOrReadMetadata(runId)</span>
+<span class="nc" id="L160">            .thenCompose(</span>
+                    (ledgers) -&gt; {
+<span class="nc" id="L162">                        log.info(&quot;Event: {}, runId: {}, ledgerCount: {}&quot;,</span>
+<span class="nc" id="L163">                                Events.FULL_CHECK_START, runId, ledgers.size());</span>
+<span class="nc" id="L164">                        return checkAndRecoverLedgers(ledgers, runId).thenApply((resolved) -&gt; {</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">                                for (LedgerResult r : resolved) {</span>
+<span class="nc bnc" id="L166" title="All 4 branches missed.">                                    if (r.isMissing() || r.isOK()) {</span>
+<span class="nc" id="L167">                                        ledgers.remove(r.getLedgerId());</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                                    } else if (r.isError()) {</span>
+                                        // if there was an error, make sure we have the latest
+                                        // metadata for the next iteration
+<span class="nc" id="L171">                                        ledgers.put(r.getLedgerId(), r.getMetadata());</span>
+                                    }
+<span class="nc" id="L173">                                }</span>
+<span class="nc" id="L174">                                Optional&lt;Throwable&gt; firstError = resolved.stream().filter(r -&gt; r.isError())</span>
+<span class="nc" id="L175">                                    .map(r -&gt; r.getThrowable()).findFirst();</span>
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">                                if (firstError.isPresent()) {</span>
+<span class="nc" id="L178">                                    log.error(&quot;Event: {}, runId: {}, ok: {}&quot;</span>
+                                            + &quot;, error: {}, missing: {}, ledgersToRetry: {}&quot;,
+                                            Events.FULL_CHECK_END, runId,
+<span class="nc" id="L181">                                            resolved.stream().filter(r -&gt; r.isOK()).count(),</span>
+<span class="nc" id="L182">                                            resolved.stream().filter(r -&gt; r.isError()).count(),</span>
+<span class="nc" id="L183">                                            resolved.stream().filter(r -&gt; r.isMissing()).count(),</span>
+<span class="nc" id="L184">                                            ledgers.size(), firstError.get());</span>
+                                } else {
+<span class="nc" id="L186">                                    log.info(&quot;Event: {}, runId: {}, ok: {}, error: 0, missing: {}, ledgersToRetry: {}&quot;,</span>
+                                            Events.FULL_CHECK_END, runId,
+<span class="nc" id="L188">                                            resolved.stream().filter(r -&gt; r.isOK()).count(),</span>
+<span class="nc" id="L189">                                            resolved.stream().filter(r -&gt; r.isMissing()).count(),</span>
+<span class="nc" id="L190">                                            ledgers.size());</span>
+                                }
+<span class="nc" id="L192">                                return ledgers;</span>
+                            });
+                    })
+<span class="nc" id="L195">            .thenCompose(</span>
+                    (ledgers) -&gt; {
+<span class="nc" id="L197">                        CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+                        try {
+<span class="nc" id="L199">                            this.ledgerStorage.flush();</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                            if (ledgers.isEmpty()) {</span>
+<span class="nc" id="L201">                                log.info(&quot;Event: {}, runId: {}&quot;, Events.CLEAR_INTEGCHECK_FLAG, runId);</span>
+<span class="nc" id="L202">                                this.ledgerStorage.clearStorageStateFlag(</span>
+                                        StorageState.NEEDS_INTEGRITY_CHECK);
+                            }
+                            // not really needed as we are modifying the map in place
+<span class="nc" id="L206">                            updateMetadataCache(ledgers);</span>
+<span class="nc" id="L207">                            log.info(&quot;Event: {}, runId: {}&quot;, Events.FULL_CHECK_COMPLETE, runId);</span>
+<span class="nc" id="L208">                            promise.complete(null);</span>
+<span class="nc" id="L209">                        } catch (IOException ioe) {</span>
+<span class="nc" id="L210">                            log.error(&quot;Event: {}, runId: {}&quot;, Events.FULL_CHECK_ERROR, runId, ioe);</span>
+<span class="nc" id="L211">                            promise.completeExceptionally(ioe);</span>
+<span class="nc" id="L212">                        }</span>
+<span class="nc" id="L213">                        return promise;</span>
+                    });
+    }
+
+    void updateMetadataCache(Map&lt;Long, LedgerMetadata&gt; ledgers) {
+<span class="nc" id="L218">        ledgersCacheRef.set(ledgers);</span>
+<span class="nc" id="L219">    }</span>
+
+    CompletableFuture&lt;Map&lt;Long, LedgerMetadata&gt;&gt; getCachedOrReadMetadata(String runId) {
+<span class="nc" id="L222">        Map&lt;Long, LedgerMetadata&gt; map = ledgersCacheRef.get();</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (map != null) {</span>
+<span class="nc" id="L224">            log.info(&quot;Event: {}, runId: {}, ledgerCount: {}&quot;, Events.USE_CACHED_METADATA, runId,</span>
+<span class="nc" id="L225">                    map.size());</span>
+<span class="nc" id="L226">            return CompletableFuture.completedFuture(map);</span>
+        } else {
+<span class="nc" id="L228">            log.info(&quot;Event: {}, runId: {}&quot;, Events.REFRESH_METADATA, runId);</span>
+<span class="nc" id="L229">            MetadataAsyncIterator iter = new MetadataAsyncIterator(scheduler,</span>
+                    ledgerManager, MAX_INFLIGHT, ZK_TIMEOUT_S, TimeUnit.SECONDS);
+<span class="nc" id="L231">            Map&lt;Long, LedgerMetadata&gt; ledgersCache =</span>
+<span class="nc" id="L232">                new ConcurrentSkipListMap&lt;&gt;(Comparator.&lt;Long&gt;naturalOrder().reversed());</span>
+<span class="nc" id="L233">            return iter.forEach((ledgerId, metadata) -&gt; {</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                    if (ensemblesContainBookie(metadata, bookieId)) {</span>
+<span class="nc" id="L235">                        ledgersCache.put(ledgerId, metadata);</span>
+                    }
+<span class="nc" id="L237">                    return CompletableFuture.completedFuture(null);</span>
+                })
+<span class="nc" id="L239">                .thenApply(ignore -&gt; {</span>
+<span class="nc" id="L240">                        updateMetadataCache(ledgersCache);</span>
+<span class="nc" id="L241">                        return ledgersCache;</span>
+                    });
+        }
+    }
+
+    /**
+     * Check whether the current bookie exists in the last ensemble of the bookie.
+     * If it does, and the ledger is not closed, then this bookie may have accepted a fencing
+     * request or an entry which it no longer contains. The only way to resolve this is to
+     * open/recover the ledger. This bookie should not take part in the recovery, so the bookie
+     * must be marked as in limbo. This will stop the bookie from responding to read requests for
+     * that ledger, so clients will not be able to take into account the response of the bookie
+     * during recovery. Effectively we are telling the client that we don't know whether we had
+     * certain entries or not, so go look elsewhere.
+     * We also fence all ledgers with this bookie in the last segment, to prevent any new writes,
+     * so that after the limbo state is cleared, we won't accept any new writes.
+
+     * We only need to consider final ensembles in non-closed ledgers at the moment of time that
+     * the preboot check commences. If this bookie is added to a new ensemble after that point in
+     * time, we know that we haven't received any entries for that segment, nor have we received
+     * a fencing request, because we are still in the preboot sequence.
+     */
+    private CompletableFuture&lt;Void&gt; processPreBoot(long ledgerId, LedgerMetadata metadata,
+                                                   String runId) {
+<span class="nc" id="L265">        Map.Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; lastEnsemble = metadata.getAllEnsembles().lastEntry();</span>
+<span class="nc" id="L266">        CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (lastEnsemble == null) {</span>
+<span class="nc" id="L268">            log.error(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L269">                    Events.INVALID_METADATA, runId, metadata, ledgerId);</span>
+<span class="nc" id="L270">            promise.completeExceptionally(</span>
+                    new IllegalStateException(
+<span class="nc" id="L272">                            String.format(&quot;All metadata must have at least one ensemble, %d does not&quot;, ledgerId)));</span>
+<span class="nc" id="L273">            return promise;</span>
+        }
+
+
+<span class="nc bnc" id="L277" title="All 4 branches missed.">        if (!metadata.isClosed() &amp;&amp; lastEnsemble.getValue().contains(bookieId)) {</span>
+            try {
+<span class="nc" id="L279">                log.info(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L280">                        Events.MARK_LIMBO, runId, metadata, ledgerId);</span>
+<span class="nc" id="L281">                ledgerStorage.setLimboState(ledgerId);</span>
+<span class="nc" id="L282">                ledgerStorage.setFenced(ledgerId);</span>
+<span class="nc" id="L283">                promise.complete(null);</span>
+<span class="nc" id="L284">            } catch (IOException ioe) {</span>
+<span class="nc" id="L285">                log.info(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L286">                        Events.LIMBO_OR_FENCE_ERROR, runId, metadata, ledgerId, ioe);</span>
+<span class="nc" id="L287">                promise.completeExceptionally(ioe);</span>
+<span class="nc" id="L288">            }</span>
+        } else {
+<span class="nc" id="L290">            promise.complete(null);</span>
+        }
+<span class="nc" id="L292">        return promise;</span>
+    }
+
+    static class LedgerResult {
+<span class="nc" id="L296">        enum State {</span>
+<span class="nc" id="L297">            MISSING, ERROR, OK</span>
+        }
+
+        static LedgerResult missing(long ledgerId) {
+<span class="nc" id="L301">            return new LedgerResult(State.MISSING, ledgerId, null, null);</span>
+        }
+
+        static LedgerResult ok(long ledgerId, LedgerMetadata metadata) {
+<span class="nc" id="L305">            return new LedgerResult(State.OK, ledgerId, metadata, null);</span>
+        }
+
+        static LedgerResult error(long ledgerId, LedgerMetadata metadata, Throwable t) {
+<span class="nc" id="L309">            return new LedgerResult(State.ERROR, ledgerId, metadata, t);</span>
+        }
+
+        private final State state;
+        private final long ledgerId;
+        private final LedgerMetadata metadata;
+        private final Throwable throwable;
+
+        private LedgerResult(State state, long ledgerId,
+<span class="nc" id="L318">                             LedgerMetadata metadata, Throwable throwable) {</span>
+<span class="nc" id="L319">            this.state = state;</span>
+<span class="nc" id="L320">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L321">            this.metadata = metadata;</span>
+<span class="nc" id="L322">            this.throwable = throwable;</span>
+<span class="nc" id="L323">        }</span>
+
+        boolean isMissing() {
+<span class="nc bnc" id="L326" title="All 2 branches missed.">            return state == State.MISSING;</span>
+        }
+        boolean isOK() {
+<span class="nc bnc" id="L329" title="All 2 branches missed.">            return state == State.OK;</span>
+        }
+        boolean isError() {
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            return state == State.ERROR;</span>
+        }
+        long getLedgerId() {
+<span class="nc" id="L335">            return ledgerId;</span>
+        }
+        LedgerMetadata getMetadata() {
+<span class="nc" id="L338">            return metadata;</span>
+        }
+        Throwable getThrowable() {
+<span class="nc" id="L341">            return throwable;</span>
+        }
+    }
+
+    /**
+     * Check each ledger passed.
+     * If the ledger is in limbo, recover it.
+     * Check that the bookie has all entries that it is expected to have.
+     * Copy any entries that are missing.
+     * @return The set of results for all ledgers passed. A result can be OK, Missing or Error.
+     *         OK and missing ledgers do not need to be looked at again. Error should be retried.
+     */
+    CompletableFuture&lt;Set&lt;LedgerResult&gt;&gt; checkAndRecoverLedgers(Map&lt;Long, LedgerMetadata&gt; ledgers,
+                                                                String runId) {
+<span class="nc" id="L355">        CompletableFuture&lt;Set&lt;LedgerResult&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L356">        final Disposable disposable = Flowable.fromIterable(ledgers.entrySet())</span>
+<span class="nc" id="L357">                .subscribeOn(scheduler, false)</span>
+<span class="nc" id="L358">                .flatMapSingle((mapEntry) -&gt; {</span>
+<span class="nc" id="L359">                            long ledgerId = mapEntry.getKey();</span>
+<span class="nc" id="L360">                            LedgerMetadata originalMetadata = mapEntry.getValue();</span>
+<span class="nc" id="L361">                            return recoverLedgerIfInLimbo(ledgerId, mapEntry.getValue(), runId)</span>
+<span class="nc" id="L362">                                    .map(newMetadata -&gt; LedgerResult.ok(ledgerId, newMetadata))</span>
+<span class="nc" id="L363">                                    .onErrorReturn(t -&gt; LedgerResult.error(ledgerId, originalMetadata, t))</span>
+<span class="nc" id="L364">                                    .defaultIfEmpty(LedgerResult.missing(ledgerId))</span>
+<span class="nc" id="L365">                                    .flatMap((res) -&gt; {</span>
+                                        try {
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                                            if (res.isOK()) {</span>
+<span class="nc" id="L368">                                                this.ledgerStorage.clearLimboState(ledgerId);</span>
+                                            }
+<span class="nc" id="L370">                                            return Single.just(res);</span>
+<span class="nc" id="L371">                                        } catch (IOException ioe) {</span>
+<span class="nc" id="L372">                                            return Single.just(LedgerResult.error(res.getLedgerId(),</span>
+<span class="nc" id="L373">                                                    res.getMetadata(), ioe));</span>
+                                        }
+                                    });
+                        },
+                        true /* delayErrors */,
+                        MAX_INFLIGHT)
+<span class="nc" id="L379">                .flatMapSingle((res) -&gt; {</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">                            if (res.isOK()) {</span>
+<span class="nc" id="L381">                                return checkAndRecoverLedgerEntries(res.getLedgerId(),</span>
+<span class="nc" id="L382">                                        res.getMetadata(), runId)</span>
+<span class="nc" id="L383">                                        .map(ignore -&gt; LedgerResult.ok(res.getLedgerId(),</span>
+<span class="nc" id="L384">                                                res.getMetadata()))</span>
+<span class="nc" id="L385">                                        .onErrorReturn(t -&gt; LedgerResult.error(res.getLedgerId(),</span>
+<span class="nc" id="L386">                                                res.getMetadata(), t));</span>
+                            } else {
+<span class="nc" id="L388">                                return Single.just(res);</span>
+                            }
+                        },
+                        true /* delayErrors */,
+                        1 /* copy 1 ledger at a time to keep entries together in entrylog */)
+<span class="nc" id="L393">                .collect(Collectors.toSet())</span>
+<span class="nc" id="L394">                .subscribe(resolved -&gt; promise.complete(resolved),</span>
+<span class="nc" id="L395">                        throwable -&gt; promise.completeExceptionally(throwable));</span>
+<span class="nc" id="L396">        promise.whenComplete((result, ex) -&gt; disposable.dispose());</span>
+<span class="nc" id="L397">        return promise;</span>
+    }
+
+    /**
+     * Run ledger recovery on all a ledger if it has been marked as in limbo.
+     * @return a maybe with the most up-to-date metadata we have for the ledger.
+     *         If the ledger has been deleted, returns empty.
+     */
+    Maybe&lt;LedgerMetadata&gt; recoverLedgerIfInLimbo(long ledgerId, LedgerMetadata origMetadata,
+                                                 String runId) {
+        try {
+<span class="nc bnc" id="L408" title="All 2 branches missed.">            if (!this.ledgerStorage.ledgerExists(ledgerId)) {</span>
+<span class="nc" id="L409">                this.ledgerStorage.setMasterKey(ledgerId, new byte[0]);</span>
+            }
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            if (this.ledgerStorage.hasLimboState(ledgerId)) {</span>
+<span class="nc" id="L412">                log.info(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L413">                        Events.RECOVER_LIMBO_LEDGER, runId, origMetadata, ledgerId);</span>
+<span class="nc" id="L414">                return recoverLedger(ledgerId, runId)</span>
+<span class="nc" id="L415">                    .toMaybe()</span>
+<span class="nc" id="L416">                    .onErrorResumeNext(t -&gt; {</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">                            if (t instanceof BKException.BKNoSuchLedgerExistsOnMetadataServerException) {</span>
+<span class="nc" id="L418">                                log.info(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L419">                                        Events.RECOVER_LIMBO_LEDGER_MISSING, runId, origMetadata, ledgerId);</span>
+<span class="nc" id="L420">                                return Maybe.empty();</span>
+                            } else {
+<span class="nc" id="L422">                                log.info(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L423">                                        Events.RECOVER_LIMBO_LEDGER_ERROR, runId, origMetadata, ledgerId);</span>
+<span class="nc" id="L424">                                return Maybe.error(t);</span>
+                            }
+                        });
+            } else {
+<span class="nc" id="L428">                return Maybe.just(origMetadata);</span>
+            }
+<span class="nc" id="L430">        } catch (IOException ioe) {</span>
+<span class="nc" id="L431">            return Maybe.error(ioe);</span>
+        }
+    }
+
+    Single&lt;LedgerMetadata&gt; recoverLedger(long ledgerId, String runId) {
+<span class="nc" id="L436">        return Single.create((emitter) -&gt;</span>
+<span class="nc" id="L437">                admin.asyncOpenLedger(ledgerId, (rc, handle, ctx) -&gt; {</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">                        if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L439">                            emitter.onError(BKException.create(rc));</span>
+                        } else {
+<span class="nc" id="L441">                            LedgerMetadata metadata = handle.getLedgerMetadata();</span>
+<span class="nc" id="L442">                            handle.closeAsync().whenComplete((ignore, exception) -&gt; {</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                                    if (exception != null) {</span>
+<span class="nc" id="L444">                                        log.warn(&quot;Event: {}, runId: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L445">                                                Events.RECOVER_LIMBO_LEDGER_CLOSE_ERROR, runId, ledgerId, exception);</span>
+                                    }
+<span class="nc" id="L447">                                });</span>
+<span class="nc" id="L448">                            emitter.onSuccess(metadata);</span>
+                        }
+<span class="nc" id="L450">                    }, null));</span>
+
+    }
+
+    /**
+     * Check whether the local storage has all the entries as specified in the metadata.
+     * If not, copy them from other available nodes.
+
+     * Returns a single value which is the ledgerId or an error if any entry failed to copy
+     * should throw error if any entry failed to copy.
+     */
+    Single&lt;Long&gt; checkAndRecoverLedgerEntries(long ledgerId, LedgerMetadata metadata,
+                                              String runId) {
+<span class="nc" id="L463">        WriteSets writeSets = new WriteSets(metadata.getEnsembleSize(),</span>
+<span class="nc" id="L464">                                            metadata.getWriteQuorumSize());</span>
+
+<span class="nc" id="L466">        NavigableMap&lt;Long, Integer&gt; bookieIndices = metadata.getAllEnsembles()</span>
+<span class="nc" id="L467">            .entrySet().stream()</span>
+<span class="nc" id="L468">            .collect(ImmutableSortedMap.toImmutableSortedMap(Comparator.naturalOrder(),</span>
+<span class="nc" id="L469">                                                             e -&gt; e.getKey(),</span>
+<span class="nc" id="L470">                                                             e -&gt; e.getValue().indexOf(bookieId)));</span>
+
+        long lastKnownEntry;
+<span class="nc bnc" id="L473" title="All 2 branches missed.">        if (metadata.isClosed()) {</span>
+<span class="nc" id="L474">            lastKnownEntry = metadata.getLastEntryId();</span>
+        } else {
+            // if ledger is not closed, last known entry is the last entry of
+            // the penultimate ensemble
+<span class="nc" id="L478">            lastKnownEntry = metadata.getAllEnsembles().lastEntry().getKey() - 1;</span>
+        }
+<span class="nc bnc" id="L480" title="All 2 branches missed.">        if (lastKnownEntry &lt; 0) {</span>
+<span class="nc" id="L481">            return Single.just(ledgerId);</span>
+        }
+
+        EntryCopier.Batch batch;
+        try {
+<span class="nc" id="L486">            batch = entryCopier.newBatch(ledgerId, metadata);</span>
+<span class="nc" id="L487">        } catch (IOException ioe) {</span>
+<span class="nc" id="L488">            return Single.error(ioe);</span>
+<span class="nc" id="L489">        }</span>
+<span class="nc" id="L490">        AtomicLong byteCount = new AtomicLong(0);</span>
+<span class="nc" id="L491">        AtomicInteger count = new AtomicInteger(0);</span>
+<span class="nc" id="L492">        AtomicInteger errorCount = new AtomicInteger(0);</span>
+<span class="nc" id="L493">        AtomicReference&lt;Throwable&gt; firstError = new AtomicReference&lt;&gt;(null);</span>
+<span class="nc" id="L494">        log.info(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}&quot;,</span>
+<span class="nc" id="L495">                Events.LEDGER_CHECK_AND_COPY_START, runId, metadata, ledgerId);</span>
+<span class="nc" id="L496">        return Flowable.rangeLong(0, lastKnownEntry + 1)</span>
+<span class="nc" id="L497">            .subscribeOn(scheduler, false)</span>
+<span class="nc" id="L498">            .flatMapMaybe((entryId) -&gt; {</span>
+<span class="nc" id="L499">                    return maybeCopyEntry(writeSets, bookieIndices, ledgerId, entryId, batch)</span>
+<span class="nc" id="L500">                        .doOnError((t) -&gt; {</span>
+<span class="nc" id="L501">                                firstError.compareAndSet(null, t);</span>
+<span class="nc" id="L502">                                errorCount.incrementAndGet();</span>
+<span class="nc" id="L503">                            });</span>
+                }, true /* delayErrors */, MAX_ENTRIES_INFLIGHT)
+<span class="nc" id="L505">            .doOnNext((bytes) -&gt; {</span>
+<span class="nc" id="L506">                    byteCount.addAndGet(bytes);</span>
+<span class="nc" id="L507">                    count.incrementAndGet();</span>
+<span class="nc" id="L508">                })</span>
+<span class="nc" id="L509">            .count() // do nothing with result, but gives a single even if empty</span>
+<span class="nc" id="L510">            .doOnTerminate(() -&gt; {</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">                    if (firstError.get() != null) {</span>
+<span class="nc" id="L512">                        log.warn(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}, entries: {}, bytes: {}, errors: {}&quot;,</span>
+                                Events.LEDGER_CHECK_AND_COPY_END, runId,
+<span class="nc" id="L514">                                metadata, ledgerId, count.get(), byteCount.get(), firstError.get());</span>
+                    } else {
+<span class="nc" id="L516">                        log.info(&quot;Event: {}, runId: {}, metadata: {}, ledger: {}, entries: {}, bytes: {}, errors: 0&quot;,</span>
+                                Events.LEDGER_CHECK_AND_COPY_END, runId,
+<span class="nc" id="L518">                                metadata, ledgerId, count.get(), byteCount.get());</span>
+                    }
+<span class="nc" id="L520">                })</span>
+<span class="nc" id="L521">            .map(ignore -&gt; ledgerId);</span>
+    }
+
+    /**
+     * @return the number of bytes copied.
+     */
+    Maybe&lt;Long&gt; maybeCopyEntry(WriteSets writeSets, NavigableMap&lt;Long, Integer&gt; bookieIndices,
+                                     long ledgerId, long entryId, EntryCopier.Batch batch) {
+        try {
+<span class="nc bnc" id="L530" title="All 2 branches missed.">            if (isEntryMissing(writeSets, bookieIndices, ledgerId, entryId)) {</span>
+<span class="nc" id="L531">                return Maybe.fromCompletionStage(batch.copyFromAvailable(entryId));</span>
+            } else {
+<span class="nc" id="L533">                return Maybe.empty();</span>
+            }
+<span class="nc" id="L535">        } catch (BookieException | IOException ioe) {</span>
+<span class="nc" id="L536">            return Maybe.error(ioe);</span>
+        }
+    }
+
+    boolean isEntryMissing(WriteSets writeSets, NavigableMap&lt;Long, Integer&gt; bookieIndices,
+                           long ledgerId, long entryId) throws IOException, BookieException {
+<span class="nc" id="L542">        int bookieIndexForEntry = bookieIndices.floorEntry(entryId).getValue();</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">        if (bookieIndexForEntry &lt; 0) {</span>
+<span class="nc" id="L544">            return false;</span>
+        }
+
+<span class="nc bnc" id="L547" title="All 2 branches missed.">        return writeSets.getForEntry(entryId).contains(bookieIndexForEntry)</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">            &amp;&amp; !ledgerStorage.entryExists(ledgerId, entryId);</span>
+    }
+
+    static boolean ensemblesContainBookie(LedgerMetadata metadata, BookieId bookieId) {
+<span class="nc" id="L552">        return metadata.getAllEnsembles().values().stream()</span>
+<span class="nc" id="L553">            .anyMatch(ensemble -&gt; ensemble.contains(bookieId));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

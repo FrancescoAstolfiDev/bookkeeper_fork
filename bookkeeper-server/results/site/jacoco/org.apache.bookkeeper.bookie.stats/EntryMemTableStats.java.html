@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EntryMemTableStats.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.stats</a> &gt; <span class="el_source">EntryMemTableStats.java</span></div><h1>EntryMemTableStats.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.bookie.stats;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.BOOKIE_ADD_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.BOOKIE_READ_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.BOOKIE_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.CATEGORY_SERVER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SKIP_LIST_FLUSH_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SKIP_LIST_GET_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SKIP_LIST_PUT_ENTRY;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SKIP_LIST_SNAPSHOT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SKIP_LIST_THROTTLING;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SKIP_LIST_THROTTLING_LATENCY;
+
+import lombok.Getter;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+
+/**
+ * A umbrella class for memtable related stats.
+ */
+@StatsDoc(
+    name = BOOKIE_SCOPE,
+    category = CATEGORY_SERVER,
+    help = &quot;EntryMemTable related stats&quot;
+)
+@Getter
+public class EntryMemTableStats {
+
+    @StatsDoc(
+        name = SKIP_LIST_SNAPSHOT,
+        help = &quot;operation stats of taking memtable snapshots&quot;
+    )
+<span class="nc" id="L54">    private final OpStatsLogger snapshotStats;</span>
+    @StatsDoc(
+        name = SKIP_LIST_PUT_ENTRY,
+        help = &quot;operation stats of putting entries to memtable&quot;,
+        parent = BOOKIE_ADD_ENTRY
+    )
+<span class="nc" id="L60">    private final OpStatsLogger putEntryStats;</span>
+    @StatsDoc(
+        name = SKIP_LIST_GET_ENTRY,
+        help = &quot;operation stats of getting entries from memtable&quot;,
+        parent = BOOKIE_READ_ENTRY
+    )
+<span class="nc" id="L66">    private final OpStatsLogger getEntryStats;</span>
+    @StatsDoc(
+        name = SKIP_LIST_FLUSH_BYTES,
+        help = &quot;The number of bytes flushed from memtable to entry log files&quot;
+    )
+<span class="nc" id="L71">    private final Counter flushBytesCounter;</span>
+    @StatsDoc(
+        name = SKIP_LIST_THROTTLING,
+        help = &quot;The number of requests throttled due to memtables are full&quot;
+    )
+<span class="nc" id="L76">    private final Counter throttlingCounter;</span>
+    @StatsDoc(
+        name = SKIP_LIST_THROTTLING_LATENCY,
+        help = &quot;The distribution of request throttled duration&quot;
+    )
+<span class="nc" id="L81">    private final OpStatsLogger throttlingStats;</span>
+
+<span class="nc" id="L83">    public EntryMemTableStats(StatsLogger statsLogger) {</span>
+<span class="nc" id="L84">        this.snapshotStats = statsLogger.getOpStatsLogger(SKIP_LIST_SNAPSHOT);</span>
+<span class="nc" id="L85">        this.putEntryStats = statsLogger.getOpStatsLogger(SKIP_LIST_PUT_ENTRY);</span>
+<span class="nc" id="L86">        this.getEntryStats = statsLogger.getOpStatsLogger(SKIP_LIST_GET_ENTRY);</span>
+<span class="nc" id="L87">        this.flushBytesCounter = statsLogger.getCounter(SKIP_LIST_FLUSH_BYTES);</span>
+<span class="nc" id="L88">        this.throttlingCounter = statsLogger.getCounter(SKIP_LIST_THROTTLING);</span>
+<span class="nc" id="L89">        this.throttlingStats = statsLogger.getOpStatsLogger(SKIP_LIST_THROTTLING_LATENCY);</span>
+<span class="nc" id="L90">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

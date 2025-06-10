@@ -1,0 +1,565 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TLSContextFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">Apache BookKeeper :: Server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tls</a> &gt; <span class="el_source">TLSContextFactory.java</span></div><h1>TLSContextFactory.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.tls;
+
+import com.google.common.base.Strings;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.handler.ssl.ClientAuth;
+import io.netty.handler.ssl.OpenSsl;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslProvider;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
+import java.security.Provider;
+import java.security.Security;
+import java.security.UnrecoverableKeyException;
+import java.security.cert.CertificateException;
+import java.security.spec.InvalidKeySpecException;
+import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManagerFactory;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.commons.io.FileUtils;
+
+/**
+ * A factory to manage TLS contexts.
+ */
+<span class="nc" id="L56">@Slf4j</span>
+<span class="nc" id="L57">public class TLSContextFactory implements SecurityHandlerFactory {</span>
+
+<span class="nc" id="L59">    public static final Provider BC_PROVIDER = getProvider();</span>
+    public static final String BC_FIPS_PROVIDER_CLASS = &quot;org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider&quot;;
+    public static final String BC_NON_FIPS_PROVIDER_CLASS = &quot;org.bouncycastle.jce.provider.BouncyCastleProvider&quot;;
+
+    // Security.getProvider(&quot;BC&quot;) / Security.getProvider(&quot;BCFIPS&quot;).
+    // also used to get Factories. e.g. CertificateFactory.getInstance(&quot;X.509&quot;, &quot;BCFIPS&quot;)
+    public static final String BC_FIPS = &quot;BCFIPS&quot;;
+    public static final String BC = &quot;BC&quot;;
+
+    /**
+     * Get Bouncy Castle provider, and call Security.addProvider(provider) if success.
+     */
+    public static Provider getProvider() {
+<span class="nc" id="L72">        boolean isProviderInstalled =</span>
+<span class="nc bnc" id="L73" title="All 4 branches missed.">            Security.getProvider(BC) != null || Security.getProvider(BC_FIPS) != null;</span>
+
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (isProviderInstalled) {</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            Provider provider = Security.getProvider(BC) != null</span>
+<span class="nc" id="L77">                ? Security.getProvider(BC)</span>
+<span class="nc" id="L78">                : Security.getProvider(BC_FIPS);</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L80">                log.debug(&quot;Already instantiated Bouncy Castle provider {}&quot;, provider.getName());</span>
+            }
+<span class="nc" id="L82">            return provider;</span>
+        }
+
+        // Not installed, try load from class path
+        try {
+<span class="nc" id="L87">            return getBCProviderFromClassPath();</span>
+<span class="nc" id="L88">        } catch (Exception e) {</span>
+<span class="nc" id="L89">            log.warn(&quot;Not able to get Bouncy Castle provider for both FIPS and Non-FIPS from class path:&quot;, e);</span>
+<span class="nc" id="L90">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    /**
+     * Get Bouncy Castle provider from classpath, and call Security.addProvider.
+     * Throw Exception if failed.
+     */
+    public static Provider getBCProviderFromClassPath() throws Exception {
+        Class clazz;
+        try {
+<span class="nc" id="L101">            clazz = Class.forName(BC_FIPS_PROVIDER_CLASS);</span>
+<span class="nc" id="L102">        } catch (ClassNotFoundException cnf) {</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L104">                log.debug(&quot;Not able to get Bouncy Castle provider: {}, try to get FIPS provider {}&quot;,</span>
+                    BC_NON_FIPS_PROVIDER_CLASS, BC_FIPS_PROVIDER_CLASS);
+            }
+            // attempt to use the NON_FIPS provider.
+<span class="nc" id="L108">            clazz = Class.forName(BC_NON_FIPS_PROVIDER_CLASS);</span>
+
+<span class="nc" id="L110">        }</span>
+
+        @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L113">        Provider provider = (Provider) clazz.getDeclaredConstructor().newInstance();</span>
+<span class="nc" id="L114">        Security.addProvider(provider);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L116">            log.debug(&quot;Found and Instantiated Bouncy Castle provider in classpath {}&quot;, provider.getName());</span>
+        }
+<span class="nc" id="L118">        return provider;</span>
+    }
+
+    /**
+     * Supported Key File Types.
+     */
+<span class="nc" id="L124">    public enum KeyStoreType {</span>
+<span class="nc" id="L125">        PKCS12(&quot;PKCS12&quot;),</span>
+<span class="nc" id="L126">        JKS(&quot;JKS&quot;),</span>
+<span class="nc" id="L127">        PEM(&quot;PEM&quot;);</span>
+
+        private String str;
+
+<span class="nc" id="L131">        KeyStoreType(String str) {</span>
+<span class="nc" id="L132">            this.str = str;</span>
+<span class="nc" id="L133">        }</span>
+
+        @Override
+        public String toString() {
+<span class="nc" id="L137">            return this.str;</span>
+        }
+    }
+
+    private static final String TLSCONTEXT_HANDLER_NAME = &quot;tls&quot;;
+    private NodeType type;
+    private String[] protocols;
+    private String[] ciphers;
+    private volatile SslContext sslContext;
+    private ByteBufAllocator allocator;
+    private AbstractConfiguration config;
+    private FileModifiedTimeUpdater tlsCertificateFilePath, tlsKeyStoreFilePath, tlsKeyStorePasswordFilePath,
+            tlsTrustStoreFilePath, tlsTrustStorePasswordFilePath;
+    private long certRefreshTime;
+    private volatile long certLastRefreshTime;
+    private boolean isServerCtx;
+
+    private String getPasswordFromFile(String path) throws IOException {
+        byte[] pwd;
+<span class="nc" id="L156">        File passwdFile = new File(path);</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (passwdFile.length() == 0) {</span>
+<span class="nc" id="L158">            return &quot;&quot;;</span>
+        }
+<span class="nc" id="L160">        pwd = FileUtils.readFileToByteArray(passwdFile);</span>
+<span class="nc" id="L161">        return new String(pwd, StandardCharsets.UTF_8);</span>
+    }
+
+    @SuppressFBWarnings(
+        value = &quot;OBL_UNSATISFIED_OBLIGATION&quot;,
+        justification = &quot;work around for java 9: https://github.com/spotbugs/spotbugs/issues/493&quot;)
+    private KeyStore loadKeyStore(String keyStoreType, String keyStoreLocation, String keyStorePassword)
+            throws KeyStoreException, NoSuchAlgorithmException, CertificateException, IOException {
+<span class="nc" id="L169">        KeyStore ks = KeyStore.getInstance(keyStoreType);</span>
+
+<span class="nc" id="L171">        try (FileInputStream ksin = new FileInputStream(keyStoreLocation)) {</span>
+<span class="nc" id="L172">            ks.load(ksin, keyStorePassword.trim().toCharArray());</span>
+        }
+<span class="nc" id="L174">        return ks;</span>
+    }
+
+    @Override
+    public String getHandlerName() {
+<span class="nc" id="L179">        return TLSCONTEXT_HANDLER_NAME;</span>
+    }
+
+    private KeyManagerFactory initKeyManagerFactory(String keyStoreType, String keyStoreLocation,
+            String keyStorePasswordPath) throws SecurityException, KeyStoreException, NoSuchAlgorithmException,
+            CertificateException, IOException, UnrecoverableKeyException, InvalidKeySpecException {
+<span class="nc" id="L185">        KeyManagerFactory kmf = null;</span>
+
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        if (Strings.isNullOrEmpty(keyStoreLocation)) {</span>
+<span class="nc" id="L188">            log.error(&quot;Key store location cannot be empty when Mutual Authentication is enabled!&quot;);</span>
+<span class="nc" id="L189">            throw new SecurityException(&quot;Key store location cannot be empty when Mutual Authentication is enabled!&quot;);</span>
+        }
+
+<span class="nc" id="L192">        String keyStorePassword = &quot;&quot;;</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (!Strings.isNullOrEmpty(keyStorePasswordPath)) {</span>
+<span class="nc" id="L194">            keyStorePassword = getPasswordFromFile(keyStorePasswordPath);</span>
+        }
+
+        // Initialize key file
+<span class="nc" id="L198">        KeyStore ks = loadKeyStore(keyStoreType, keyStoreLocation, keyStorePassword);</span>
+<span class="nc" id="L199">        kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());</span>
+<span class="nc" id="L200">        kmf.init(ks, keyStorePassword.trim().toCharArray());</span>
+
+<span class="nc" id="L202">        return kmf;</span>
+    }
+
+    private TrustManagerFactory initTrustManagerFactory(String trustStoreType, String trustStoreLocation,
+            String trustStorePasswordPath)
+            throws KeyStoreException, NoSuchAlgorithmException, CertificateException, IOException, SecurityException {
+        TrustManagerFactory tmf;
+
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        if (Strings.isNullOrEmpty(trustStoreLocation)) {</span>
+<span class="nc" id="L211">            log.error(&quot;Trust Store location cannot be empty!&quot;);</span>
+<span class="nc" id="L212">            throw new SecurityException(&quot;Trust Store location cannot be empty!&quot;);</span>
+        }
+
+<span class="nc" id="L215">        String trustStorePassword = &quot;&quot;;</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        if (!Strings.isNullOrEmpty(trustStorePasswordPath)) {</span>
+<span class="nc" id="L217">            trustStorePassword = getPasswordFromFile(trustStorePasswordPath);</span>
+        }
+
+        // Initialize trust file
+<span class="nc" id="L221">        KeyStore ts = loadKeyStore(trustStoreType, trustStoreLocation, trustStorePassword);</span>
+<span class="nc" id="L222">        tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());</span>
+<span class="nc" id="L223">        tmf.init(ts);</span>
+
+<span class="nc" id="L225">        return tmf;</span>
+    }
+
+    private SslProvider getTLSProvider(String sslProvider) {
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (sslProvider.trim().equalsIgnoreCase(&quot;OpenSSL&quot;)) {</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (OpenSsl.isAvailable()) {</span>
+<span class="nc" id="L231">                log.info(&quot;Security provider - OpenSSL&quot;);</span>
+<span class="nc" id="L232">                return SslProvider.OPENSSL;</span>
+            }
+
+<span class="nc" id="L235">            Throwable causeUnavailable = OpenSsl.unavailabilityCause();</span>
+<span class="nc" id="L236">            log.warn(&quot;OpenSSL Unavailable: &quot;, causeUnavailable);</span>
+
+<span class="nc" id="L238">            log.info(&quot;Security provider - JDK&quot;);</span>
+<span class="nc" id="L239">            return SslProvider.JDK;</span>
+        }
+
+<span class="nc" id="L242">        log.info(&quot;Security provider - JDK&quot;);</span>
+<span class="nc" id="L243">        return SslProvider.JDK;</span>
+    }
+
+    private void createClientContext()
+            throws SecurityException, KeyStoreException, NoSuchAlgorithmException, CertificateException, IOException,
+            UnrecoverableKeyException, InvalidKeySpecException, NoSuchProviderException {
+<span class="nc" id="L249">        ClientConfiguration clientConf = (ClientConfiguration) config;</span>
+<span class="nc" id="L250">        markAutoCertRefresh(clientConf.getTLSCertificatePath(), clientConf.getTLSKeyStore(),</span>
+<span class="nc" id="L251">                clientConf.getTLSKeyStorePasswordPath(), clientConf.getTLSTrustStore(),</span>
+<span class="nc" id="L252">                clientConf.getTLSTrustStorePasswordPath());</span>
+<span class="nc" id="L253">        updateClientContext();</span>
+<span class="nc" id="L254">    }</span>
+
+    private synchronized void updateClientContext()
+            throws SecurityException, KeyStoreException, NoSuchAlgorithmException, CertificateException, IOException,
+            UnrecoverableKeyException, InvalidKeySpecException, NoSuchProviderException {
+        final SslContextBuilder sslContextBuilder;
+        final ClientConfiguration clientConf;
+        final SslProvider provider;
+        final boolean clientAuthentication;
+
+        // get key-file and trust-file locations and passwords
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if (!(config instanceof ClientConfiguration)) {</span>
+<span class="nc" id="L266">            throw new SecurityException(&quot;Client configuration not provided&quot;);</span>
+        }
+
+<span class="nc" id="L269">        clientConf = (ClientConfiguration) config;</span>
+<span class="nc" id="L270">        provider = getTLSProvider(clientConf.getTLSProvider());</span>
+<span class="nc" id="L271">        clientAuthentication = clientConf.getTLSClientAuthentication();</span>
+
+<span class="nc bnc" id="L273" title="All 3 branches missed.">        switch (KeyStoreType.valueOf(clientConf.getTLSTrustStoreType())) {</span>
+        case PEM:
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            if (Strings.isNullOrEmpty(clientConf.getTLSTrustStore())) {</span>
+<span class="nc" id="L276">                throw new SecurityException(&quot;CA Certificate required&quot;);</span>
+            }
+
+<span class="nc" id="L279">            sslContextBuilder = SslContextBuilder.forClient()</span>
+<span class="nc" id="L280">                    .trustManager(new File(clientConf.getTLSTrustStore()))</span>
+<span class="nc" id="L281">                    .ciphers(null)</span>
+<span class="nc" id="L282">                    .sessionCacheSize(0)</span>
+<span class="nc" id="L283">                    .sessionTimeout(0)</span>
+<span class="nc" id="L284">                    .sslProvider(provider)</span>
+<span class="nc" id="L285">                    .clientAuth(ClientAuth.REQUIRE);</span>
+
+<span class="nc" id="L287">            break;</span>
+        case JKS:
+            // falling thru, same as PKCS12
+        case PKCS12:
+<span class="nc" id="L291">            TrustManagerFactory tmf = initTrustManagerFactory(clientConf.getTLSTrustStoreType(),</span>
+<span class="nc" id="L292">                    clientConf.getTLSTrustStore(), clientConf.getTLSTrustStorePasswordPath());</span>
+
+<span class="nc" id="L294">            sslContextBuilder = SslContextBuilder.forClient()</span>
+<span class="nc" id="L295">                    .trustManager(tmf)</span>
+<span class="nc" id="L296">                    .ciphers(null)</span>
+<span class="nc" id="L297">                    .sessionCacheSize(0)</span>
+<span class="nc" id="L298">                    .sessionTimeout(0)</span>
+<span class="nc" id="L299">                    .sslProvider(provider)</span>
+<span class="nc" id="L300">                    .clientAuth(ClientAuth.REQUIRE);</span>
+
+<span class="nc" id="L302">            break;</span>
+        default:
+<span class="nc" id="L304">            throw new SecurityException(&quot;Invalid Truststore type: &quot; + clientConf.getTLSTrustStoreType());</span>
+        }
+
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (clientAuthentication) {</span>
+<span class="nc bnc" id="L308" title="All 3 branches missed.">            switch (KeyStoreType.valueOf(clientConf.getTLSKeyStoreType())) {</span>
+            case PEM:
+                final String keyPassword;
+
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                if (Strings.isNullOrEmpty(clientConf.getTLSCertificatePath())) {</span>
+<span class="nc" id="L313">                    throw new SecurityException(&quot;Valid Certificate is missing&quot;);</span>
+                }
+
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                if (Strings.isNullOrEmpty(clientConf.getTLSKeyStore())) {</span>
+<span class="nc" id="L317">                    throw new SecurityException(&quot;Valid Key is missing&quot;);</span>
+                }
+
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                if (!Strings.isNullOrEmpty(clientConf.getTLSKeyStorePasswordPath())) {</span>
+<span class="nc" id="L321">                    keyPassword = getPasswordFromFile(clientConf.getTLSKeyStorePasswordPath());</span>
+                } else {
+<span class="nc" id="L323">                    keyPassword = null;</span>
+                }
+
+<span class="nc" id="L326">                sslContextBuilder.keyManager(new File(clientConf.getTLSCertificatePath()),</span>
+<span class="nc" id="L327">                        new File(clientConf.getTLSKeyStore()), keyPassword);</span>
+<span class="nc" id="L328">                break;</span>
+            case JKS:
+                // falling thru, same as PKCS12
+            case PKCS12:
+<span class="nc" id="L332">                KeyManagerFactory kmf = initKeyManagerFactory(clientConf.getTLSKeyStoreType(),</span>
+<span class="nc" id="L333">                        clientConf.getTLSKeyStore(), clientConf.getTLSKeyStorePasswordPath());</span>
+
+<span class="nc" id="L335">                sslContextBuilder.keyManager(kmf);</span>
+<span class="nc" id="L336">                break;</span>
+            default:
+<span class="nc" id="L338">                throw new SecurityException(&quot;Invalid Keyfile type&quot; + clientConf.getTLSKeyStoreType());</span>
+            }
+        }
+
+<span class="nc" id="L342">        sslContext = sslContextBuilder.build();</span>
+<span class="nc" id="L343">        certLastRefreshTime = System.currentTimeMillis();</span>
+<span class="nc" id="L344">    }</span>
+
+    private void createServerContext()
+            throws SecurityException, KeyStoreException, NoSuchAlgorithmException, CertificateException, IOException,
+            UnrecoverableKeyException, InvalidKeySpecException, IllegalArgumentException {
+<span class="nc" id="L349">        isServerCtx = true;</span>
+<span class="nc" id="L350">        ServerConfiguration clientConf = (ServerConfiguration) config;</span>
+<span class="nc" id="L351">        markAutoCertRefresh(clientConf.getTLSCertificatePath(), clientConf.getTLSKeyStore(),</span>
+<span class="nc" id="L352">                clientConf.getTLSKeyStorePasswordPath(), clientConf.getTLSTrustStore(),</span>
+<span class="nc" id="L353">                clientConf.getTLSTrustStorePasswordPath());</span>
+<span class="nc" id="L354">        updateServerContext();</span>
+<span class="nc" id="L355">    }</span>
+
+    private synchronized SslContext getSSLContext() {
+<span class="nc" id="L358">        long now = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L359" title="All 4 branches missed.">        if ((certRefreshTime &gt; 0 &amp;&amp; now &gt; (certLastRefreshTime + certRefreshTime))) {</span>
+<span class="nc bnc" id="L360" title="All 4 branches missed.">            if (tlsCertificateFilePath.checkAndRefresh() || tlsKeyStoreFilePath.checkAndRefresh()</span>
+<span class="nc bnc" id="L361" title="All 4 branches missed.">                    || tlsKeyStorePasswordFilePath.checkAndRefresh() || tlsTrustStoreFilePath.checkAndRefresh()</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">                    || tlsTrustStorePasswordFilePath.checkAndRefresh()) {</span>
+                try {
+<span class="nc" id="L364">                    log.info(&quot;Updating tls certs certFile={}, keyStoreFile={}, trustStoreFile={}&quot;,</span>
+<span class="nc" id="L365">                            tlsCertificateFilePath.getFileName(), tlsKeyStoreFilePath.getFileName(),</span>
+<span class="nc" id="L366">                            tlsTrustStoreFilePath.getFileName());</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                    if (isServerCtx) {</span>
+<span class="nc" id="L368">                        updateServerContext();</span>
+                    } else {
+<span class="nc" id="L370">                        updateClientContext();</span>
+                    }
+<span class="nc" id="L372">                } catch (Exception e) {</span>
+<span class="nc" id="L373">                    log.info(&quot;Failed to refresh tls certs&quot;, e);</span>
+<span class="nc" id="L374">                }</span>
+            }
+        }
+<span class="nc" id="L377">        return sslContext;</span>
+    }
+
+    private synchronized void updateServerContext() throws SecurityException, KeyStoreException,
+            NoSuchAlgorithmException, CertificateException, IOException, UnrecoverableKeyException,
+            InvalidKeySpecException, IllegalArgumentException {
+        final SslContextBuilder sslContextBuilder;
+        final ServerConfiguration serverConf;
+        final SslProvider provider;
+        final boolean clientAuthentication;
+
+        // get key-file and trust-file locations and passwords
+<span class="nc bnc" id="L389" title="All 2 branches missed.">        if (!(config instanceof ServerConfiguration)) {</span>
+<span class="nc" id="L390">            throw new SecurityException(&quot;Server configuration not provided&quot;);</span>
+        }
+
+<span class="nc" id="L393">        serverConf = (ServerConfiguration) config;</span>
+<span class="nc" id="L394">        provider = getTLSProvider(serverConf.getTLSProvider());</span>
+<span class="nc" id="L395">        clientAuthentication = serverConf.getTLSClientAuthentication();</span>
+
+<span class="nc bnc" id="L397" title="All 3 branches missed.">        switch (KeyStoreType.valueOf(serverConf.getTLSKeyStoreType())) {</span>
+        case PEM:
+            final String keyPassword;
+
+<span class="nc bnc" id="L401" title="All 2 branches missed.">            if (Strings.isNullOrEmpty(serverConf.getTLSKeyStore())) {</span>
+<span class="nc" id="L402">                throw new SecurityException(&quot;Key path is required&quot;);</span>
+            }
+
+<span class="nc bnc" id="L405" title="All 2 branches missed.">            if (Strings.isNullOrEmpty(serverConf.getTLSCertificatePath())) {</span>
+<span class="nc" id="L406">                throw new SecurityException(&quot;Certificate path is required&quot;);</span>
+            }
+
+<span class="nc bnc" id="L409" title="All 2 branches missed.">            if (!Strings.isNullOrEmpty(serverConf.getTLSKeyStorePasswordPath())) {</span>
+<span class="nc" id="L410">                keyPassword = getPasswordFromFile(serverConf.getTLSKeyStorePasswordPath());</span>
+            } else {
+<span class="nc" id="L412">                keyPassword = null;</span>
+            }
+
+<span class="nc" id="L415">            sslContextBuilder = SslContextBuilder</span>
+<span class="nc" id="L416">                                .forServer(new File(serverConf.getTLSCertificatePath()),</span>
+<span class="nc" id="L417">                            new File(serverConf.getTLSKeyStore()), keyPassword)</span>
+<span class="nc" id="L418">                                .ciphers(null)</span>
+<span class="nc" id="L419">                                .sessionCacheSize(0)</span>
+<span class="nc" id="L420">                                .sessionTimeout(0)</span>
+<span class="nc" id="L421">                                .sslProvider(provider)</span>
+<span class="nc" id="L422">                                .startTls(true);</span>
+
+<span class="nc" id="L424">            break;</span>
+        case JKS:
+            // falling thru, same as PKCS12
+        case PKCS12:
+<span class="nc" id="L428">            KeyManagerFactory kmf = initKeyManagerFactory(serverConf.getTLSKeyStoreType(),</span>
+<span class="nc" id="L429">                    serverConf.getTLSKeyStore(),</span>
+<span class="nc" id="L430">                    serverConf.getTLSKeyStorePasswordPath());</span>
+
+<span class="nc" id="L432">            sslContextBuilder = SslContextBuilder.forServer(kmf)</span>
+<span class="nc" id="L433">                                .ciphers(null)</span>
+<span class="nc" id="L434">                                .sessionCacheSize(0)</span>
+<span class="nc" id="L435">                                .sessionTimeout(0)</span>
+<span class="nc" id="L436">                                .sslProvider(provider)</span>
+<span class="nc" id="L437">                                .startTls(true);</span>
+
+<span class="nc" id="L439">            break;</span>
+        default:
+<span class="nc" id="L441">            throw new SecurityException(&quot;Invalid Keyfile type&quot; + serverConf.getTLSKeyStoreType());</span>
+        }
+
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        if (clientAuthentication) {</span>
+<span class="nc" id="L445">            sslContextBuilder.clientAuth(ClientAuth.REQUIRE);</span>
+
+<span class="nc bnc" id="L447" title="All 3 branches missed.">            switch (KeyStoreType.valueOf(serverConf.getTLSTrustStoreType())) {</span>
+            case PEM:
+<span class="nc bnc" id="L449" title="All 2 branches missed.">                if (Strings.isNullOrEmpty(serverConf.getTLSTrustStore())) {</span>
+<span class="nc" id="L450">                    throw new SecurityException(&quot;CA Certificate chain is required&quot;);</span>
+                }
+<span class="nc" id="L452">                sslContextBuilder.trustManager(new File(serverConf.getTLSTrustStore()));</span>
+<span class="nc" id="L453">                break;</span>
+            case JKS:
+                // falling thru, same as PKCS12
+            case PKCS12:
+<span class="nc" id="L457">                TrustManagerFactory tmf = initTrustManagerFactory(serverConf.getTLSTrustStoreType(),</span>
+<span class="nc" id="L458">                        serverConf.getTLSTrustStore(), serverConf.getTLSTrustStorePasswordPath());</span>
+<span class="nc" id="L459">                sslContextBuilder.trustManager(tmf);</span>
+<span class="nc" id="L460">                break;</span>
+            default:
+<span class="nc" id="L462">                throw new SecurityException(&quot;Invalid Truststore type&quot; + serverConf.getTLSTrustStoreType());</span>
+            }
+        }
+
+<span class="nc" id="L466">        sslContext = sslContextBuilder.build();</span>
+<span class="nc" id="L467">        certLastRefreshTime = System.currentTimeMillis();</span>
+<span class="nc" id="L468">    }</span>
+
+    @Override
+    public synchronized void init(NodeType type, AbstractConfiguration conf, ByteBufAllocator allocator)
+            throws SecurityException {
+<span class="nc" id="L473">        this.allocator = allocator;</span>
+<span class="nc" id="L474">        this.config = conf;</span>
+<span class="nc" id="L475">        this.type = type;</span>
+        final String enabledProtocols;
+        final String enabledCiphers;
+<span class="nc" id="L478">        certRefreshTime = TimeUnit.SECONDS.toMillis(conf.getTLSCertFilesRefreshDurationSeconds());</span>
+
+<span class="nc" id="L480">        enabledCiphers = conf.getTLSEnabledCipherSuites();</span>
+<span class="nc" id="L481">        enabledProtocols = conf.getTLSEnabledProtocols();</span>
+
+        try {
+<span class="nc bnc" id="L484" title="All 3 branches missed.">            switch (type) {</span>
+            case Client:
+<span class="nc" id="L486">                createClientContext();</span>
+<span class="nc" id="L487">                break;</span>
+            case Server:
+<span class="nc" id="L489">                createServerContext();</span>
+<span class="nc" id="L490">                break;</span>
+            default:
+<span class="nc" id="L492">                throw new SecurityException(new IllegalArgumentException(&quot;Invalid NodeType&quot;));</span>
+            }
+
+<span class="nc bnc" id="L495" title="All 4 branches missed.">            if (enabledProtocols != null &amp;&amp; !enabledProtocols.isEmpty()) {</span>
+<span class="nc" id="L496">                protocols = enabledProtocols.split(&quot;,&quot;);</span>
+            }
+
+<span class="nc bnc" id="L499" title="All 4 branches missed.">            if (enabledCiphers != null &amp;&amp; !enabledCiphers.isEmpty()) {</span>
+<span class="nc" id="L500">                ciphers = enabledCiphers.split(&quot;,&quot;);</span>
+            }
+<span class="nc" id="L502">        } catch (KeyStoreException e) {</span>
+<span class="nc" id="L503">            throw new RuntimeException(&quot;Standard keystore type missing&quot;, e);</span>
+<span class="nc" id="L504">        } catch (NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L505">            throw new RuntimeException(&quot;Standard algorithm missing&quot;, e);</span>
+<span class="nc" id="L506">        } catch (CertificateException e) {</span>
+<span class="nc" id="L507">            throw new SecurityException(&quot;Unable to load keystore&quot;, e);</span>
+<span class="nc" id="L508">        } catch (IOException e) {</span>
+<span class="nc" id="L509">            throw new SecurityException(&quot;Error initializing SSLContext&quot;, e);</span>
+<span class="nc" id="L510">        } catch (UnrecoverableKeyException e) {</span>
+<span class="nc" id="L511">            throw new SecurityException(&quot;Unable to load key manager, possibly bad password&quot;, e);</span>
+<span class="nc" id="L512">        } catch (InvalidKeySpecException e) {</span>
+<span class="nc" id="L513">            throw new SecurityException(&quot;Unable to load key manager&quot;, e);</span>
+<span class="nc" id="L514">        } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L515">            throw new SecurityException(&quot;Invalid TLS configuration&quot;, e);</span>
+<span class="nc" id="L516">        } catch (NoSuchProviderException e) {</span>
+<span class="nc" id="L517">            throw new SecurityException(&quot;No such provider&quot;, e);</span>
+<span class="nc" id="L518">        }</span>
+<span class="nc" id="L519">    }</span>
+
+    @Override
+    public SslHandler newTLSHandler() {
+<span class="nc" id="L523">        return this.newTLSHandler(null, -1);</span>
+    }
+
+    @Override
+    public SslHandler newTLSHandler(String peer, int port) {
+<span class="nc" id="L528">        SslHandler sslHandler = getSSLContext().newHandler(allocator, peer, port);</span>
+
+<span class="nc bnc" id="L530" title="All 4 branches missed.">        if (protocols != null &amp;&amp; protocols.length != 0) {</span>
+<span class="nc" id="L531">            sslHandler.engine().setEnabledProtocols(protocols);</span>
+        }
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L534">            log.debug(&quot;Enabled cipher protocols: {} &quot;, Arrays.toString(sslHandler.engine().getEnabledProtocols()));</span>
+        }
+
+<span class="nc bnc" id="L537" title="All 4 branches missed.">        if (ciphers != null &amp;&amp; ciphers.length != 0) {</span>
+<span class="nc" id="L538">            sslHandler.engine().setEnabledCipherSuites(ciphers);</span>
+        }
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L541">            log.debug(&quot;Enabled cipher suites: {} &quot;, Arrays.toString(sslHandler.engine().getEnabledCipherSuites()));</span>
+        }
+
+<span class="nc bnc" id="L544" title="All 4 branches missed.">        if (type == NodeType.Client &amp;&amp; ((ClientConfiguration) config).getHostnameVerificationEnabled()) {</span>
+<span class="nc" id="L545">            SSLParameters sslParameters = sslHandler.engine().getSSLParameters();</span>
+<span class="nc" id="L546">            sslParameters.setEndpointIdentificationAlgorithm(&quot;HTTPS&quot;);</span>
+<span class="nc" id="L547">            sslHandler.engine().setSSLParameters(sslParameters);</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L549">                log.debug(&quot;Enabled endpointIdentificationAlgorithm: HTTPS&quot;);</span>
+            }
+        }
+
+<span class="nc" id="L553">        return sslHandler;</span>
+    }
+
+    private void markAutoCertRefresh(String tlsCertificatePath, String tlsKeyStore, String tlsKeyStorePasswordPath,
+            String tlsTrustStore, String tlsTrustStorePasswordPath) {
+<span class="nc" id="L558">        tlsCertificateFilePath = new FileModifiedTimeUpdater(tlsCertificatePath);</span>
+<span class="nc" id="L559">        tlsKeyStoreFilePath = new FileModifiedTimeUpdater(tlsKeyStore);</span>
+<span class="nc" id="L560">        tlsKeyStorePasswordFilePath = new FileModifiedTimeUpdater(tlsKeyStorePasswordPath);</span>
+<span class="nc" id="L561">        tlsTrustStoreFilePath = new FileModifiedTimeUpdater(tlsTrustStore);</span>
+<span class="nc" id="L562">        tlsTrustStorePasswordFilePath = new FileModifiedTimeUpdater(tlsTrustStorePasswordPath);</span>
+<span class="nc" id="L563">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>
