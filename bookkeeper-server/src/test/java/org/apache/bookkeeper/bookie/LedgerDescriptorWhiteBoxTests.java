@@ -156,7 +156,6 @@ public class LedgerDescriptorWhiteBoxTests {
      * - Validates that journal entries are written only once
      * - Confirms both fence operations complete successfully when journal write succeeds
      */
-    @Disabled("TODO: not work for pitest")
     @Test
     @DisplayName("Test concurrent fence operations")
     void testConcurrentFenceOperations() throws IOException, InterruptedException {
@@ -476,7 +475,6 @@ public class LedgerDescriptorWhiteBoxTests {
      * - Exception is propagated correctly through the future chain
      */
 
-    @Disabled(" Disabled for running pitest")
     @Test
     @DisplayName("Test failed journal write during fence")
     void testFailedJournalWriteDuringFence() throws IOException, InterruptedException {

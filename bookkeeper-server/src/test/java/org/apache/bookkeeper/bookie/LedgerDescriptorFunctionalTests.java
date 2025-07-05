@@ -194,9 +194,55 @@ public class LedgerDescriptorFunctionalTests {
 
     @Disabled("TODO: Implement test for client crash scenario")
     @Test
-    void testClientCrash() {
-        // TODO: Implement a test that simulate a crash of the client and the ledger status is closed
+    @DisplayName("Test client crash scenario with storage fencing")
+    void testClientCrash() throws IOException, BookieException {
+        // Setup iniziale
+        ByteBuf entry = Unpooled.buffer(16);
+        entry.writeLong(TEST_LEDGER_ID);
+        entry.writeLong(1);
+
+        // Verifica stato iniziale - lo storage non dovrebbe essere fenced
+        when(ledgerStorage.isFenced(TEST_LEDGER_ID)).thenReturn(false);
+        assertFalse(ledger.isFenced(), "Lo storage non dovrebbe essere fenced inizialmente");
+
+        // Simuliamo scrittura pre-crash
+        when(ledgerStorage.addEntry(any(ByteBuf.class))).thenReturn(1L);
+        ledger.addEntry(entry);
+
+        // Simuliamo il crash del client
+        // 1. Prima setFenced() viene chiamato sullo storage
+        when(ledgerStorage.setFenced(TEST_LEDGER_ID)).thenReturn(true);
+        // 2. Poi isFenced() restituirà true per tutte le chiamate successive
+        when(ledgerStorage.isFenced(TEST_LEDGER_ID)).thenReturn(true);
+
+        // Verifichiamo che:
+        // 1. setFenced() ritorna true (primo fencing)
+        assertTrue("Il primo setFenced dovrebbe ritornare true", ledger.setFenced());
+        // 2. Una seconda chiamata ritorna false (già fenced)
+        assertFalse(ledger.setFenced(), "Il secondo setFenced dovrebbe ritornare false");
+
+        // Verifichiamo che isFenced() rifletta lo stato dello storage
+        assertTrue("Il ledger dovrebbe riportare lo stato fenced dello storage", ledger.isFenced());
+
+        // Verifichiamo che lo storage sia stato chiamato correttamente
+        verify(ledgerStorage).setFenced(TEST_LEDGER_ID);
+        verify(ledgerStorage, atLeast(1)).isFenced(TEST_LEDGER_ID);
+
+        // Tentiamo una nuova scrittura - dovrebbe essere bloccata dallo storage
+        ByteBuf newEntry = Unpooled.buffer(16);
+        newEntry.writeLong(TEST_LEDGER_ID);
+        newEntry.writeLong(2);
+
+        // La scrittura dovrebbe essere rifiutata con LedgerFencedException
+        assertThrows(BookieException.class,
+                () -> ledger.addEntry(newEntry),
+                "Le scritture dovrebbero essere rifiutate quando lo storage è fenced"
+        );
+
+        // Verifichiamo che lo storage non sia stato chiamato per la nuova scrittura
+        verify(ledgerStorage, never()).addEntry(newEntry);
     }
+
     /*
 
      * Test that every ledger has a unique client that write and the 
