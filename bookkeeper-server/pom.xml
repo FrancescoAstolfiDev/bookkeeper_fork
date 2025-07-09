@@ -376,7 +376,19 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
         <configuration>
+          <includes>
+            <include>**/*Test.java</include>
+            <include>**/*Tests.java</include>
+          </includes>
+          <forkCount>1</forkCount>
+          <reuseForks>false</reuseForks>
+          <argLine>-Djdk.attach.allowAttachSelf=true -XX:+StartAttachListener @{argLine}</argLine>
+          <systemPropertyVariables>
+            <mockito.mock.maker>inline</mockito.mock.maker>
+          </systemPropertyVariables>
+          <useSystemClassLoader>true</useSystemClassLoader>
           <trimStackTrace>false</trimStackTrace>
           <properties>
             <property>
@@ -384,8 +396,18 @@
               <value>org.apache.bookkeeper.common.testing.util.TimedOutTestsListener</value>
             </property>
           </properties>
+          <testFailureIgnore>true</testFailureIgnore>
         </configuration>
+        <dependencies>
+          <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>runtime</scope>
+          </dependency>
+        </dependencies>
       </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
@@ -420,10 +442,8 @@
         <configuration>
           <!-- Specifica quali classi analizzare -->
           <includes>
-            <include>org/apache/openjpa/**/*</include>
+            <include>org/apache/bookkeeper/**/*</include>
           </includes>
-          <destFile>${project.build.directory}/jacoco.exec</destFile>
-          <dataFile>${project.build.directory}/jacoco.exec</dataFile>
         </configuration>
         <executions>
           <execution>
@@ -431,33 +451,26 @@
             <goals>
               <goal>prepare-agent</goal>
             </goals>
-            <configuration>
-              <destFile>${project.build.directory}/jacoco.exec</destFile>
-            </configuration>
           </execution>
           <execution>
             <id>report</id>
-            <phase>verify</phase>
+            <phase>test</phase>
             <goals>
               <goal>report</goal>
             </goals>
-            <configuration>
-              <dataFile>${project.build.directory}/jacoco.exec</dataFile>
-            </configuration>
           </execution>
         </executions>
       </plugin>
       <plugin>
         <groupId>org.pitest</groupId>
         <artifactId>pitest-maven</artifactId>
-        <version>1.19.5</version>
+        <version>1.15.3</version>
         <configuration>
-          <reportsDirectory>target/pit-reports</reportsDirectory>
           <targetClasses>
-            <param>org.apache.bookkeeper.bookie.*</param>
+            <param>org.apache.openjpa.persistence.PersistenceProviderImpl</param>
           </targetClasses>
           <targetTests>
-            <param>org.apache.bookkeeper.bookie.*</param>
+            <param>org.apache.openjpa.persistence.*Test</param>
           </targetTests>
           <outputFormats>
             <param>HTML</param>
@@ -466,21 +479,10 @@
           </outputFormats>
           <timeoutConstant>10000</timeoutConstant>
           <failWhenNoMutations>false</failWhenNoMutations>
-          <threads>1</threads>
-          <jvmArgs>
-            <jvmArg>-Xmx1024m</jvmArg>
-          </jvmArgs>
           <verbose>true</verbose>
+          <withHistory>true</withHistory>
         </configuration>
-        <dependencies>
-          <dependency>
-            <groupId>org.pitest</groupId>
-            <artifactId>pitest-junit5-plugin</artifactId>
-            <version>1.1.0</version>
-          </dependency>
-        </dependencies>
       </plugin>
-
 
 
     </plugins>
@@ -808,7 +810,7 @@
         <dependency>
           <groupId>org.mockito</groupId>
           <artifactId>mockito-core</artifactId>
-          <version>>4.11.0</version>
+          <version>4.11.0</version>
           <scope>test</scope>
         </dependency>
         <dependency>
@@ -836,7 +838,24 @@
 
       </dependencies>
     </profile>
-
+    <profile>
+      <id>mutation-coverage</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-maven</artifactId>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>mutationCoverage</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
 
 
 
