@@ -47,7 +47,7 @@ public class IteratorUtility {
      * @return merged primitive oflong iterator.
      */
     public static OfLong mergePrimitiveLongIterator(OfLong iter1, OfLong iter2) {
-        return new OfLong() {
+        return new PrimitiveIterator.OfLong() {
             private long curIter1Element = INVALID_ELEMENT;
             private long curIter2Element = INVALID_ELEMENT;
             private boolean hasToPreFetch = true;
@@ -117,7 +117,7 @@ public class IteratorUtility {
      */
     public static <T> OfLong mergeIteratorsForPrimitiveLongIterator(Iterator<T> iter1, Iterator<T> iter2,
             Comparator<T> comparator, ToLongFunction<T> function) {
-        return new OfLong() {
+        return new PrimitiveIterator.OfLong() {
             private T curIter1Entry = null;
             private T curIter2Entry = null;
             private boolean hasToPreFetch = true;

@@ -44,8 +44,8 @@ public interface Handle extends AutoCloseable {
     /**
      * Close this handle synchronously.
      *
-     * @throws BKException
-     * @throws InterruptedException
+     * @throws org.apache.bookkeeper.client.api.BKException
+     * @throws java.lang.InterruptedException
      * @see #closeAsync
      */
     @Override

@@ -434,7 +434,7 @@ class PendingAddOp implements WriteCallback {
     private final Handle<PendingAddOp> recyclerHandle;
     private static final Recycler<PendingAddOp> RECYCLER = new Recycler<PendingAddOp>() {
         @Override
-        protected PendingAddOp newObject(Handle<PendingAddOp> handle) {
+        protected PendingAddOp newObject(Recycler.Handle<PendingAddOp> handle) {
             return new PendingAddOp(handle);
         }
     };

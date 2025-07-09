@@ -195,13 +195,13 @@ public class LedgerCacheImpl implements LedgerCache {
 
     @Override
     public OfLong getEntriesIterator(long ledgerId) throws IOException {
-        Iterator<PageEntries> pageEntriesIteratorNonFinal = null;
+        Iterator<LedgerCache.PageEntries> pageEntriesIteratorNonFinal = null;
         try {
             pageEntriesIteratorNonFinal = listEntries(ledgerId).iterator();
         } catch (Bookie.NoLedgerException noLedgerException) {
             pageEntriesIteratorNonFinal = Collections.emptyIterator();
         }
-        final Iterator<PageEntries> pageEntriesIterator = pageEntriesIteratorNonFinal;
+        final Iterator<LedgerCache.PageEntries> pageEntriesIterator = pageEntriesIteratorNonFinal;
         return new OfLong() {
             private OfLong entriesInCurrentLEPIterator = null;
             {

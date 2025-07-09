@@ -81,7 +81,7 @@ public class LedgerChecker {
         public void readEntryComplete(int rc, long ledgerId, long entryId,
                 ByteBuf buffer, Object ctx) {
             releasePermit();
-            if (rc == Code.OK) {
+            if (rc == BKException.Code.OK) {
                 if (numEntries.decrementAndGet() == 0
                         && !completed.getAndSet(true)) {
                     cb.operationComplete(rc, fragment);
@@ -121,19 +121,19 @@ public class LedgerChecker {
 
         @Override
         public void operationComplete(int rc, LedgerFragment lf) {
-            if (Code.OK != rc) {
+            if (BKException.Code.OK != rc) {
                 synchronized (badBookies) {
                     badBookies.put(bookieIndex, rc);
                 }
             }
             if (numBookies.decrementAndGet() == 0) {
                 if (badBookies.isEmpty()) {
-                    cb.operationComplete(Code.OK, fragment);
+                    cb.operationComplete(BKException.Code.OK, fragment);
                 } else {
-                    int rcToReturn = Code.NoBookieAvailableException;
+                    int rcToReturn = BKException.Code.NoBookieAvailableException;
                     for (Map.Entry<Integer, Integer> entry : badBookies.entrySet()) {
                         rcToReturn = entry.getValue();
-                        if (entry.getValue() == Code.ClientClosedException) {
+                        if (entry.getValue() == BKException.Code.ClientClosedException) {
                             break;
                         }
                     }
@@ -200,7 +200,7 @@ public class LedgerChecker {
             throws InvalidFragmentException, BKException, InterruptedException {
         Set<Integer> bookiesToCheck = fragment.getBookiesIndexes();
         if (bookiesToCheck.isEmpty()) {
-            cb.operationComplete(Code.OK, fragment);
+            cb.operationComplete(BKException.Code.OK, fragment);
             return;
         }
 
@@ -245,13 +245,13 @@ public class LedgerChecker {
 
             if (bookieWatcher.isBookieUnavailable(fragment.getAddress(bookieIndex))) {
                 // fragment is on this bookie, but already know it's unavailable, so skip the call
-                cb.operationComplete(Code.BookieHandleNotAvailableException, fragment);
+                cb.operationComplete(BKException.Code.BookieHandleNotAvailableException, fragment);
             } else {
-                cb.operationComplete(Code.OK, fragment);
+                cb.operationComplete(BKException.Code.OK, fragment);
             }
         } else if (bookieWatcher.isBookieUnavailable(fragment.getAddress(bookieIndex))) {
             // fragment is on this bookie, but already know it's unavailable, so skip the call
-            cb.operationComplete(Code.BookieHandleNotAvailableException, fragment);
+            cb.operationComplete(BKException.Code.BookieHandleNotAvailableException, fragment);
         } else if (firstStored == lastStored) {
             acquirePermit();
             ReadManyEntriesCallback manycb = new ReadManyEntriesCallback(1,
@@ -325,8 +325,8 @@ public class LedgerChecker {
         public void readEntryComplete(int rc, long ledgerId, long entryId,
                                       ByteBuf buffer, Object ctx) {
             releasePermit();
-            if (Code.NoSuchEntryException != rc && Code.NoSuchLedgerExistsException != rc
-                    && Code.NoSuchLedgerExistsOnMetadataServerException != rc) {
+            if (BKException.Code.NoSuchEntryException != rc && BKException.Code.NoSuchLedgerExistsException != rc
+                    && BKException.Code.NoSuchLedgerExistsOnMetadataServerException != rc) {
                 entryMayExist.set(true);
             }
 
@@ -356,14 +356,14 @@ public class LedgerChecker {
 
         @Override
         public void operationComplete(int rc, LedgerFragment result) {
-            if (rc == Code.ClientClosedException) {
-                cb.operationComplete(Code.ClientClosedException, badFragments);
+            if (rc == BKException.Code.ClientClosedException) {
+                cb.operationComplete(BKException.Code.ClientClosedException, badFragments);
                 return;
-            } else if (rc != Code.OK) {
+            } else if (rc != BKException.Code.OK) {
                 badFragments.add(result);
             }
             if (numFragments.decrementAndGet() == 0) {
-                cb.operationComplete(Code.OK, badFragments);
+                cb.operationComplete(BKException.Code.OK, badFragments);
             }
         }
     }
@@ -470,7 +470,7 @@ public class LedgerChecker {
                                 GenericCallback<Set<LedgerFragment>> cb,
                                 long percentageOfLedgerFragmentToBeVerified) {
         if (fragments.size() == 0) { // no fragments to verify
-            cb.operationComplete(Code.OK, fragments);
+            cb.operationComplete(BKException.Code.OK, fragments);
             return;
         }
 
@@ -486,7 +486,7 @@ public class LedgerChecker {
             } catch (InvalidFragmentException ife) {
                 LOG.error("Invalid fragment found : {}", r);
                 allFragmentsCb.operationComplete(
-                        Code.IncorrectParameterException, r);
+                        BKException.Code.IncorrectParameterException, r);
             } catch (BKException e) {
                 LOG.error("BKException when checking fragment : {}", r, e);
             } catch (InterruptedException e) {

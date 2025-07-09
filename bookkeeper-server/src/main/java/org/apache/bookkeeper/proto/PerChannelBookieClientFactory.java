@@ -25,12 +25,12 @@ import org.apache.bookkeeper.tls.SecurityException;
 import org.apache.bookkeeper.tls.SecurityHandlerFactory;
 
 /**
- * Factory to create {@link PerChannelBookieClient}.
+ * Factory to create {@link org.apache.bookkeeper.proto.PerChannelBookieClient}.
  */
 interface PerChannelBookieClientFactory {
 
     /**
-     * Create a {@link PerChannelBookieClient} to
+     * Create a {@link org.apache.bookkeeper.proto.PerChannelBookieClient} to
      * <i>address</i>.
      *
      * @return the client connected to address.

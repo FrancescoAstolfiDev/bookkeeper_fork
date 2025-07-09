@@ -289,7 +289,7 @@ class AuthHandler {
                             authenticationError(ctx, resp.getStatus().getNumber());
                         } else {
                             assert (resp.hasAuthResponse());
-                            AuthMessage am = resp.getAuthResponse();
+                            BookkeeperProtocol.AuthMessage am = resp.getAuthResponse();
                             if (AUTHENTICATION_DISABLED_PLUGIN_NAME.equals(am.getAuthPluginName())){
                                 SocketAddress remote = ctx.channel().remoteAddress();
                                 LOG.info("Authentication is not enabled."
@@ -317,7 +317,7 @@ class AuthHandler {
                     if (resp.errorCode != BookieProtocol.EOK) {
                         authenticationError(ctx, resp.errorCode);
                     } else {
-                        AuthMessage am = ((BookieProtocol.AuthResponse) resp).authMessage;
+                        BookkeeperProtocol.AuthMessage am = ((BookieProtocol.AuthResponse) resp).authMessage;
                         if (AUTHENTICATION_DISABLED_PLUGIN_NAME.equals(am.getAuthPluginName())) {
                             SocketAddress remote = ctx.channel().remoteAddress();
                             LOG.info("Authentication is not enabled."

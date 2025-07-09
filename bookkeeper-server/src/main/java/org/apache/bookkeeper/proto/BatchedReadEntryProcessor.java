@@ -108,7 +108,7 @@ public class BatchedReadEntryProcessor extends ReadEntryProcessor {
 
     private static final Recycler<BatchedReadEntryProcessor> RECYCLER = new Recycler<BatchedReadEntryProcessor>() {
         @Override
-        protected BatchedReadEntryProcessor newObject(Handle<BatchedReadEntryProcessor> handle) {
+        protected BatchedReadEntryProcessor newObject(Recycler.Handle<BatchedReadEntryProcessor> handle) {
             return new BatchedReadEntryProcessor(handle);
         }
     };

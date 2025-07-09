@@ -1151,7 +1151,7 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
                 "getListOfEntriesOfLedger method is currently unsupported for SingleDirectoryDbLedgerStorage");
     }
 
-    private LedgerDirsListener getLedgerDirsListener() {
+    private LedgerDirsManager.LedgerDirsListener getLedgerDirsListener() {
         return new LedgerDirsListener() {
 
             @Override

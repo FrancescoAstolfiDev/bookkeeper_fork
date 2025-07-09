@@ -291,8 +291,8 @@ public class ZoneawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
     @Override
     public PlacementResult<List<BookieId>> newEnsemble(int ensembleSize, int writeQuorumSize,
             int ackQuorumSize, Set<BookieId> excludeBookies,
-            Ensemble<BookieNode> parentEnsemble,
-            Predicate<BookieNode> parentPredicate)
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Ensemble<BookieNode> parentEnsemble,
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Predicate<BookieNode> parentPredicate)
             throws BKNotEnoughBookiesException {
         throw new UnsupportedOperationException(
                 "newEnsemble method with parentEnsemble and parentPredicate is not supported for "
@@ -301,8 +301,8 @@ public class ZoneawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
 
     @Override
     public BookieNode selectFromNetworkLocation(String networkLoc, Set<Node> excludeBookies,
-            Predicate<BookieNode> predicate,
-            Ensemble<BookieNode> ensemble,
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Predicate<BookieNode> predicate,
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Ensemble<BookieNode> ensemble,
             boolean fallbackToRandom) throws BKNotEnoughBookiesException {
         throw new UnsupportedOperationException(
                 "selectFromNetworkLocation is not supported for ZoneawareEnsemblePlacementPolicyImpl");
@@ -310,8 +310,8 @@ public class ZoneawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
 
     @Override
     public BookieNode selectFromNetworkLocation(Set<String> excludeRacks, Set<Node> excludeBookies,
-            Predicate<BookieNode> predicate,
-            Ensemble<BookieNode> ensemble,
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Predicate<BookieNode> predicate,
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Ensemble<BookieNode> ensemble,
             boolean fallbackToRandom) throws BKNotEnoughBookiesException {
         throw new UnsupportedOperationException(
                 "selectFromNetworkLocation is not supported for ZoneawareEnsemblePlacementPolicyImpl");
@@ -319,8 +319,8 @@ public class ZoneawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
 
     @Override
     public BookieNode selectFromNetworkLocation(String networkLoc, Set<String> excludeRacks, Set<Node> excludeBookies,
-            Predicate<BookieNode> predicate,
-            Ensemble<BookieNode> ensemble,
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Predicate<BookieNode> predicate,
+            org.apache.bookkeeper.client.ITopologyAwareEnsemblePlacementPolicy.Ensemble<BookieNode> ensemble,
             boolean fallbackToRandom) throws BKNotEnoughBookiesException {
         throw new UnsupportedOperationException(
                 "selectFromNetworkLocation is not supported for ZoneawareEnsemblePlacementPolicyImpl");

@@ -455,13 +455,13 @@ public class BookieProtoEncoding {
 
         @Override
         public Object decode(ByteBuf packet) throws Exception {
-            return Response.parseFrom(new ByteBufInputStream(packet),
+            return BookkeeperProtocol.Response.parseFrom(new ByteBufInputStream(packet),
                                                          extensionRegistry);
         }
 
         @Override
         public Object encode(Object msg, ByteBufAllocator allocator) throws Exception {
-            Response response = (Response) msg;
+            BookkeeperProtocol.Response response = (BookkeeperProtocol.Response) msg;
             return serializeProtobuf(response, allocator);
         }
 
@@ -593,7 +593,7 @@ public class BookieProtoEncoding {
 
             if (msg instanceof ByteBuf) {
                 ctx.write(msg, promise);
-            } else if (msg instanceof Response) {
+            } else if (msg instanceof BookkeeperProtocol.Response) {
                 ctx.write(repV3.encode(msg, ctx.alloc()), promise);
             } else if (msg instanceof BookieProtocol.Response) {
                 ctx.write(repPreV3.encode(msg, ctx.alloc()), promise);

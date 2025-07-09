@@ -41,14 +41,14 @@ abstract class EntryLogManagerBase implements EntryLogManager {
     volatile List<BufferedLogChannel> rotatedLogChannels;
     final EntryLoggerAllocator entryLoggerAllocator;
     final LedgerDirsManager ledgerDirsManager;
-    private final List<EntryLogListener> listeners;
+    private final List<DefaultEntryLogger.EntryLogListener> listeners;
     /**
      * The maximum size of a entry logger file.
      */
     final long logSizeLimit;
 
     EntryLogManagerBase(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
-            EntryLoggerAllocator entryLoggerAllocator, List<EntryLogListener> listeners) {
+            EntryLoggerAllocator entryLoggerAllocator, List<DefaultEntryLogger.EntryLogListener> listeners) {
         this.ledgerDirsManager = ledgerDirsManager;
         this.entryLoggerAllocator = entryLoggerAllocator;
         this.listeners = listeners;

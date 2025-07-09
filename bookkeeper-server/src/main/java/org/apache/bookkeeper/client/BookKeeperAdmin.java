@@ -916,7 +916,7 @@ public class BookKeeperAdmin implements AutoCloseable {
                  */
                 Map<Long, Long> ledgerFragmentsRange = new HashMap<Long, Long>();
                 Long curEntryId = null;
-                for (Entry<Long, ? extends List<BookieId>> entry :
+                for (Map.Entry<Long, ? extends List<BookieId>> entry :
                          lh.getLedgerMetadata().getAllEnsembles().entrySet()) {
                     if (curEntryId != null) {
                         ledgerFragmentsRange.put(curEntryId, entry.getKey() - 1);
@@ -989,8 +989,8 @@ public class BookKeeperAdmin implements AutoCloseable {
                                 startEntryId, endEntryId, lh.getId(), targetBookieAddresses);
                         }
                         try {
-                            SingleFragmentCallback cb =
-                                new SingleFragmentCallback(ledgerFragmentsMcb, lh,
+                            LedgerFragmentReplicator.SingleFragmentCallback cb =
+                                new LedgerFragmentReplicator.SingleFragmentCallback(ledgerFragmentsMcb, lh,
                                                                                     bkc.getLedgerManager(),
                                         startEntryId, getReplacementBookiesMap(ensemble, targetBookieAddresses));
                             LedgerFragment ledgerFragment = new LedgerFragment(lh,
@@ -1121,7 +1121,7 @@ public class BookKeeperAdmin implements AutoCloseable {
             List<BookieId> ensemble,
             Map<Integer, BookieId> replacedBookies) {
         ArrayList<BookieId> newEnsemble = Lists.newArrayList(ensemble);
-        for (Entry<Integer, BookieId> entry : replacedBookies.entrySet()) {
+        for (Map.Entry<Integer, BookieId> entry : replacedBookies.entrySet()) {
             newEnsemble.set(entry.getKey(), entry.getValue());
         }
         return newEnsemble;
@@ -1185,7 +1185,7 @@ public class BookKeeperAdmin implements AutoCloseable {
             Map<Integer, BookieId> targetBookieAddresses) {
         Map<BookieId, BookieId> bookiesMap =
                 new HashMap<BookieId, BookieId>();
-        for (Entry<Integer, BookieId> entry : targetBookieAddresses.entrySet()) {
+        for (Map.Entry<Integer, BookieId> entry : targetBookieAddresses.entrySet()) {
             BookieId oldBookie = ensemble.get(entry.getKey());
             BookieId newBookie = entry.getValue();
             bookiesMap.put(oldBookie, newBookie);

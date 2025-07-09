@@ -269,7 +269,7 @@ public class BookkeeperInternalCallbacks {
         final int failureRc;
         final int successRc;
         // Final callback and the corresponding context to invoke
-        final VoidCallback cb;
+        final AsyncCallback.VoidCallback cb;
         final Object context;
         final ExecutorService callbackExecutor;
         // This keeps track of how many operations have completed
@@ -277,12 +277,12 @@ public class BookkeeperInternalCallbacks {
         // List of the exceptions from operations that completed unsuccessfully
         final LinkedBlockingQueue<Integer> exceptions = new LinkedBlockingQueue<Integer>();
 
-        public MultiCallback(int expected, VoidCallback cb, Object context,
+        public MultiCallback(int expected, AsyncCallback.VoidCallback cb, Object context,
                              int successRc, int failureRc) {
             this(expected, cb, context, successRc, failureRc, null);
         }
 
-        public MultiCallback(int expected, VoidCallback cb, Object context,
+        public MultiCallback(int expected, AsyncCallback.VoidCallback cb, Object context,
                              int successRc, int failureRc, ExecutorService callbackExecutor) {
             this.expected = expected;
             this.cb = cb;

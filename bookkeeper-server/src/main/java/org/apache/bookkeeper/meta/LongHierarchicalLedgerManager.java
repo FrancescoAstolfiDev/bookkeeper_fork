@@ -92,7 +92,7 @@ class LongHierarchicalLedgerManager extends AbstractHierarchicalLedgerManager {
     //
 
     @Override
-    public void asyncProcessLedgers(final Processor<Long> processor, final VoidCallback finalCb,
+    public void asyncProcessLedgers(final Processor<Long> processor, final AsyncCallback.VoidCallback finalCb,
             final Object context, final int successRc, final int failureRc) {
 
         // If it succeeds, proceed with our own recursive ledger processing for the 63-bit id ledgers

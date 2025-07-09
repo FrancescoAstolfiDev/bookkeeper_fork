@@ -88,7 +88,7 @@ public interface BookieClient {
     /**
      * Send a force request to the server. When complete all entries which have
      * been written for {@code ledgerId} to this bookie will be persisted on disk.
-     * This is for use with {@link WriteFlag#DEFERRED_SYNC}.
+     * This is for use with {@link org.apache.bookkeeper.client.api.WriteFlag#DEFERRED_SYNC}.
      *
      * @param address the address of the bookie
      * @param ledgerId the ledger whose entries we want persisted
@@ -134,11 +134,11 @@ public interface BookieClient {
      * @param cb the callback notified when the request completes
      * @param ctx a context object passed to the callback on completion
      * @param options a bit mask of flags from BookieProtocol.FLAG_*
-     *                {@link BookieProtocol}
+     *                {@link org.apache.bookkeeper.proto.BookieProtocol}
      * @param allowFastFail fail the add immediately if the channel is non-writable
      *                      {@link #isWritable(BookieId,long)}
      * @param writeFlags a set of write flags
-     *                   {@link WriteFlag}
+     *                   {@link org.apache.bookkeeper.client.api.WriteFlag}
      */
     void addEntry(BookieId address, long ledgerId, byte[] masterKey,
                   long entryId, ReferenceCounted toSend, WriteCallback cb, Object ctx,
@@ -171,7 +171,7 @@ public interface BookieClient {
      * @param cb the callback notified when the request completes
      * @param ctx a context object passed to the callback on completion
      * @param flags a bit mask of flags from BookieProtocol.FLAG_*
-     *              {@link BookieProtocol}
+     *              {@link org.apache.bookkeeper.proto.BookieProtocol}
      * @param masterKey the master key of the ledger being read from. This is only required
      *                  if the FLAG_DO_FENCING is specified.
      * @param allowFastFail fail the read immediately if the channel is non-writable
@@ -212,7 +212,7 @@ public interface BookieClient {
      * @param cb the callback notified when the request completes
      * @param ctx a context object passed to the callback on completion
      * @param flags a bit mask of flags from BookieProtocol.FLAG_*
-     *              {@link BookieProtocol}
+     *              {@link org.apache.bookkeeper.proto.BookieProtocol}
      * @param masterKey the master key of the ledger being read from. This is only required
      *                  if the FLAG_DO_FENCING is specified.
      * @param allowFastFail fail the read immediately if the channel is non-writable
@@ -250,7 +250,7 @@ public interface BookieClient {
      *
      * @param address the address of the bookie to request information from
      * @param requested a bitset specifying which pieces of information to request
-     *                  {@link BookkeeperProtocol.GetBookieInfoRequest}
+     *                  {@link org.apache.bookkeeper.proto.BookkeeperProtocol.GetBookieInfoRequest}
      * @param cb the callback notified when the request completes
      * @param ctx a context object passed to the callback on completion
      *

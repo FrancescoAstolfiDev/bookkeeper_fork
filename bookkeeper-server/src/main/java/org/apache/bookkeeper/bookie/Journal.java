@@ -348,7 +348,7 @@ public class Journal implements CheckpointSource {
 
         private static final Recycler<QueueEntry> RECYCLER = new Recycler<QueueEntry>() {
             @Override
-            protected QueueEntry newObject(Handle<QueueEntry> handle) {
+            protected QueueEntry newObject(Recycler.Handle<QueueEntry> handle) {
                 return new QueueEntry(handle);
             }
         };
@@ -451,7 +451,7 @@ public class Journal implements CheckpointSource {
     private static final Recycler<ForceWriteRequest> forceWriteRequestsRecycler = new Recycler<ForceWriteRequest>() {
                 @Override
                 protected ForceWriteRequest newObject(
-                        Handle<ForceWriteRequest> handle) {
+                        Recycler.Handle<ForceWriteRequest> handle) {
                     return new ForceWriteRequest(handle);
                 }
             };
@@ -951,7 +951,7 @@ public class Journal implements CheckpointSource {
      * new journal file using current timestamp, and continue persistence logic.
      * Those journals will be garbage collected in SyncThread.
      * </p>
-     * @see SyncThread
+     * @see org.apache.bookkeeper.bookie.SyncThread
      */
     public void run() {
         LOG.info("Starting journal on {}", journalDirectory);

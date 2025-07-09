@@ -367,10 +367,10 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
         VoidCallback callbackForDelete = new VoidCallback() {
             @Override
             public void processResult(int rc, String path, Object ctx) {
-                if (rc == Code.NONODE.intValue()) {
+                if (rc == KeeperException.Code.NONODE.intValue()) {
                     LOG.warn("Ledger node does not exist in ZooKeeper: ledgerId={}.  Returning success.", ledgerId);
                     FutureUtils.complete(promise, null);
-                } else if (rc == Code.OK.intValue()) {
+                } else if (rc == KeeperException.Code.OK.intValue()) {
                     // removed listener on ledgerId
                     Set<LedgerMetadataListener> listenerSet = listeners.remove(ledgerId);
                     if (null != listenerSet) {
@@ -449,9 +449,9 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
         zk.removeWatches(getLedgerPath(ledgerId), watcher, WatcherType.Data, true, new VoidCallback() {
             @Override
             public void processResult(int rc, String path, Object o) {
-                if (rc != Code.OK.intValue()) {
+                if (rc != KeeperException.Code.OK.intValue()) {
                     LOG.error("Cancel watch ledger {} metadata failed.", ledgerId,
-                            KeeperException.create(Code.get(rc), path));
+                            KeeperException.create(KeeperException.Code.get(rc), path));
                     return;
                 }
                 if (LOG.isDebugEnabled()) {
@@ -471,17 +471,17 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
         zk.getData(getLedgerPath(ledgerId), watcher, new DataCallback() {
             @Override
             public void processResult(int rc, String path, Object ctx, byte[] data, Stat stat) {
-                if (rc == Code.NONODE.intValue()) {
+                if (rc == KeeperException.Code.NONODE.intValue()) {
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("No such ledger: " + ledgerId,
-                                  KeeperException.create(Code.get(rc), path));
+                                  KeeperException.create(KeeperException.Code.get(rc), path));
                     }
                     promise.completeExceptionally(new BKException.BKNoSuchLedgerExistsOnMetadataServerException());
                     return;
                 }
-                if (rc != Code.OK.intValue()) {
+                if (rc != KeeperException.Code.OK.intValue()) {
                     LOG.error("Could not read metadata for ledger: " + ledgerId,
-                              KeeperException.create(Code.get(rc), path));
+                              KeeperException.create(KeeperException.Code.get(rc), path));
                     promise.completeExceptionally(
                             new BKException.ZKException(KeeperException.create(Code.get(rc), path)));
                     return;
@@ -531,16 +531,16 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
                    new StatCallback() {
             @Override
             public void processResult(int rc, String path, Object ctx, Stat stat) {
-                if (Code.BADVERSION.intValue() == rc) {
+                if (KeeperException.Code.BADVERSION.intValue() == rc) {
                     promise.completeExceptionally(new BKException.BKMetadataVersionException());
-                } else if (Code.OK.intValue() == rc) {
+                } else if (KeeperException.Code.OK.intValue() == rc) {
                     // update metadata version
                     promise.complete(new Versioned<>(metadata, new LongVersion(stat.getVersion())));
-                } else if (Code.NONODE.intValue() == rc) {
+                } else if (KeeperException.Code.NONODE.intValue() == rc) {
                     LOG.warn("Ledger node does not exist in ZooKeeper: ledgerId={}", ledgerId);
                     promise.completeExceptionally(new BKException.BKNoSuchLedgerExistsOnMetadataServerException());
                 } else {
-                    LOG.warn("Conditional update ledger metadata failed: {}", Code.get(rc));
+                    LOG.warn("Conditional update ledger metadata failed: {}", KeeperException.Code.get(rc));
                     promise.completeExceptionally(
                             new BKException.ZKException(KeeperException.create(Code.get(rc), path)));
                 }
@@ -577,7 +577,7 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
      */
     protected void asyncProcessLedgersInSingleNode(
             final String path, final Processor<Long> processor,
-            final VoidCallback finalCb, final Object ctx,
+            final AsyncCallback.VoidCallback finalCb, final Object ctx,
             final int successRc, final int failureRc) {
         ZkUtils.getChildrenInSingleNode(zk, path, new GenericCallback<List<String>>() {
             @Override

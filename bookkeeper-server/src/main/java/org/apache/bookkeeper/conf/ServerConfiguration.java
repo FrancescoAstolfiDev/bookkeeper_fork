@@ -1213,7 +1213,7 @@ public class ServerConfiguration extends AbstractConfiguration<ServerConfigurati
      * <p>If present, this setting will take precedence over the
      * automatic BookieId generation, based on Network Addresses.
      *
-     * @see #setBookieId(String)
+     * @see #setBookieId(java.lang.String)
      * @see #getAdvertisedAddress()
      * @return the configure address to be advertised
      */
@@ -1228,7 +1228,7 @@ public class ServerConfiguration extends AbstractConfiguration<ServerConfigurati
      * from the primary network endpoint address.
      *
      * @see #getBookieId()
-     * @see #setAdvertisedAddress(String)
+     * @see #setAdvertisedAddress(java.lang.String)
      * @param bookieId the bookie id
      *
      * @return server configuration

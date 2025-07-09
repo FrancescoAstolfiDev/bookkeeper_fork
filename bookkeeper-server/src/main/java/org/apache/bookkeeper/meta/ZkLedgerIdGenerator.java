@@ -104,7 +104,7 @@ public class ZkLedgerIdGenerator implements LedgerIdGenerator {
                         }
 
                         // delete the znode for id generation
-                        zk.delete(idPathName, -1, new VoidCallback() {
+                        zk.delete(idPathName, -1, new AsyncCallback.VoidCallback() {
                             @Override
                             public void processResult(int rc, String path, Object ctx) {
                                 if (rc != KeeperException.Code.OK.intValue()) {

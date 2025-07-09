@@ -218,7 +218,7 @@ class ReadEntryProcessor extends PacketProcessorBase<ReadRequest> {
 
     private static final Recycler<ReadEntryProcessor> RECYCLER = new Recycler<ReadEntryProcessor>() {
         @Override
-        protected ReadEntryProcessor newObject(Handle<ReadEntryProcessor> handle) {
+        protected ReadEntryProcessor newObject(Recycler.Handle<ReadEntryProcessor> handle) {
             return new ReadEntryProcessor(handle);
         }
     };

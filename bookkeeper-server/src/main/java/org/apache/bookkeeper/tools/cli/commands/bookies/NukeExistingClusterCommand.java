@@ -45,7 +45,7 @@ public class NukeExistingClusterCommand extends BookieCommand<NukeExistingCluste
     }
 
     private NukeExistingClusterCommand(NukeExistingClusterFlags flags) {
-        super(CliSpec.<NukeExistingClusterFlags>newBuilder()
+        super(CliSpec.<NukeExistingClusterCommand.NukeExistingClusterFlags>newBuilder()
                   .withName(NAME)
                   .withDescription(DESC)
                   .withFlags(flags)

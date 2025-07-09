@@ -42,7 +42,7 @@ public class LedgerEntriesImpl implements LedgerEntries {
 
     private static final Recycler<LedgerEntriesImpl> RECYCLER = new Recycler<LedgerEntriesImpl>() {
         @Override
-        protected LedgerEntriesImpl newObject(Handle<LedgerEntriesImpl> handle) {
+        protected LedgerEntriesImpl newObject(Recycler.Handle<LedgerEntriesImpl> handle) {
             return new LedgerEntriesImpl(handle);
         }
     };

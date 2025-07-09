@@ -52,7 +52,7 @@ public class ToggleCommand extends BookieCommand<ToggleCommand.AutoRecoveryFlags
     }
 
     private ToggleCommand(AutoRecoveryFlags flags) {
-        super(CliSpec.<AutoRecoveryFlags>newBuilder()
+        super(CliSpec.<ToggleCommand.AutoRecoveryFlags>newBuilder()
             .withName(NAME).withDescription(DESC)
             .withFlags(flags).build());
     }

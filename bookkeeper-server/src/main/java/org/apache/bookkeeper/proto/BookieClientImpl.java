@@ -443,7 +443,7 @@ public class BookieClientImpl implements BookieClient, PerChannelBookieClientFac
             new Recycler<ChannelReadyForAddEntryCallback>() {
                     @Override
                     protected ChannelReadyForAddEntryCallback newObject(
-                            Handle<ChannelReadyForAddEntryCallback> recyclerHandle) {
+                            Recycler.Handle<ChannelReadyForAddEntryCallback> recyclerHandle) {
                         return new ChannelReadyForAddEntryCallback(recyclerHandle);
                     }
                 };

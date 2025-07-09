@@ -124,7 +124,7 @@ public class AuditorCheckAllLedgersTask extends AuditorTask {
         } catch (ReplicationException.NonRecoverableReplicationException nre) {
             LOG.error("Non Recoverable Exception while reading from ZK", nre);
             submitShutdownTask();
-        } catch (UnavailableException ue) {
+        } catch (ReplicationException.UnavailableException ue) {
             LOG.error("Underreplication manager unavailable running periodic check", ue);
         } finally {
             if (!checkSuccess) {
@@ -174,7 +174,7 @@ public class AuditorCheckAllLedgersTask extends AuditorTask {
                     LOG.error("Non Recoverable Exception while reading from ZK", nre);
                     submitShutdownTask();
                     return;
-                } catch (UnavailableException ue) {
+                } catch (ReplicationException.UnavailableException ue) {
                     LOG.error("Underreplication manager unavailable running periodic check", ue);
                     FutureUtils.complete(processFuture, null);
                     return;
@@ -239,7 +239,7 @@ public class AuditorCheckAllLedgersTask extends AuditorTask {
             } catch (ReplicationException.NonRecoverableReplicationException nre) {
                 LOG.error("Non Recoverable Exception while reading from ZK", nre);
                 submitShutdownTask();
-            } catch (UnavailableException ue) {
+            } catch (ReplicationException.UnavailableException ue) {
                 LOG.error("Got exception while trying to set checkAllLedgersCTime", ue);
             }
         } finally {

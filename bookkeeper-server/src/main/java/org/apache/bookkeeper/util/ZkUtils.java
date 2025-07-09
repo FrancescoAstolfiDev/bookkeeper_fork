@@ -69,7 +69,7 @@ public class ZkUtils {
     public static void asyncCreateFullPathOptimistic(
         final ZooKeeper zk, final String originalPath, final byte[] data,
         final List<ACL> acl, final CreateMode createMode,
-        final StringCallback callback, final Object ctx) {
+        final AsyncCallback.StringCallback callback, final Object ctx) {
 
         zk.create(originalPath, data, acl, createMode, new StringCallback() {
             @Override
@@ -126,7 +126,7 @@ public class ZkUtils {
      *            remains the same, but the originalPath will be internal nodes.
      */
     public static void asyncDeleteFullPathOptimistic(final ZooKeeper zk, final String originalPath,
-            int znodeVersion, final VoidCallback callback, final String leafNodePath) {
+            int znodeVersion, final AsyncCallback.VoidCallback callback, final String leafNodePath) {
         zk.delete(originalPath, znodeVersion, new VoidCallback() {
             @Override
             public void processResult(int rc, String path, Object ctx) {
@@ -283,21 +283,21 @@ public class ZkUtils {
      */
     public static void getChildrenInSingleNode(final ZooKeeper zk, final String node,
             final GenericCallback<List<String>> cb) {
-        zk.sync(node, new VoidCallback() {
+        zk.sync(node, new AsyncCallback.VoidCallback() {
             @Override
             public void processResult(int rc, String path, Object ctx) {
                 if (rc != Code.OK.intValue()) {
                     LOG.error("ZK error syncing nodes when getting children: ", KeeperException
-                            .create(Code.get(rc), path));
+                            .create(KeeperException.Code.get(rc), path));
                     cb.operationComplete(rc, null);
                     return;
                 }
-                zk.getChildren(node, false, new ChildrenCallback() {
+                zk.getChildren(node, false, new AsyncCallback.ChildrenCallback() {
                     @Override
                     public void processResult(int rc, String path, Object ctx, List<String> nodes) {
                         if (rc != Code.OK.intValue()) {
                             LOG.error("Error polling ZK for the available nodes: ", KeeperException
-                                    .create(Code.get(rc), path));
+                                    .create(KeeperException.Code.get(rc), path));
                             cb.operationComplete(rc, null);
                             return;
                         }

@@ -118,10 +118,10 @@ public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacement
     @Override
     public PlacementResult<List<BookieId>> newEnsemble(int ensembleSize, int writeQuorumSize,
             int ackQuorumSize, Map<String, byte[]> customMetadata, Set<BookieId> excludeBookies)
-            throws BKNotEnoughBookiesException {
+            throws BKException.BKNotEnoughBookiesException {
         try {
             return super.newEnsemble(ensembleSize, writeQuorumSize, ackQuorumSize, customMetadata, excludeBookies);
-        } catch (BKNotEnoughBookiesException bnebe) {
+        } catch (BKException.BKNotEnoughBookiesException bnebe) {
             if (slave == null) {
                 throw bnebe;
             } else {
@@ -134,11 +134,11 @@ public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacement
     public PlacementResult<BookieId> replaceBookie(int ensembleSize, int writeQuorumSize, int ackQuorumSize,
             Map<String, byte[]> customMetadata, List<BookieId> currentEnsemble,
             BookieId bookieToReplace, Set<BookieId> excludeBookies)
-            throws BKNotEnoughBookiesException {
+            throws BKException.BKNotEnoughBookiesException {
        try {
             return super.replaceBookie(ensembleSize, writeQuorumSize, ackQuorumSize, customMetadata,
                     currentEnsemble, bookieToReplace, excludeBookies);
-        } catch (BKNotEnoughBookiesException bnebe) {
+        } catch (BKException.BKNotEnoughBookiesException bnebe) {
             if (slave == null) {
                 throw bnebe;
             } else {
@@ -173,7 +173,7 @@ public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacement
                                                  Set<BookieId> excludeBookies,
                                                  Ensemble<BookieNode> parentEnsemble,
                                                  Predicate<BookieNode> parentPredicate)
-            throws BKNotEnoughBookiesException {
+            throws BKException.BKNotEnoughBookiesException {
         try {
             return super.newEnsemble(
                     ensembleSize,
@@ -182,7 +182,7 @@ public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacement
                     excludeBookies,
                     parentEnsemble,
                     parentPredicate);
-        } catch (BKNotEnoughBookiesException bnebe) {
+        } catch (BKException.BKNotEnoughBookiesException bnebe) {
             if (slave == null) {
                 throw bnebe;
             } else {
@@ -199,11 +199,11 @@ public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacement
             Predicate<BookieNode> predicate,
             Ensemble<BookieNode> ensemble,
             boolean fallbackToRandom)
-            throws BKNotEnoughBookiesException {
+            throws BKException.BKNotEnoughBookiesException {
         try {
             return super.selectFromNetworkLocation(networkLoc, excludeBookies, predicate, ensemble,
                     fallbackToRandom);
-        } catch (BKNotEnoughBookiesException bnebe) {
+        } catch (BKException.BKNotEnoughBookiesException bnebe) {
             if (slave == null) {
                 throw bnebe;
             } else {
@@ -220,10 +220,10 @@ public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacement
             Predicate<BookieNode> predicate,
             Ensemble<BookieNode> ensemble,
             boolean fallbackToRandom)
-                    throws BKNotEnoughBookiesException {
+                    throws BKException.BKNotEnoughBookiesException {
         try {
             return super.selectFromNetworkLocation(excludeRacks, excludeBookies, predicate, ensemble, fallbackToRandom);
-        } catch (BKNotEnoughBookiesException bnebe) {
+        } catch (BKException.BKNotEnoughBookiesException bnebe) {
             if (slave == null) {
                 throw bnebe;
             } else {
@@ -245,7 +245,7 @@ public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacement
         try {
             return super.selectFromNetworkLocation(networkLoc, excludeRacks, excludeBookies, predicate, ensemble,
                     fallbackToRandom);
-        } catch (BKNotEnoughBookiesException bnebe) {
+        } catch (BKException.BKNotEnoughBookiesException bnebe) {
             if (slave == null) {
                 throw bnebe;
             } else {

@@ -70,7 +70,7 @@ public class LedgerDescriptorImpl extends LedgerDescriptor {
 
     @Override
     boolean setFenced() throws IOException {
-        return  ledgerStorage.setFenced(ledgerId);
+        return ledgerStorage.setFenced(ledgerId);
     }
 
     @Override

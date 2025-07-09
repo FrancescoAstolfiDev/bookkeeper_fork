@@ -71,11 +71,11 @@ public abstract class LedgerIdFormatter {
     public static LedgerIdFormatter newLedgerIdFormatter(String opt, AbstractConfiguration conf) {
         LedgerIdFormatter formatter;
         if ("hex".equals(opt)) {
-            formatter = new HexLedgerIdFormatter();
+            formatter = new LedgerIdFormatter.HexLedgerIdFormatter();
         } else if ("uuid".equals(opt)) {
-            formatter = new UUIDLedgerIdFormatter();
+            formatter = new LedgerIdFormatter.UUIDLedgerIdFormatter();
         } else if ("long".equals(opt)) {
-            formatter = new LongLedgerIdFormatter();
+            formatter = new LedgerIdFormatter.LongLedgerIdFormatter();
         } else {
             LOG.warn("specified unexpected ledgeridformat {}, so default LedgerIdFormatter is used", opt);
             formatter = newLedgerIdFormatter(conf);

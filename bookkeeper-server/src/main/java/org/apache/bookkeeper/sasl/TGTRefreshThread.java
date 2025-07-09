@@ -241,7 +241,7 @@ class TGTRefreshThread extends Thread {
     /**
      * Re-login a principal. This method assumes that {@link #login(String)} has happened already.
      *
-     * @throws LoginException on a failure
+     * @throws javax.security.auth.login.LoginException on a failure
      */
     // c.f. HADOOP-6559
     private synchronized void reLogin() throws LoginException {

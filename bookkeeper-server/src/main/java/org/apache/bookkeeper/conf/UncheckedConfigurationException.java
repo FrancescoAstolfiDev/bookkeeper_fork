@@ -22,7 +22,7 @@ import java.util.Objects;
 import org.apache.commons.configuration2.ex.ConfigurationException;
 
 /**
- * Wraps a {@link ConfigurationException} with an unchecked exception.
+ * Wraps a {@link org.apache.commons.configuration2.ex.ConfigurationException} with an unchecked exception.
  *
  * @since 4.7.0
  */

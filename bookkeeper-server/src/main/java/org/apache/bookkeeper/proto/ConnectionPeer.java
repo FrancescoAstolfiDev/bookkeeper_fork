@@ -49,8 +49,8 @@ public interface ConnectionPeer {
     /**
      * Returns the user which is bound to the connection.
      * @return the principal or null if no auth takes place
-     * or the auth plugin did not call {@link #setAuthorizedId(BookKeeperPrincipal)}
-     * @see  #setAuthorizedId(BookKeeperPrincipal)
+     * or the auth plugin did not call {@link #setAuthorizedId(org.apache.bookkeeper.auth.BookKeeperPrincipal)}
+     * @see  #setAuthorizedId(org.apache.bookkeeper.auth.BookKeeperPrincipal)
      */
     BookKeeperPrincipal getAuthorizedId();
 

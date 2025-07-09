@@ -206,7 +206,7 @@ public class InMemoryMetastoreTable implements MetastoreScannableTable {
                  * If there is a watcher set for this key, we need
                  * to trigger it.
                  */
-                if (result.code == Code.OK) {
+                if (result.code == MSException.Code.OK) {
                     triggerWatch(key, MSWatchedEvent.EventType.CHANGED);
                 }
             }
@@ -225,7 +225,7 @@ public class InMemoryMetastoreTable implements MetastoreScannableTable {
                 Code code = remove(key, version);
                 cb.complete(code.getCode(), null, ctx);
 
-                if (code == Code.OK) {
+                if (code == MSException.Code.OK) {
                     triggerWatch(key, MSWatchedEvent.EventType.REMOVED);
                 }
             }

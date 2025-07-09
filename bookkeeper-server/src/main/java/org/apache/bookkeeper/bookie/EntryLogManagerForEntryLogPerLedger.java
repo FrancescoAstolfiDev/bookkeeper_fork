@@ -577,7 +577,7 @@ class EntryLogManagerForEntryLogPerLedger extends EntryLogManagerBase {
         }
         @SuppressWarnings("unchecked")
         Optional<Entry<File, MutableInt>> ledgerDirWithLeastNumofCurrentLogs = writableLedgerDirFrequency.entrySet()
-                .stream().min(Entry.comparingByValue());
+                .stream().min(Map.Entry.comparingByValue());
         return ledgerDirWithLeastNumofCurrentLogs.get().getKey();
     }
 

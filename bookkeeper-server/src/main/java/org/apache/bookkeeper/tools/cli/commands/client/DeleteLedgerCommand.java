@@ -57,7 +57,7 @@ public class DeleteLedgerCommand extends BookieCommand<DeleteLedgerCommand.Delet
     }
 
     private DeleteLedgerCommand(DeleteLedgerFlags flags) {
-        super(CliSpec.<DeleteLedgerFlags>newBuilder()
+        super(CliSpec.<DeleteLedgerCommand.DeleteLedgerFlags>newBuilder()
                   .withName(NAME)
                   .withDescription(DESC)
                   .withFlags(flags)

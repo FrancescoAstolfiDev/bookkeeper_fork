@@ -303,7 +303,7 @@ public class ZKRegistrationManager implements RegistrationManager {
             try {
                 // Clear the current registered node
                 zk.delete(regPath, -1);
-            } catch (NoNodeException nne) {
+            } catch (KeeperException.NoNodeException nne) {
                 log.warn("No writable bookie registered node {} when transitioning to readonly",
                     regPath, nne);
             }
@@ -416,13 +416,13 @@ public class ZKRegistrationManager implements RegistrationManager {
                 log.error("BookKeeper metadata doesn't exist in zookeeper. "
                     + "Has the cluster been initialized? "
                     + "Try running bin/bookkeeper shell metaformat");
-                throw new NoNodeException("BookKeeper metadata");
+                throw new KeeperException.NoNodeException("BookKeeper metadata");
             }
             try {
                 byte[] data = zk.getData(ledgersRootPath + "/"
                     + INSTANCEID, false, null);
                 instanceId = new String(data, UTF_8);
-            } catch (NoNodeException e) {
+            } catch (KeeperException.NoNodeException e) {
                 log.info("INSTANCEID not exists in zookeeper. Not considering it for data verification");
             }
         } catch (KeeperException | InterruptedException e) {
@@ -551,7 +551,7 @@ public class ZKRegistrationManager implements RegistrationManager {
         try {
             ZKUtil.deleteRecursive(zk, ZkLedgerUnderreplicationManager.getBasePath(ledgersRootPath)
                     + BookKeeperConstants.DEFAULT_ZK_LEDGERS_ROOT_PATH);
-        } catch (NoNodeException e) {
+        } catch (KeeperException.NoNodeException e) {
             if (log.isDebugEnabled()) {
                 log.debug("underreplicated ledgers root path node not exists in zookeeper to delete");
             }
@@ -561,7 +561,7 @@ public class ZKRegistrationManager implements RegistrationManager {
         try {
             ZKUtil.deleteRecursive(zk, ZkLedgerUnderreplicationManager.getBasePath(ledgersRootPath) + '/'
                     + BookKeeperConstants.UNDER_REPLICATION_LOCK);
-        } catch (NoNodeException e) {
+        } catch (KeeperException.NoNodeException e) {
             if (log.isDebugEnabled()) {
                 log.debug("underreplicatedledger locks node not exists in zookeeper to delete");
             }
@@ -570,7 +570,7 @@ public class ZKRegistrationManager implements RegistrationManager {
         // Clear the cookies
         try {
             ZKUtil.deleteRecursive(zk, cookiePath);
-        } catch (NoNodeException e) {
+        } catch (KeeperException.NoNodeException e) {
             if (log.isDebugEnabled()) {
                 log.debug("cookies node not exists in zookeeper to delete");
             }
@@ -579,7 +579,7 @@ public class ZKRegistrationManager implements RegistrationManager {
         // Clear the INSTANCEID
         try {
             zk.delete(ledgersRootPath + "/" + BookKeeperConstants.INSTANCEID, -1);
-        } catch (NoNodeException e) {
+        } catch (KeeperException.NoNodeException e) {
             if (log.isDebugEnabled()) {
                 log.debug("INSTANCEID not exists in zookeeper to delete");
             }

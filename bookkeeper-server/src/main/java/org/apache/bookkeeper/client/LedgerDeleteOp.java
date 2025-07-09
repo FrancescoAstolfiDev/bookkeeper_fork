@@ -123,7 +123,7 @@ class LedgerDeleteOp {
             return true;
         }
 
-        private void delete(Long ledgerId, DeleteCallback cb) {
+        private void delete(Long ledgerId, AsyncCallback.DeleteCallback cb) {
             if (!validate()) {
                 cb.deleteComplete(BKException.Code.IncorrectParameterException, null);
                 return;

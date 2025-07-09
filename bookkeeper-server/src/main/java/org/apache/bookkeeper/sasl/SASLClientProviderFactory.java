@@ -45,7 +45,7 @@ import org.slf4j.LoggerFactory;
  * ClientAuthProvider which uses JDK-bundled SASL.
  */
 public class SASLClientProviderFactory implements
-    ClientAuthProvider.Factory, JAASCredentialsContainer {
+    org.apache.bookkeeper.auth.ClientAuthProvider.Factory, JAASCredentialsContainer {
 
     private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(SASLClientProviderFactory.class);
 

@@ -90,7 +90,7 @@ import org.apache.bookkeeper.stats.StatsLogger;
  * bookie changes, the ensemble placement policy will be notified with new list of bookies via
  * {@link #onClusterChanged(Set, Set)}. The implementation of the ensemble placement policy will react on those
  * changes to build new network topology. Subsequent operations like {@link #newEnsemble(int, int, int, Map, Set)} or
- * {@link #replaceBookie(int, int, int, Map, List, BookieId, Set)}
+ * {@link #replaceBookie(int, int, int, java.util.Map, java.util.List, BookieId, java.util.Set)}
  * hence can operate on the new
  * network topology.
  *
@@ -231,7 +231,7 @@ public interface EnsemblePlacementPolicy {
      *
      * <p>The implementation should take actions when the cluster view is changed. So subsequent
      * {@link #newEnsemble(int, int, int, Map, Set)} and
-     * {@link #replaceBookie(int, int, int, Map, List, BookieId, Set) }
+     * {@link #replaceBookie(int, int, int, java.util.Map, java.util.List, BookieId, java.util.Set) }
      * can choose proper bookies.
      *
      * @param writableBookies
@@ -328,10 +328,10 @@ public interface EnsemblePlacementPolicy {
      *         writeSet.
      * @since 4.5
      */
-    WriteSet reorderReadSequence(
+    DistributionSchedule.WriteSet reorderReadSequence(
             List<BookieId> ensemble,
             BookiesHealthInfo bookiesHealthInfo,
-            WriteSet writeSet);
+            DistributionSchedule.WriteSet writeSet);
 
 
     /**
@@ -348,10 +348,10 @@ public interface EnsemblePlacementPolicy {
      *         writeSet.
      * @since 4.5
      */
-    WriteSet reorderReadLACSequence(
+    DistributionSchedule.WriteSet reorderReadLACSequence(
             List<BookieId> ensemble,
             BookiesHealthInfo bookiesHealthInfo,
-            WriteSet writeSet);
+            DistributionSchedule.WriteSet writeSet);
 
     /**
      * Send the bookie info details.

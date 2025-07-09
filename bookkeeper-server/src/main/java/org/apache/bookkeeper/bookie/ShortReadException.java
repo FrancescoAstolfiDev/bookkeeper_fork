@@ -20,7 +20,7 @@ package org.apache.bookkeeper.bookie;
 import java.io.IOException;
 
 /**
- * Short Read Exception. Used to distinguish short read exception with other {@link IOException}s.
+ * Short Read Exception. Used to distinguish short read exception with other {@link java.io.IOException}s.
  */
 public class ShortReadException extends IOException {
 

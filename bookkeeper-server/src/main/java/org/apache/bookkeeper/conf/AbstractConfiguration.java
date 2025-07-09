@@ -122,13 +122,13 @@ public abstract class AbstractConfiguration<T extends AbstractConfiguration>
 
     protected static final String TLS_CERT_FILES_REFRESH_DURATION_SECONDS = "tlsCertFilesRefreshDurationSeconds";
     /**
-     * This list will be passed to {@link SSLEngine#setEnabledCipherSuites(String[]) }.
+     * This list will be passed to {@link SSLEngine#setEnabledCipherSuites(java.lang.String[]) }.
      * Please refer to official JDK JavaDocs
     */
     protected static final String TLS_ENABLED_CIPHER_SUITES = "tlsEnabledCipherSuites";
 
     /**
-     * This list will be passed to {@link SSLEngine#setEnabledProtocols(String[]) }.
+     * This list will be passed to {@link SSLEngine#setEnabledProtocols(java.lang.String[]) }.
      * Please refer to official JDK JavaDocs
     */
     protected static final String TLS_ENABLED_PROTOCOLS = "tlsEnabledProtocols";
@@ -858,7 +858,7 @@ public abstract class AbstractConfiguration<T extends AbstractConfiguration>
 
     /**
      * Set the list of enabled TLS cipher suites. Leave null not to override default JDK list. This list will be passed
-     * to {@link SSLEngine#setEnabledCipherSuites(String[]) }. Please refer to official JDK JavaDocs
+     * to {@link SSLEngine#setEnabledCipherSuites(java.lang.String[]) }. Please refer to official JDK JavaDocs
      *
      * @param list
      *            comma separated list of enabled TLS cipher suites
@@ -875,7 +875,7 @@ public abstract class AbstractConfiguration<T extends AbstractConfiguration>
      *
      * @return this list of enabled TLS cipher suites
      *
-     * @see #setTLSEnabledCipherSuites(String)
+     * @see #setTLSEnabledCipherSuites(java.lang.String)
      */
     public String getTLSEnabledCipherSuites() {
         return getString(TLS_ENABLED_CIPHER_SUITES, null);
@@ -883,7 +883,7 @@ public abstract class AbstractConfiguration<T extends AbstractConfiguration>
 
     /**
      * Set the list of enabled TLS protocols. Leave null not to override default JDK list. This list will be passed to
-     * {@link SSLEngine#setEnabledProtocols(String[]) }. Please refer to official JDK JavaDocs
+     * {@link SSLEngine#setEnabledProtocols(java.lang.String[]) }. Please refer to official JDK JavaDocs
      *
      * @param list
      *            comma separated list of enabled TLS cipher suites
@@ -900,7 +900,7 @@ public abstract class AbstractConfiguration<T extends AbstractConfiguration>
      *
      * @return the list of enabled TLS protocols.
      *
-     * @see #setTLSEnabledProtocols(String)
+     * @see #setTLSEnabledProtocols(java.lang.String)
      */
     public String getTLSEnabledProtocols() {
         return getString(TLS_ENABLED_PROTOCOLS, null);

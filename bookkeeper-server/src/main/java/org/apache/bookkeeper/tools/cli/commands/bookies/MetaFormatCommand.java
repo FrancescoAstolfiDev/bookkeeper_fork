@@ -41,7 +41,7 @@ public class MetaFormatCommand extends BookieCommand<MetaFormatCommand.MetaForma
     }
 
     private MetaFormatCommand(MetaFormatFlags flags) {
-        super(CliSpec.<MetaFormatFlags>newBuilder()
+        super(CliSpec.<MetaFormatCommand.MetaFormatFlags>newBuilder()
                   .withName(NAME)
                   .withDescription(DESC)
                   .withFlags(flags)

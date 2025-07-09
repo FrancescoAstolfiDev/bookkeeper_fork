@@ -673,8 +673,8 @@ public class LedgerHandle implements WriteHandle {
      *          id of last entry of sequence (included)
      *
      * @see #readEntries(long, long)
-     * @see #asyncReadUnconfirmedEntries(long, long, ReadCallback, Object)
-     * @see #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)
+     * @see #asyncReadUnconfirmedEntries(long, long, ReadCallback, java.lang.Object)
+     * @see #asyncReadLastConfirmed(ReadLastConfirmedCallback, java.lang.Object)
      */
     public Enumeration<LedgerEntry> readUnconfirmedEntries(long firstEntry, long lastEntry)
             throws InterruptedException, BKException {
@@ -985,7 +985,7 @@ public class LedgerHandle implements WriteHandle {
             // current implementation will prevent next batch from starting when bookie is
             // unresponsive thus helpful enough.
             if (clientCtx.getConf().waitForWriteSetMs >= 0) {
-                WriteSet ws = distributionSchedule.getWriteSet(startEntry);
+                DistributionSchedule.WriteSet ws = distributionSchedule.getWriteSet(startEntry);
                 try {
                     if (!waitForWritable(ws, ws.size() - 1, clientCtx.getConf().waitForWriteSetMs)) {
                         op.allowFailFastOnUnwritableChannel();
@@ -1163,7 +1163,7 @@ public class LedgerHandle implements WriteHandle {
             // current implementation will prevent next batch from starting when bookie is
             // unresponsive thus helpful enough.
             if (clientCtx.getConf().waitForWriteSetMs >= 0) {
-                WriteSet ws = distributionSchedule.getWriteSet(firstEntry);
+                DistributionSchedule.WriteSet ws = distributionSchedule.getWriteSet(firstEntry);
                 try {
                     if (!waitForWritable(ws, ws.size() - 1, clientCtx.getConf().waitForWriteSetMs)) {
                         op.allowFailFastOnUnwritableChannel();
@@ -1498,7 +1498,7 @@ public class LedgerHandle implements WriteHandle {
         doAsyncAddEntry(op);
     }
 
-    private boolean isWriteSetWritable(WriteSet writeSet,
+    private boolean isWriteSetWritable(DistributionSchedule.WriteSet writeSet,
                                        int allowedNonWritableCount) {
         if (allowedNonWritableCount < 0) {
             allowedNonWritableCount = 0;
@@ -1528,8 +1528,8 @@ public class LedgerHandle implements WriteHandle {
     }
 
     @VisibleForTesting
-    protected boolean waitForWritable(WriteSet writeSet,
-                                      int allowedNonWritableCount, long durationMs) {
+    protected boolean waitForWritable(DistributionSchedule.WriteSet writeSet,
+                                    int allowedNonWritableCount, long durationMs) {
         if (durationMs < 0) {
             return true;
         }
@@ -1631,7 +1631,7 @@ public class LedgerHandle implements WriteHandle {
         }
 
         if (clientCtx.getConf().waitForWriteSetMs >= 0) {
-            WriteSet ws = distributionSchedule.getWriteSet(op.getEntryId());
+            DistributionSchedule.WriteSet ws = distributionSchedule.getWriteSet(op.getEntryId());
             try {
                 if (!waitForWritable(ws, 0, clientCtx.getConf().waitForWriteSetMs)) {
                     op.allowFailFastOnUnwritableChannel();
@@ -1717,11 +1717,11 @@ public class LedgerHandle implements WriteHandle {
     /**
      * Obtains asynchronously the last confirmed write from a quorum of bookies.
      * It is similar as
-     * {@link #asyncReadLastConfirmed(ReadLastConfirmedCallback, Object)},
+     * {@link #asyncReadLastConfirmed(org.apache.bookkeeper.client.AsyncCallback.ReadLastConfirmedCallback, Object)},
      * but it doesn't wait all the responses from the quorum. It would callback
      * immediately if it received a LAC which is larger than current LAC.
      *
-     * @see #asyncTryReadLastConfirmed(ReadLastConfirmedCallback, Object)
+     * @see #asyncTryReadLastConfirmed(org.apache.bookkeeper.client.AsyncCallback.ReadLastConfirmedCallback, Object)
      *
      * @param cb
      *          callback to return read last confirmed

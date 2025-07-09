@@ -174,8 +174,6 @@ public class SortedLedgerStorage
 
     @Override
     public boolean setFenced(long ledgerId) throws IOException {
-        // it return true if the ledger it wasnt already fenced, and the value now is changed
-        // otherwise it return false if the ledger was already fenced.
         return interleavedLedgerStorage.setFenced(ledgerId);
     }
 

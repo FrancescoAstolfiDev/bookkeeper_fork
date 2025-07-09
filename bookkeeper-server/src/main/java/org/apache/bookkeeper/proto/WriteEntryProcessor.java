@@ -153,7 +153,7 @@ class WriteEntryProcessor extends PacketProcessorBase<ParsedAddRequest> implemen
 
     private static final Recycler<WriteEntryProcessor> RECYCLER = new Recycler<WriteEntryProcessor>() {
         @Override
-        protected WriteEntryProcessor newObject(Handle<WriteEntryProcessor> handle) {
+        protected WriteEntryProcessor newObject(Recycler.Handle<WriteEntryProcessor> handle) {
             return new WriteEntryProcessor(handle);
         }
     };

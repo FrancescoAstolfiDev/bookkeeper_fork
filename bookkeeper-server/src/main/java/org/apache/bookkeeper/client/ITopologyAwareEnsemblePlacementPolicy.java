@@ -88,7 +88,7 @@ public interface ITopologyAwareEnsemblePlacementPolicy<T extends Node> extends E
      * @param parentEnsemble
      *          parent ensemble
      * @return list of bookies forming the ensemble
-     * @throws BKNotEnoughBookiesException
+     * @throws BKException.BKNotEnoughBookiesException
      */
     PlacementResult<List<BookieId>> newEnsemble(
             int ensembleSize,
@@ -97,7 +97,7 @@ public interface ITopologyAwareEnsemblePlacementPolicy<T extends Node> extends E
             Set<BookieId> excludeBookies,
             Ensemble<T> parentEnsemble,
             Predicate<T> parentPredicate)
-            throws BKNotEnoughBookiesException;
+            throws BKException.BKNotEnoughBookiesException;
 
     /**
      * Select a node from a given network location.
@@ -113,14 +113,14 @@ public interface ITopologyAwareEnsemblePlacementPolicy<T extends Node> extends E
      * @param fallbackToRandom
      *          fallbackToRandom
      * @return the selected bookie.
-     * @throws BKNotEnoughBookiesException
+     * @throws BKException.BKNotEnoughBookiesException
      */
     T selectFromNetworkLocation(String networkLoc,
                                 Set<Node> excludeBookies,
                                 Predicate<T> predicate,
                                 Ensemble<T> ensemble,
                                 boolean fallbackToRandom)
-            throws BKNotEnoughBookiesException;
+            throws BKException.BKNotEnoughBookiesException;
 
     /**
      * Select a node from cluster excluding excludeBookies and bookie nodes of
@@ -134,14 +134,14 @@ public interface ITopologyAwareEnsemblePlacementPolicy<T extends Node> extends E
      * @param ensemble
      * @param fallbackToRandom
      * @return
-     * @throws BKNotEnoughBookiesException
+     * @throws BKException.BKNotEnoughBookiesException
      */
     T selectFromNetworkLocation(Set<String> excludeRacks,
                                 Set<Node> excludeBookies,
                                 Predicate<BookieNode> predicate,
                                 Ensemble<BookieNode> ensemble,
                                 boolean fallbackToRandom)
-            throws BKNotEnoughBookiesException;
+            throws BKException.BKNotEnoughBookiesException;
 
     /**
      * Select a node from networkLoc rack excluding excludeBookies. If there

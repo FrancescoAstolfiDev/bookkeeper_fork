@@ -200,7 +200,7 @@ public class EntryLogMetadata {
 
         private static final Recycler<EntryLogMetadataRecyclable> RECYCLER =
                 new Recycler<EntryLogMetadataRecyclable>() {
-            protected EntryLogMetadataRecyclable newObject(Handle<EntryLogMetadataRecyclable> handle) {
+            protected EntryLogMetadataRecyclable newObject(Recycler.Handle<EntryLogMetadataRecyclable> handle) {
                 return new EntryLogMetadataRecyclable(handle);
             }
         };

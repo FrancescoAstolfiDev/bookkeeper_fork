@@ -399,7 +399,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     /**
      * Read data from position <i>start</i> to fill the byte buffer <i>bb</i>.
      * If <i>bestEffort </i> is provided, it would return when it reaches EOF.
-     * Otherwise, it would throw {@link ShortReadException}
+     * Otherwise, it would throw {@link org.apache.bookkeeper.bookie.ShortReadException}
      * if it reaches EOF.
      *
      * @param bb

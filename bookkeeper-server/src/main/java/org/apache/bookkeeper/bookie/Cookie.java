@@ -149,31 +149,31 @@ public class Cookie {
         }
     }
 
-    private void verifyInternal(Cookie c, boolean checkIfSuperSet) throws InvalidCookieException {
+    private void verifyInternal(Cookie c, boolean checkIfSuperSet) throws BookieException.InvalidCookieException {
         String errMsg;
         if (c.layoutVersion < 3 && c.layoutVersion != layoutVersion) {
             errMsg = "Cookie is of too old version " + c.layoutVersion;
             LOG.error(errMsg);
-            throw new InvalidCookieException(errMsg);
+            throw new BookieException.InvalidCookieException(errMsg);
         } else if (!(c.layoutVersion >= 3 && c.bookieId.equals(bookieId)
             && c.journalDirs.equals(journalDirs) && verifyLedgerDirs(c, checkIfSuperSet)
             && verifyIndexDirs(c, checkIfSuperSet))) {
             errMsg = "Cookie [" + this + "] is not matching with [" + c + "]";
-            throw new InvalidCookieException(errMsg);
+            throw new BookieException.InvalidCookieException(errMsg);
         } else if ((instanceId == null && c.instanceId != null)
                 || (instanceId != null && !instanceId.equals(c.instanceId))) {
             // instanceId should be same in both cookies
             errMsg = "instanceId " + instanceId
                     + " is not matching with " + c.instanceId;
-            throw new InvalidCookieException(errMsg);
+            throw new BookieException.InvalidCookieException(errMsg);
         }
     }
 
-    public void verify(Cookie c) throws InvalidCookieException {
+    public void verify(Cookie c) throws BookieException.InvalidCookieException {
         verifyInternal(c, false);
     }
 
-    public void verifyIsSuperSet(Cookie c) throws InvalidCookieException {
+    public void verifyIsSuperSet(Cookie c) throws BookieException.InvalidCookieException {
         verifyInternal(c, true);
     }
 

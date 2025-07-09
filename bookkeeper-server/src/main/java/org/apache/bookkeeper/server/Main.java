@@ -45,7 +45,7 @@ import org.apache.commons.configuration2.ex.ConfigurationException;
 /**
  * A bookie server is a server that run bookie and serving rpc requests.
  *
- * <p>It is a rewritten server using {@link LifecycleComponent},
+ * <p>It is a rewritten server using {@link org.apache.bookkeeper.common.component.LifecycleComponent},
  * replacing the legacy server {@link org.apache.bookkeeper.proto.BookieServer}.
  */
 @Slf4j

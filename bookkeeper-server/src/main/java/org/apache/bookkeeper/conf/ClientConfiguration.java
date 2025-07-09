@@ -933,7 +933,7 @@ public class ClientConfiguration extends AbstractConfiguration<ClientConfigurati
      * in the case that a bookie has failed. It induces higher load on the network and on
      * bookies. This should be taken into account before changing this configuration value.
      *
-     * @see LedgerHandle#asyncReadEntries
+     * @see org.apache.bookkeeper.client.LedgerHandle#asyncReadEntries
      * @return the speculative read timeout in milliseconds. Default 2000.
      */
     public int getSpeculativeReadTimeout() {

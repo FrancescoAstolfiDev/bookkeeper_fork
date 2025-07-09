@@ -65,7 +65,7 @@ public class ByteBufList extends AbstractReferenceCounted {
 
     private static final Recycler<ByteBufList> RECYCLER = new Recycler<ByteBufList>() {
         @Override
-        protected ByteBufList newObject(Handle<ByteBufList> handle) {
+        protected ByteBufList newObject(Recycler.Handle<ByteBufList> handle) {
             return new ByteBufList(handle);
         }
     };

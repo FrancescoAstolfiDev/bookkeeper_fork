@@ -21,10 +21,9 @@
 package org.apache.bookkeeper.bookie.storage.directentrylogger;
 
 import io.netty.buffer.ByteBufAllocator;
-import org.apache.bookkeeper.common.util.nativeio.NativeIO;
-
 import java.io.IOException;
 import java.util.concurrent.ArrayBlockingQueue;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 
 /**
  * BufferPool used to manage Buffers.

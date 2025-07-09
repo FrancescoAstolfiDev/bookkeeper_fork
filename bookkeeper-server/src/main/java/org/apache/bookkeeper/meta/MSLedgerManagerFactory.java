@@ -734,7 +734,7 @@ public class MSLedgerManagerFactory extends AbstractZkLedgerManagerFactory {
                     }
                     // process next element
                     final T dataToProcess = iter.next();
-                    final VoidCallback stub = this;
+                    final AsyncCallback.VoidCallback stub = this;
                     scheduler.submit(new Runnable() {
                         @Override
                         public void run() {

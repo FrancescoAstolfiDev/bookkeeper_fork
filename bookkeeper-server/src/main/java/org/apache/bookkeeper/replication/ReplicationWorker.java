@@ -485,7 +485,7 @@ public class ReplicationWorker implements Runnable {
                     LOG.warn("BKBookieHandleNotAvailableException while replicating the fragment", e);
                 } catch (BKException.BKLedgerRecoveryException e) {
                     LOG.warn("BKLedgerRecoveryException while replicating the fragment", e);
-                } catch (BKNotEnoughBookiesException e) {
+                } catch (BKException.BKNotEnoughBookiesException e) {
                     LOG.warn("BKNotEnoughBookiesException while replicating the fragment", e);
                 }
             }

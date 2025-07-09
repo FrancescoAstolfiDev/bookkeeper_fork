@@ -161,7 +161,7 @@ public class FileSystemUpgrade {
     }
 
     public static void upgrade(ServerConfiguration conf)
-            throws UpgradeException, InterruptedException {
+            throws BookieException.UpgradeException, InterruptedException {
         LOG.info("Upgrading...");
 
         try {
@@ -200,7 +200,7 @@ public class FileSystemUpgrade {
                     File tmpDir = new File(d, "upgradeTmp." + System.nanoTime());
                     deferredMoves.put(curDir, tmpDir);
                     if (!tmpDir.mkdirs()) {
-                        throw new UpgradeException("Could not create temporary directory " + tmpDir);
+                        throw new BookieException.UpgradeException("Could not create temporary directory " + tmpDir);
                     }
                     c.writeToDirectory(tmpDir);
 
@@ -216,7 +216,7 @@ public class FileSystemUpgrade {
                     linkIndexDirectories(d, tmpDir);
                 } catch (IOException ioe) {
                     LOG.error("Error upgrading {}", d);
-                    throw new UpgradeException(ioe);
+                    throw new BookieException.UpgradeException(ioe);
                 }
             }
 
@@ -227,7 +227,7 @@ public class FileSystemUpgrade {
                     String err = String.format("Error moving upgraded directories into place %s -> %s ",
                                                e.getValue(), e.getKey());
                     LOG.error(err, ioe);
-                    throw new UpgradeException(ioe);
+                    throw new BookieException.UpgradeException(ioe);
                 }
             }
 
@@ -239,15 +239,15 @@ public class FileSystemUpgrade {
                 c.writeToRegistrationManager(rm, conf, Version.NEW);
             } catch (BookieException ke) {
                 LOG.error("Error writing cookie to registration manager");
-                throw new UpgradeException(ke);
+                throw new BookieException.UpgradeException(ke);
             }
         } catch (IOException ioe) {
-            throw new UpgradeException(ioe);
+            throw new BookieException.UpgradeException(ioe);
         }
     }
 
     public static void finalizeUpgrade(ServerConfiguration conf)
-            throws UpgradeException, InterruptedException {
+            throws BookieException.UpgradeException, InterruptedException {
         LOG.info("Finalizing upgrade...");
         // verify that upgrade is correct
         for (File d : getAllDirectories(conf)) {
@@ -277,7 +277,7 @@ public class FileSystemUpgrade {
                 }
             } catch (IOException ioe) {
                 LOG.error("Error finalizing {}", d);
-                throw new UpgradeException(ioe);
+                throw new BookieException.UpgradeException(ioe);
             }
         }
         // noop at the moment
@@ -285,7 +285,7 @@ public class FileSystemUpgrade {
     }
 
     public static void rollback(ServerConfiguration conf)
-            throws UpgradeException, InterruptedException {
+            throws BookieException.UpgradeException, InterruptedException {
         LOG.info("Rolling back upgrade...");
 
         try {
@@ -308,7 +308,7 @@ public class FileSystemUpgrade {
 
     private static void rollback(ServerConfiguration conf,
                                  RegistrationManager rm)
-            throws UpgradeException {
+            throws BookieException.UpgradeException {
         for (File d : getAllDirectories(conf)) {
             LOG.info("Rolling back {}", d);
             try {
@@ -320,12 +320,12 @@ public class FileSystemUpgrade {
                             BookKeeperConstants.CURRENT_DIR);
                     FileUtils.deleteDirectory(curDir);
                 } else {
-                    throw new UpgradeException(
+                    throw new BookieException.UpgradeException(
                             "Cannot rollback as previous data does not exist");
                 }
             } catch (IOException ioe) {
                 LOG.error("Error rolling back {}", d);
-                throw new UpgradeException(ioe);
+                throw new BookieException.UpgradeException(ioe);
             }
         }
         try {
@@ -333,7 +333,7 @@ public class FileSystemUpgrade {
             cookie.getValue().deleteFromRegistrationManager(rm, conf, cookie.getVersion());
         } catch (BookieException ke) {
             LOG.error("Error deleting cookie from Registration Manager");
-            throw new UpgradeException(ke);
+            throw new BookieException.UpgradeException(ke);
         }
     }
 

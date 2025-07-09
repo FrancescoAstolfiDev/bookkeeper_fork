@@ -563,13 +563,13 @@ public class LedgerFragmentReplicator {
      * multicallback responsible for all fragments in a single ledger
      */
     static class SingleFragmentCallback implements AsyncCallback.VoidCallback {
-        final VoidCallback ledgerFragmentsMcb;
+        final AsyncCallback.VoidCallback ledgerFragmentsMcb;
         final LedgerHandle lh;
         final LedgerManager ledgerManager;
         final long fragmentStartId;
         final Map<BookieId, BookieId> oldBookie2NewBookie;
 
-        SingleFragmentCallback(VoidCallback ledgerFragmentsMcb,
+        SingleFragmentCallback(AsyncCallback.VoidCallback ledgerFragmentsMcb,
                                LedgerHandle lh, LedgerManager ledgerManager, long fragmentStartId,
                                Map<BookieId, BookieId> oldBookie2NewBookie) {
             this.ledgerFragmentsMcb = ledgerFragmentsMcb;

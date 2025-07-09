@@ -274,14 +274,14 @@ public class NullMetadataBookieDriver implements MetadataBookieDriver {
                                         AsyncCallback.VoidCallback finalCb,
                                         Object context, int successRc, int failureRc) {}
         @Override
-        public LedgerRangeIterator getLedgerRanges(long zkOpTimeOutMs) {
-            return new LedgerRangeIterator() {
+        public LedgerManager.LedgerRangeIterator getLedgerRanges(long zkOpTimeOutMs) {
+            return new LedgerManager.LedgerRangeIterator() {
                 @Override
                 public boolean hasNext() {
                     return false;
                 }
                 @Override
-                public LedgerRange next() {
+                public LedgerManager.LedgerRange next() {
                     throw new NoSuchElementException();
                 }
             };

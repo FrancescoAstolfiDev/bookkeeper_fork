@@ -843,7 +843,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
      * that bookie will be removed from the ensemble.
      *
      * <p>The other parameters match those of {@link #asyncCreateLedger(int, int, DigestType, byte[],
-     *                                      CreateCallback, Object)}
+     *                                      AsyncCallback.CreateCallback, Object)}
      *
      * @param ensSize
      *          number of bookies over which to stripe entries
@@ -904,7 +904,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     /**
      * Synchronous call to create ledger. Parameters match those of
      * {@link #asyncCreateLedger(int, int, DigestType, byte[],
-     *                           CreateCallback, Object)}
+     *                           AsyncCallback.CreateCallback, Object)}
      *
      * @param ensSize
      * @param qSize
@@ -923,7 +923,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     /**
      * Synchronous call to create ledger. Parameters match those of
      * {@link #asyncCreateLedger(int, int, DigestType, byte[],
-     *                           CreateCallback, Object)}
+     *                           AsyncCallback.CreateCallback, Object)}
      *
      * @param ensSize
      * @param writeQuorumSize
@@ -1043,7 +1043,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
      * that bookie will be removed from the ensemble.
      *
      * <p>The other parameters match those of {@link #asyncCreateLedger(int, int, DigestType, byte[],
-     *                                      CreateCallback, Object)}
+     *                                      AsyncCallback.CreateCallback, Object)}
      *
      * @param ensSize
      *          number of bookies over which to stripe entries
@@ -1358,7 +1358,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
 
     /**
      * Synchronous call to delete a ledger. Parameters match those of
-     * {@link #asyncDeleteLedger(long, DeleteCallback, Object)}
+     * {@link #asyncDeleteLedger(long, AsyncCallback.DeleteCallback, Object)}
      *
      * @param lId
      *            ledgerId

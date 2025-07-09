@@ -277,7 +277,7 @@ public class EmbeddedServer {
          * </pre>
          *
          * @return lifecycle stack
-         * @throws Exception
+         * @throws java.lang.Exception
          */
         public EmbeddedServer build() throws Exception {
 
@@ -386,7 +386,7 @@ public class EmbeddedServer {
                         ledgerDirsManager, indexDirsManager, bookieStats, allocator);
 
                 EntryCopier copier = new EntryCopierImpl(bookieId,
-                        ((BookKeeper) bkc).getClientCtx().getBookieClient(),
+                        ((org.apache.bookkeeper.client.BookKeeper) bkc).getClientCtx().getBookieClient(),
                         storage, Ticker.systemTicker());
 
                 integCheck = new DataIntegrityCheckImpl(bookieId,

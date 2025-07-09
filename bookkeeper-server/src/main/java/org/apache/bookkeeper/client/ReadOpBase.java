@@ -271,10 +271,10 @@ public abstract class ReadOpBase implements Runnable {
     protected static class ReadContext implements BookkeeperInternalCallbacks.ReadEntryCallbackCtx {
         final int bookieIndex;
         final BookieId to;
-        final LedgerEntryRequest entry;
+        final PendingReadOp.LedgerEntryRequest entry;
         long lac = LedgerHandle.INVALID_ENTRY_ID;
 
-        ReadContext(int bookieIndex, BookieId to, LedgerEntryRequest entry) {
+        ReadContext(int bookieIndex, BookieId to, PendingReadOp.LedgerEntryRequest entry) {
             this.bookieIndex = bookieIndex;
             this.to = to;
             this.entry = entry;

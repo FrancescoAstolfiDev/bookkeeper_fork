@@ -53,7 +53,7 @@ public class LostBookieRecoveryDelayCommand extends BookieCommand<LostBookieReco
     }
 
     private LostBookieRecoveryDelayCommand(LBRDFlags flags) {
-        super(CliSpec.<LBRDFlags>newBuilder()
+        super(CliSpec.<LostBookieRecoveryDelayCommand.LBRDFlags>newBuilder()
                   .withName(NAME)
                   .withDescription(DESC)
                   .withFlags(flags)

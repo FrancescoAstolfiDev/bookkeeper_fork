@@ -45,7 +45,7 @@ public class RebuildDBLedgersIndexCommand extends BookieCommand<RebuildDBLedgers
     }
 
     public RebuildDBLedgersIndexCommand(RebuildLedgersIndexFlags flags) {
-        super(CliSpec.<RebuildLedgersIndexFlags>newBuilder().withName(NAME)
+        super(CliSpec.<RebuildDBLedgersIndexCommand.RebuildLedgersIndexFlags>newBuilder().withName(NAME)
                 .withDescription(DESC).withFlags(flags).build());
     }
 

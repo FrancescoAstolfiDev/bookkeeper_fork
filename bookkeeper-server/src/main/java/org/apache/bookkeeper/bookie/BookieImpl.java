@@ -215,7 +215,7 @@ public class BookieImpl implements Bookie {
                 fileStore = Files.getFileStore(dir.toPath());
             } catch (IOException e) {
                 LOG.error("Got IOException while trying to FileStore of {}", dir);
-                throw new DiskPartitionDuplicationException(e);
+                throw new BookieException.DiskPartitionDuplicationException(e);
             }
             if (fileStoreDirsMap.containsKey(fileStore)) {
                 fileStoreDirsMap.get(fileStore).add(dir);
@@ -237,7 +237,7 @@ public class BookieImpl implements Bookie {
             }
         });
         if (isDuplicationFoundAndNotAllowed.getValue()) {
-            throw new DiskPartitionDuplicationException();
+            throw new BookieException.DiskPartitionDuplicationException();
         }
     }
 
@@ -1065,7 +1065,7 @@ public class BookieImpl implements Bookie {
         }
     }
 
-    public ByteBuf getExplicitLac(long ledgerId) throws IOException, NoLedgerException, BookieException {
+    public ByteBuf getExplicitLac(long ledgerId) throws IOException, Bookie.NoLedgerException, BookieException {
         ByteBuf lac;
         LedgerDescriptor handle = handles.getReadOnlyHandle(ledgerId);
         synchronized (handle) {

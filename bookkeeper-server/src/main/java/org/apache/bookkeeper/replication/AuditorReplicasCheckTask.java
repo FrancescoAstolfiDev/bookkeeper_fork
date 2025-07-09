@@ -640,7 +640,7 @@ public class AuditorReplicasCheckTask extends AuditorTask {
         }
     }
 
-    private static class ReplicasCheckFinalCallback implements VoidCallback {
+    private static class ReplicasCheckFinalCallback implements AsyncCallback.VoidCallback {
         final AtomicInteger resultCode;
         final CountDownLatch replicasCheckLatch;
 
@@ -662,7 +662,7 @@ public class AuditorReplicasCheckTask extends AuditorTask {
         HashMultiset<Long> missingEntries = HashMultiset.create();
         int writeQuorumSize;
         int ackQuorumSize;
-        for (Entry<Long, MissingEntriesInfoOfLedger> missingEntriesInfoOfLedgerEntry : ledgersWithMissingEntries
+        for (Map.Entry<Long, MissingEntriesInfoOfLedger> missingEntriesInfoOfLedgerEntry : ledgersWithMissingEntries
                 .entrySet()) {
             missingEntries.clear();
             errMessage.setLength(0);
@@ -717,7 +717,7 @@ public class AuditorReplicasCheckTask extends AuditorTask {
     private void reportLedgersWithUnavailableBookies(
             ConcurrentHashMap<Long, MissingEntriesInfoOfLedger> ledgersWithUnavailableBookies) {
         StringBuilder errMessage = new StringBuilder();
-        for (Entry<Long, MissingEntriesInfoOfLedger> ledgerWithUnavailableBookiesInfo :
+        for (Map.Entry<Long, MissingEntriesInfoOfLedger> ledgerWithUnavailableBookiesInfo :
                 ledgersWithUnavailableBookies.entrySet()) {
             errMessage.setLength(0);
             long ledgerWithUnavailableBookies = ledgerWithUnavailableBookiesInfo.getKey();

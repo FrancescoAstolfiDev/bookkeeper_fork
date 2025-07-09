@@ -33,7 +33,7 @@ import org.apache.bookkeeper.net.DNSToSwitchMapping;
 import org.apache.bookkeeper.stats.StatsLogger;
 
 /**
- * Internal builder for {@link BookKeeper} client.
+ * Internal builder for {@link org.apache.bookkeeper.client.api.BookKeeper} client.
  *
  * @since 4.6
  */
