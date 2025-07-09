@@ -14,8 +14,47 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 -->
-
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <repositories>
+    <repository>
+      <id>central</id>
+      <name>Maven Central</name>
+      <url>https://repo.maven.apache.org/maven2</url>
+    </repository>
+    <repository>
+      <id>sonatype</id>
+      <name>Sonatype Releases</name>
+      <url>https://oss.sonatype.org/content/repositories/releases</url>
+    </repository>
+    <repository>
+      <id>sonatype-snapshots</id>
+      <name>Sonatype Snapshots</name>
+      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+      <releases>
+        <enabled>false</enabled>
+      </releases>
+    </repository>
+  </repositories>
+  <pluginRepositories>
+    <pluginRepository>
+      <id>apache</id>
+      <name>Apache Repository</name>
+      <url>https://repository.apache.org/content/repositories/releases/</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </pluginRepository>
+  </pluginRepositories>
+
+
+
+
   <parent>
     <groupId>org.apache</groupId>
     <artifactId>apache</artifactId>
@@ -58,7 +97,6 @@
     <module>bookkeeper-common-allocator</module>
     <module>stats</module>
     <module>bookkeeper-proto</module>
-    <module>native-io</module>
     <module>bookkeeper-server</module>
     <module>bookkeeper-benchmark</module>
     <module>bookkeeper-http</module>
@@ -70,8 +108,7 @@
     <module>shaded</module>
     <module>microbenchmarks</module>
     <module>bookkeeper-slogger</module>
-    <module>testtools</module>
-    <!--    <module>tests_integration</module>-->
+    <module>native-io</module>
   </modules>
   <mailingLists>
     <mailingList>
@@ -108,7 +145,6 @@
   <properties>
     <maven.compiler.source>8</maven.compiler.source>
     <maven.compiler.target>8</maven.compiler.target>
-    <jacoco.version>0.8.11</jacoco.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <redirectTestOutputToFile>true</redirectTestOutputToFile>
@@ -205,9 +241,11 @@
     <forkCount.variable>1</forkCount.variable>
     <servlet-api.version>4.0.0</servlet-api.version>
     <rxjava.version>3.0.1</rxjava.version>
-    <otel.version>1.45.0</otel.version>
-    <otel.instrumentation.version>1.33.6</otel.instrumentation.version>
-    <otel.semconv.version>1.29.0-alpha</otel.semconv.version>
+    <otel.version>1.28.0</otel.version>
+    <otel.alpha.version>1.28.0-alpha</otel.alpha.version>
+    <otel.instrumentation.version>1.28.0</otel.instrumentation.version>
+    <otel.semconv.version>1.28.0-alpha</otel.semconv.version>
+    <otel.instrumentation.alpha.version>1.28.0-alpha</otel.instrumentation.alpha.version>
     <UBUNTU_MIRROR>http://archive.ubuntu.com/ubuntu/</UBUNTU_MIRROR>
     <UBUNTU_SECURITY_MIRROR>http://security.ubuntu.com/ubuntu/</UBUNTU_SECURITY_MIRROR>
   </properties>
@@ -644,6 +682,12 @@
         <artifactId>simpleclient_servlet</artifactId>
         <version>${prometheus.version}</version>
       </dependency>
+      <dependency>
+        <groupId>io.prometheus</groupId>
+        <artifactId>simpleclient_httpserver</artifactId>
+        <version>${prometheus.version}</version>
+      </dependency>
+
       <!-- data-sketches -->
       <dependency>
         <groupId>com.yahoo.datasketches</groupId>
@@ -658,6 +702,8 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
+
+
       <dependency>
         <groupId>io.opentelemetry.contrib</groupId>
         <artifactId>opentelemetry-gcp-resources</artifactId>
@@ -965,82 +1011,6 @@
             </execution>
           </executions>
         </plugin>
-
-
-
-        <!--GENERATE A REPORT FOR ALL THE CLASSES OF BOOKKEEPER I WANT THE REPORT OF SINGLE CLASS -->
-
-
-        <plugin>
-          <groupId>org.jacoco</groupId>
-          <artifactId>jacoco-maven-plugin</artifactId>
-          <version>${jacoco.version}</version>
-          <executions>
-            <execution>
-              <id>prepare-agent</id>
-              <goals>
-                <goal>prepare-agent</goal>
-              </goals>
-            </execution>
-          </executions>
-        </plugin>
-
-
-
-
-        <!--THE REPORT OF SINGLE CLASS -->
-
-
-        <!--        <plugin>-->
-        <!--          <groupId>org.jacoco</groupId>-->
-        <!--          <artifactId>jacoco-maven-plugin</artifactId>-->
-        <!--          <version>${jacoco.version}</version>-->
-        <!--          <executions>-->
-        <!--            <execution>-->
-        <!--              <id>prepare-agent</id>-->
-        <!--              <goals>-->
-        <!--                <goal>prepare-agent</goal>-->
-        <!--              </goals>-->
-        <!--            </execution>-->
-        <!--            <execution>-->
-        <!--              <id>report</id>-->
-        <!--              <phase>verify</phase>-->
-        <!--              <goals>-->
-        <!--                <goal>report</goal>-->
-        <!--              </goals>-->
-        <!--              <configuration>-->
-        <!--                <includes>-->
-        <!--                  <include>**/LedgerDescriptorImpl.class</include>-->
-        <!--                </includes>-->
-        <!--              </configuration>-->
-        <!--            </execution>-->
-        <!--          </executions>-->
-        <!--        </plugin>-->
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
@@ -1049,8 +1019,6 @@
             <excludedGroups>flaky</excludedGroups>
           </configuration>
         </plugin>
-
-
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-failsafe-plugin</artifactId>
@@ -1073,7 +1041,15 @@
       </plugins>
     </pluginManagement>
     <plugins>
-
+      <plugin>
+        <groupId>com.github.spotbugs</groupId>
+        <artifactId>spotbugs-maven-plugin</artifactId>
+        <version>${spotbugs-maven-plugin.version}</version>
+        <configuration>
+          <!--suppress UnresolvedMavenProperty -->
+          <excludeFilterFile>${session.executionRootDirectory}/buildtools/src/main/resources/bookkeeper/findbugsExclude.xml</excludeFilterFile>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
@@ -1266,6 +1242,21 @@
         <artifactId>exec-maven-plugin</artifactId>
         <version>${exec-maven-plugin.version}</version>
       </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>${spotless.version}</version>
+        <configuration>
+          <groovy>
+            <includes>
+              <include>src/main/groovy/**/*.groovy</include>
+              <include>src/test/groovy/**/*.groovy</include>
+            </includes>
+            <importOrder/>
+            <removeSemicolons/>
+          </groovy>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
   <profiles>
@@ -1273,7 +1264,42 @@
       <id>owasp-dependency-check</id>
       <build>
         <plugins>
-
+          <plugin>
+            <groupId>org.owasp</groupId>
+            <artifactId>dependency-check-maven</artifactId>
+            <version>${dependency-check-maven.version}</version>
+            <inherited>false</inherited>
+            <configuration>
+              <!-- https://issues.apache.org/jira/projects/INFRA/issues/INFRA-26000 -->
+              <nvdApiKeyEnvironmentVariable>NIST_NVD_API_KEY</nvdApiKeyEnvironmentVariable>
+              <!-- Uncomment the following to use the NVD data feed provided by the Dependency-Check project -->
+              <!-- <nvdDatafeedUrl>https://jeremylong.github.io/DependencyCheck/hb_nvd/</nvdDatafeedUrl> -->
+              <suppressionFiles>
+                <suppressionFile>src/owasp-dependency-check-suppressions.xml</suppressionFile>
+              </suppressionFiles>
+              <failBuildOnCVSS>7</failBuildOnCVSS>
+              <msbuildAnalyzerEnabled>false</msbuildAnalyzerEnabled>
+              <nodeAnalyzerEnabled>false</nodeAnalyzerEnabled>
+              <yarnAuditAnalyzerEnabled>false</yarnAuditAnalyzerEnabled>
+              <pyDistributionAnalyzerEnabled>false</pyDistributionAnalyzerEnabled>
+              <pyPackageAnalyzerEnabled>false</pyPackageAnalyzerEnabled>
+              <pipAnalyzerEnabled>false</pipAnalyzerEnabled>
+              <pipfileAnalyzerEnabled>false</pipfileAnalyzerEnabled>
+              <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>
+              <msbuildAnalyzerEnabled>false</msbuildAnalyzerEnabled>
+              <mixAuditAnalyzerEnabled>false</mixAuditAnalyzerEnabled>
+              <nugetconfAnalyzerEnabled>false</nugetconfAnalyzerEnabled>
+              <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
+              <skipSystemScope>true</skipSystemScope>
+            </configuration>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>aggregate</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
           <!-- skip maven source plugin due to
           Error: Failed to execute goal org.apache.maven.plugins:maven-source-plugin:3.3.0:jar-no-fork (attach-sources) on project buildtools:
           Presumably you have configured maven-source-plugin to execute twice times in your build.
@@ -1296,6 +1322,34 @@
       </properties>
       <build>
         <plugins>
+          <plugin>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok-maven-plugin</artifactId>
+            <version>${lombok-maven-plugin.version}</version>
+            <inherited>true</inherited>
+            <dependencies>
+              <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>${lombok.version}</version>
+              </dependency>
+            </dependencies>
+            <executions>
+              <execution>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>delombok</goal>
+                </goals>
+                <configuration>
+                  <sourceDirectory>${project.basedir}/src/main/java</sourceDirectory>
+                  <outputDirectory>${project.build.directory}/generated-sources/delombok</outputDirectory>
+                  <formatPreferences>
+                    <pretty />
+                  </formatPreferences>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-javadoc-plugin</artifactId>
