@@ -172,13 +172,6 @@
     </dependency>
     <!-- testing dependencies -->
     <dependency>
-      <groupId>org.apache.bookkeeper</groupId>
-      <artifactId>bookkeeper-common</artifactId>
-      <version>${project.parent.version}</version>
-      <type>test-jar</type>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
       <groupId>org.apache.kerby</groupId>
       <artifactId>kerby-config</artifactId>
       <version>1.1.1</version>
@@ -396,8 +389,8 @@
           <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.10.2</version>
-            <scope>runtime</scope>
+            <version>5.8.2</version>
+            <scope>test</scope>
           </dependency>
         </dependencies>
       </plugin>
@@ -458,7 +451,14 @@
       <plugin>
         <groupId>org.pitest</groupId>
         <artifactId>pitest-maven</artifactId>
-        <version>1.15.3</version>
+        <version>1.13.0</version>
+        <dependencies>
+          <dependency>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-junit5-plugin</artifactId>
+            <version>1.1.1</version>
+          </dependency>
+        </dependencies>
         <configuration>
           <targetClasses>
             <param>org.apache.openjpa.persistence.PersistenceProviderImpl</param>
@@ -475,8 +475,13 @@
           <failWhenNoMutations>false</failWhenNoMutations>
           <verbose>true</verbose>
           <withHistory>true</withHistory>
+          <mutators>
+            <mutator>DEFAULTS</mutator>
+          </mutators>
+          <threads>4</threads>
         </configuration>
       </plugin>
+
 
 
     </plugins>
