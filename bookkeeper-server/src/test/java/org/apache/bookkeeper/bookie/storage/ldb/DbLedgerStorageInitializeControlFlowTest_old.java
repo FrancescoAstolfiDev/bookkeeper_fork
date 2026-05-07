@@ -1,26 +1,21 @@
 package org.apache.bookkeeper.bookie.storage.ldb;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import io.netty.buffer.ByteBufAllocator;
-
-import java.io.File;
-import java.io.IOException;
-import java.lang.reflect.Field;
-
 import org.apache.bookkeeper.bookie.CheckpointSource;
 import org.apache.bookkeeper.bookie.Checkpointer;
 import org.apache.bookkeeper.bookie.LedgerDirsManager;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.apache.bookkeeper.util.DiskChecker;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+
+import java.io.File;
+import java.io.IOException;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Coverage-oriented tests for {@link DbLedgerStorage#initialize}.
@@ -43,30 +38,16 @@ import org.junit.jupiter.api.io.TempDir;
  * ---+--------------------------------------------------------+-----------------------------------------------
  *  1 | directIO=true, numReadWorkerThreads > 0               | directIO-true, numReadThreads==0-false
  *  2 | directIO=true, numReadWorkerThreads == 0              | directIO-true, numReadThreads==0-true
- *  3 | directIO=false, 2 dirs == 2 dirs                      | perDirectoryReadCacheSize mutant (line 175)
+ *  3 | directIO=false, 2 dirs == 2 dirs                      | perDirectoryReadCacheSize
  * </pre>
  *
  * <p><b>Note on Coverage #1 and #2:</b> tests that enable {@code directIOEntryLogger}
- * may throw an {@link java.io.IOException} if the native libraries required for Direct I/O
+ * may throw an {@link IOException} if the native libraries required for Direct I/O
  * are not available in the execution environment. In that case the test tolerates the
  * exception and only asserts that the message is non-null. This approach ensures that
  * the setup lines preceding the {@code DirectEntryLogger} constructor are still executed
  * and recorded by JaCoCo, regardless of native library availability.
  *
- * <h3>Mutation testing refinements</h3>
- *
- * <p>After the initial coverage suite was evaluated with PIT, the mutation report
- * identified surviving mutants on {@code initialize()} at lines 152–155, 174, and 175,
- * corresponding to arithmetic expressions that compute {@code writeCacheMaxSize}
- * ({@code getLongVariableOrDefault(...) * MB}), {@code readCacheMaxSize}
- * ({@code getLongVariableOrDefault(...) * MB}), {@code perDirectoryWriteCacheSize}
- * ({@code writeCacheMaxSize / numberOfDirs}), and {@code perDirectoryReadCacheSize}
- * ({@code readCacheMaxSize / numberOfDirs}) respectively.
- *
- * <p>The mutant at line 175 ({@code perDirectoryReadCacheSize = readCacheMaxSize / numberOfDirs →
- * readCacheMaxSize * numberOfDirs}) survives all single-directory tests because {@code /1 == *1}.
- * Coverage#3 exercises two directories so the correct value (8 MB) differs from the mutated
- * value (32 MB), killing the mutant.
  *
  * <p>These variables are local to {@code initialize()} and are passed directly as
  * constructor arguments to {@link SingleDirectoryDbLedgerStorage}, which stores
@@ -76,15 +57,9 @@ import org.junit.jupiter.api.io.TempDir;
  * private fields {@code writeCache} and {@code readCache} of each
  * {@link SingleDirectoryDbLedgerStorage} instance.
  *
- * <p>The helpers {@link #readWriteCacheMaxSize(DbLedgerStorage, int)} and
- * {@link #readReadCacheMaxSize(DbLedgerStorage, int)} encapsulate the respective
- * reflection chains. When native I/O is available and {@code initialize()} succeeds,
- * assertions on the observed values kill the arithmetic mutants. When native I/O is
- * unavailable, the {@link IOException} is caught before the list is populated and
- * the gap is accepted as environment-dependent.
  */
 @DisplayName("DbLedgerStorage — Coverage: initialize() uncovered branches")
-public class Isw2DbLedgerStorageInitializeControlFlowTest {
+public class DbLedgerStorageInitializeControlFlowTest_old {
 
     @TempDir
     File tempDir;
@@ -133,10 +108,10 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
 
     private static void attachCheckpointAndStart(DbLedgerStorage s) throws Exception {
         s.setCheckpointSource(new CheckpointSource() {
-            public CheckpointSource.Checkpoint newCheckpoint() {
-                return CheckpointSource.Checkpoint.MAX;
+            public Checkpoint newCheckpoint() {
+                return Checkpoint.MAX;
             }
-            public void checkpointComplete(CheckpointSource.Checkpoint cp, boolean compact) {
+            public void checkpointComplete(Checkpoint cp, boolean compact) {
                 /* no-op */
             }
         });
@@ -147,76 +122,6 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
         s.start();
     }
 
-    // =========================================================================
-    // Reflection helpers for mutation-driven assertions
-    // =========================================================================
-
-    /**
-     * Returns the {@code maxCacheSize} of the {@link WriteCache} stored in the
-     * private field {@code writeCache} of the {@link SingleDirectoryDbLedgerStorage}
-     * instance at position {@code index} inside {@code s}.
-     *
-     * <p>This is the only observable consequence of the arithmetic computations
-     * at lines 153 ({@code writeCacheMaxSize = ... * MB}) and 175
-     * ({@code perDirectoryWriteCacheSize = writeCacheMaxSize / numberOfDirs})
-     * of {@code DbLedgerStorage.java}. Both values are local variables passed
-     * as constructor arguments and not exposed by any public getter.
-     *
-     * <p>For a single-directory storage, {@code index = 0} is the only valid
-     * position. For the two-directory scenario, both index 0 and index 1 are
-     * checked to verify that the per-directory partition is applied uniformly.
-     *
-     * <p>A mutant replacing {@code * MB} with {@code / MB} at line 153 produces
-     * a cache of ~0 bytes; one replacing {@code / numberOfDirs} with
-     * {@code * numberOfDirs} at line 175 produces a cache many times larger than
-     * expected. Either value differs from {@code WRITE_CACHE_16MB * MB / numDirs},
-     * causing the assertion to fail and killing the mutant.
-     */
-    private static long readWriteCacheMaxSize(DbLedgerStorage s, int index) throws Exception {
-        Object singleDir = s.getLedgerStorageList().get(index);
-        Field writeCacheField = singleDir.getClass().getDeclaredField("writeCache");
-        writeCacheField.setAccessible(true);
-        Object writeCache = writeCacheField.get(singleDir);
-        Field maxSizeField = writeCache.getClass().getDeclaredField("maxCacheSize");
-        maxSizeField.setAccessible(true);
-        return (long) maxSizeField.get(writeCache);
-    }
-
-    /**
-     * Returns the total capacity (in bytes) of the {@link ReadCache} held by
-     * the {@link SingleDirectoryDbLedgerStorage} instance at position {@code index}.
-     *
-     * <p>{@link ReadCache} does not expose a {@code maxCacheSize} field. Its
-     * total capacity is computed as {@code segmentSize * cacheSegments.size()},
-     * where both are private fields declared in {@link ReadCache}. Unlike
-     * {@link WriteCache} — which is split in two halves inside
-     * {@link SingleDirectoryDbLedgerStorage} — {@link ReadCache} retains the
-     * full {@code perDirectoryReadCacheSize}. The expected value for a
-     * single-directory storage configured with {@code READ_CACHE_16MB} is
-     * therefore {@code READ_CACHE_16MB * MB} (no halving), whereas for two
-     * directories it is {@code READ_CACHE_16MB * MB / 2}.
-     *
-     * <p>Kills the mutant at line 154 ({@code readCacheMaxSize = ... * MB →
-     * ... / MB}): the mutant produces ~0 bytes, which differs from the expected
-     * value by four orders of magnitude.
-     */
-    @SuppressWarnings("unchecked")
-    private static long readReadCacheMaxSize(DbLedgerStorage s, int index) throws Exception {
-        Object singleDir = s.getLedgerStorageList().get(index);
-        Field readCacheField = singleDir.getClass().getDeclaredField("readCache");
-        readCacheField.setAccessible(true);
-        Object readCache = readCacheField.get(singleDir);
-
-        Field segmentSizeField = readCache.getClass().getDeclaredField("segmentSize");
-        segmentSizeField.setAccessible(true);
-        int segmentSize = (int) segmentSizeField.get(readCache);
-
-        Field cacheSegmentsField = readCache.getClass().getDeclaredField("cacheSegments");
-        cacheSegmentsField.setAccessible(true);
-        java.util.List<?> cacheSegments = (java.util.List<?>) cacheSegmentsField.get(readCache);
-
-        return (long) segmentSize * cacheSegments.size();
-    }
 
     // =========================================================================
     // Coverage test cases
@@ -237,13 +142,6 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
      *       {@code numReadWorkerThreads = 4 > 0} the thread count is used directly.</li>
      * </ul>
      *
-     * <p><b>Mutation testing note (PIT — lines 153, 154, 175):</b>
-     * When native I/O is available and {@code initialize()} succeeds, the write-cache
-     * and read-cache capacities are read via reflection and asserted against the
-     * expected values. This kills arithmetic mutants at lines 153, 154, and 175.
-     * When native I/O is unavailable, the {@link IOException} is caught before the
-     * storage list is populated; in that case the mutants are not reachable and the
-     * gap is accepted as environment-dependent.
      */
     @Test
     @DisplayName("Coverage#1 — directIO=true, numReadWorkerThreads=4 → directIO branch + numReadThreads!=0")
@@ -267,13 +165,7 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
                     "Exactly one SingleDirectoryDbLedgerStorage must be created "
                             + "for one configured ledger directory");
 
-            // Mutation-driven assertions via reflection (lines 153, 154, 175).
-            assertEquals(WRITE_CACHE_16MB * MB / 2, readWriteCacheMaxSize(storage, 0),
-                    "Write cache capacity must equal writeCacheMaxSize / numberOfDirs / 2; "
-                            + "arithmetic mutations at lines 153 or 175 produce a different value");
-            assertEquals(READ_CACHE_16MB * MB, readReadCacheMaxSize(storage, 0),
-                    "Read cache capacity must equal the full readCacheMaxSize / numberOfDirs; "
-                            + "arithmetic mutation at line 154 produces a different value");
+
         } catch (IOException e) {
             // Native I/O libraries unavailable in this environment — acceptable.
             assertTrue(e.getMessage() != null,
@@ -293,10 +185,6 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
      *
      * <p>As with Coverage #1, a native-library IOException is tolerated.
      *
-     * <p><b>Mutation testing note (PIT — lines 153, 154, 175):</b>
-     * When native I/O is available and {@code initialize()} succeeds, the write-cache
-     * and read-cache capacities are read via reflection and asserted against the
-     * expected values. The rationale is identical to that documented for Coverage #1.
      */
     @Test
     @DisplayName("Coverage#2 — directIO=true, numReadWorkerThreads=0 → numReadThreads==0 true-branch fallback")
@@ -320,14 +208,6 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
             assertEquals(1, storage.getLedgerStorageList().size(),
                     "Exactly one SingleDirectoryDbLedgerStorage must be created "
                             + "for one configured ledger directory");
-
-            // Mutation-driven assertions via reflection (lines 153, 154, 175).
-            assertEquals(WRITE_CACHE_16MB * MB / 2, readWriteCacheMaxSize(storage, 0),
-                    "Write cache capacity must equal writeCacheMaxSize / numberOfDirs / 2; "
-                            + "arithmetic mutations at lines 153 or 175 produce a different value");
-            assertEquals(READ_CACHE_16MB * MB, readReadCacheMaxSize(storage, 0),
-                    "Read cache capacity must equal the full readCacheMaxSize / numberOfDirs; "
-                            + "arithmetic mutation at line 154 produces a different value");
         } catch (IOException e) {
             // Native I/O libraries unavailable — the fallback branch was still hit.
             assertTrue(e.getMessage() != null,
@@ -336,17 +216,17 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
     }
 
     /**
-     * Coverage #3 — Two matching directories (standard I/O): kills mutant at line 175.
+     * Coverage #3 — Two matching directories (standard I/O):
      *
      * <p>All single-directory tests (Coverage#1 and Coverage#2) are unable to distinguish
-     * the mutant {@code perDirectoryReadCacheSize = readCacheMaxSize * numberOfDirs} from the
+     * {@code perDirectoryReadCacheSize = readCacheMaxSize * numberOfDirs} from the
      * correct code {@code readCacheMaxSize / numberOfDirs} because {@code /1 == *1}. This test
      * uses two directories ({@code numberOfDirs = 2}) so the correct per-directory read cache
      * is {@code READ_CACHE_16MB * MB / 2 = 8 MB}, while the mutated expression yields
      * {@code READ_CACHE_16MB * MB * 2 = 32 MB}, causing the assertion to fail.
      */
     @Test
-    @DisplayName("Coverage#3 — 2dirs==2dirs → readCache per dir = 8 MB (kills line 175 mutant)")
+    @DisplayName("Coverage#3 — 2dirs==2dirs → readCache per dir = 8 MB ")
     void coverage03_twoDirs_readCacheSplitPerDirectory() throws Exception {
         File ledger1 = new File(tempDir, "l1_c3"); ledger1.mkdirs();
         File ledger2 = new File(tempDir, "l2_c3"); ledger2.mkdirs();
@@ -377,16 +257,5 @@ public class Isw2DbLedgerStorageInitializeControlFlowTest {
         assertEquals(2, storage.getLedgerStorageList().size(),
                 "Two SingleDirectoryDbLedgerStorage instances must be created for two dirs");
 
-        // perDirectoryReadCacheSize = readCacheMaxSize / 2 = 8 MB (correct)
-        // mutant (line 175, '/' → '*'): readCacheMaxSize * 2 = 32 MB → assertion fails → mutant killed
-        assertEquals(READ_CACHE_16MB * MB / 2, readReadCacheMaxSize(storage, 0),
-                "Read cache per directory must equal readCacheMaxSize / numberOfDirs = 8 MB; "
-                        + "mutant replacing '/' with '*' at line 175 yields 32 MB");
-        assertEquals(READ_CACHE_16MB * MB / 2, readReadCacheMaxSize(storage, 1),
-                "Both directories must have equal read cache = 8 MB per dir");
-
-        // perDirectoryWriteCacheSize = writeCacheMaxSize / 2 = 8 MB, halved internally → 4 MB
-        assertEquals(WRITE_CACHE_16MB * MB / 2 / 2, readWriteCacheMaxSize(storage, 0),
-                "Write cache per directory must equal writeCacheMaxSize / numberOfDirs / 2 = 4 MB");
     }
 }

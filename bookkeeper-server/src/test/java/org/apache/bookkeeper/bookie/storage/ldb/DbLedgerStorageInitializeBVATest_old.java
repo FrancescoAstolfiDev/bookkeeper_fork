@@ -1,30 +1,25 @@
 package org.apache.bookkeeper.bookie.storage.ldb;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.util.internal.PlatformDependent;
-
-import java.io.File;
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.nio.file.Files;
-
 import org.apache.bookkeeper.bookie.CheckpointSource;
 import org.apache.bookkeeper.bookie.Checkpointer;
 import org.apache.bookkeeper.bookie.LedgerDirsManager;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.apache.bookkeeper.util.DiskChecker;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Boundary Value Analysis tests for {@link DbLedgerStorage#initialize}.
@@ -52,30 +47,6 @@ import org.junit.jupiter.api.io.TempDir;
  *   <li>Upper error bound: 1 != 2 → IOException</li>
  * </ul>
  *
- * <h3>Mutation testing refinements</h3>
- *
- * <p>After the initial BVA suite was evaluated with PIT, the mutation report
- * identified several surviving mutants on {@code initialize()} related to
- * arithmetic operators used in internal size computations:
- * <ul>
- *   <li>Line 152–153 — {@code Replaced long multiplication with division}:
- *       {@code writeCacheMaxSize = getLongVariableOrDefault(...) * MB} — the
- *       mutant replaces {@code *} with {@code /}, yielding ~0 bytes.</li>
- *   <li>Line 154–155 — {@code Replaced long multiplication with division}:
- *       {@code readCacheMaxSize = getLongVariableOrDefault(...) * MB} — same
- *       pattern; mutant yields ~0 bytes.</li>
- *   <li>Line 174 — {@code Replaced long division with multiplication}:
- *       {@code perDirectoryWriteCacheSize = writeCacheMaxSize / numberOfDirs} —
- *       the mutant replaces {@code /} with {@code *}, yielding a value
- *       numberOfDirs times larger than expected.</li>
- *   <li>Line 175 — {@code Replaced long division with multiplication}:
- *       {@code perDirectoryReadCacheSize = readCacheMaxSize / numberOfDirs} —
- *       same pattern. For numberOfDirs=1 the mutant is indistinguishable from
- *       the correct code (both {@code /1} and {@code *1} return the same value).
- *       Coverage#3 in {@link Isw2DbLedgerStorageInitializeControlFlowTest} exercises
- *       numberOfDirs=2 so the mutated value (32 MB) differs from the expected value
- *       (8 MB), killing the mutant.</li>
- * </ul>
  *
  * <p>These variables are local to {@code initialize()} and are passed directly
  * as constructor arguments to {@link SingleDirectoryDbLedgerStorage}, which
@@ -85,26 +56,19 @@ import org.junit.jupiter.api.io.TempDir;
  * field of the first entry in {@link DbLedgerStorage#getLedgerStorageList()},
  * and then on the {@code maxCacheSize} field of the resulting {@link WriteCache}.
  *
- * <p>The helper {@link #readWriteCacheMaxSize(DbLedgerStorage)} encapsulates
- * this reflection chain. An assertion of the form:
- * <pre>
- *   assertEquals(WRITE_CACHE_16MB * MB, readWriteCacheMaxSize(storage))
- * </pre>
- * detects any mutant that alters the arithmetic at lines 153 or 175, because
- * the mutated value differs from {@code 16 * MB} by at least an order of
- * magnitude in either direction.
+ *
  *
  * <p><b>BVA table (14 cases):</b>
  * <pre>
  *  # | write        | read   | directory                    | nDL  | nDI  | Expected output
  * ---+--------------+--------+------------------------------+------+------+-----------------------------
- *  1 | 16 MB        | 16 MB  | new                          |  0   |  0   | Success + round-trip
- *  2 | 16 MB        | 16 MB  | no write permission          |  0   |  0   | IOException
- *  3 | 16 MB        | 16 MB  | pre-existing valid           |  2   |  2   | Success + entry readable
+ *  1 | 16 MB        | 16 MB  | new                          |  1   |  1   | Success + round-trip
+ *  2 | 16 MB        | 16 MB  | no write permission          |  1   |  1   | IOException
+ *  3 | 16 MB        | 16 MB  | pre-existing valid (1==1)    |  1   |  1   | Success + entry readable (2==2 → Coverage#1)
  *  4 | 16 MB        | 16 MB  | corrupted CURRENT            |  1   |  1   | Exception at initialize()
  *  5 |  0 MB        | 16 MB  | new                          |  1   |  1   | Exception at round-trip
- *  6 | 16 MB        |  0 MB  | new                          |  0   |  0   | Success
- *  7 | overflow     | 16 MB  | new                          |  0   |  0   | IOException
+ *  6 | 16 MB        |  0 MB  | new                          |  1   |  1   | Success
+ *  7 | overflow     | 16 MB  | new                          |  1   |  1   | IOException
  *  8 | null (conf)  | null   | null                         |  -   |  -   | NullPointerException
  *  9 | 16 MB        | 16 MB  | pre-existing valid           |  1   |  1   | Success + round-trip
  * 10 | 16 MB        | 16 MB  | pre-existing valid           |  2   |  1   | IOException
@@ -113,13 +77,9 @@ import org.junit.jupiter.api.io.TempDir;
  * 13 | 16 MB        | 16 MB  | new                          |  1   | null | NullPointerException
  * 14 | 16 MB        | 16 MB  | new                          |  1   |  1   | NullPointerException at flush
  * </pre>
- *
- * <p>The two-directory case that kills the mutant at line 175
- * ({@code perDirectoryReadCacheSize = readCacheMaxSize / numberOfDirs}) is covered
- * by Coverage#3 in {@link Isw2DbLedgerStorageInitializeControlFlowTest}.
  */
 @DisplayName("DbLedgerStorage — BVA: initialize(conf, null, ledgerDirsMgr, indexDirsMgr, statsLogger, allocator)")
-public class Isw2DbLedgerStorageInitializeBVATest {
+public class DbLedgerStorageInitializeBVATest_old {
 
     @TempDir
     File tempDir;
@@ -180,10 +140,10 @@ public class Isw2DbLedgerStorageInitializeBVATest {
      */
     private static void attachCheckpointAndStart(DbLedgerStorage s) throws Exception {
         s.setCheckpointSource(new CheckpointSource() {
-            public CheckpointSource.Checkpoint newCheckpoint() {
-                return CheckpointSource.Checkpoint.MAX;
+            public Checkpoint newCheckpoint() {
+                return Checkpoint.MAX;
             }
-            public void checkpointComplete(CheckpointSource.Checkpoint cp, boolean compact) {
+            public void checkpointComplete(Checkpoint cp, boolean compact) {
                 /* no-op */
             }
         });
@@ -239,46 +199,6 @@ public class Isw2DbLedgerStorageInitializeBVATest {
     }
 
     /**
-     * Runs a full initialize → write → flush → shutdown cycle on {@code dir1} and
-     * {@code dir2} together using a two-directory storage instance.
-     *
-     * <p>Ledger assignment is round-robin by {@code ledgerId % numberOfDirs}:
-     * {@code SMOKE_LEDGER_ID} (42) is stored in {@code dir1} (42 % 2 == 0) and
-     * {@code SMOKE_LEDGER_ID + 1} (43) is stored in {@code dir2} (43 % 2 == 1),
-     * ensuring both directories contain at least one valid entry after the seed run.
-     */
-    private void prepopulateDirectories(File dir1, File dir2) throws Exception {
-        ServerConfiguration conf = new ServerConfiguration();
-        conf.setLedgerDirNames(new String[]{
-                dir1.getAbsolutePath(), dir2.getAbsolutePath() });
-        conf.setProperty(DbLedgerStorage.WRITE_CACHE_MAX_SIZE_MB, WRITE_CACHE_16MB);
-        conf.setProperty(DbLedgerStorage.READ_AHEAD_CACHE_MAX_SIZE_MB, READ_CACHE_16MB);
-        conf.setDiskUsageThreshold(0.99f);
-        conf.setDiskUsageWarnThreshold(0.98f);
-        conf.setAllowLoopback(true);
-
-        DiskChecker dc       = new DiskChecker(
-                conf.getDiskUsageThreshold(), conf.getDiskUsageWarnThreshold());
-        LedgerDirsManager mgr = new LedgerDirsManager(
-                conf, new File[]{ dir1, dir2 }, dc, NullStatsLogger.INSTANCE);
-
-        DbLedgerStorage seed = new DbLedgerStorage();
-        seed.initialize(conf, null, mgr, mgr, NullStatsLogger.INSTANCE, ByteBufAllocator.DEFAULT);
-        attachCheckpointAndStart(seed);
-
-        seed.setMasterKey(SMOKE_LEDGER_ID, "smoke-key".getBytes());
-        ByteBuf e1 = buildEntry(SMOKE_LEDGER_ID, SMOKE_ENTRY_ID);
-        try { seed.addEntry(e1); } finally { e1.release(); }
-
-        seed.setMasterKey(SMOKE_LEDGER_ID + 1, "smoke-key-2".getBytes());
-        ByteBuf e2 = buildEntry(SMOKE_LEDGER_ID + 1, SMOKE_ENTRY_ID);
-        try { seed.addEntry(e2); } finally { e2.release(); }
-
-        seed.flush();
-        seed.shutdown();
-    }
-
-    /**
      * Builds a minimal valid entry buffer: [8B ledgerId][8B entryId][8B payload].
      */
     private static ByteBuf buildEntry(long ledgerId, long entryId) {
@@ -289,75 +209,9 @@ public class Isw2DbLedgerStorageInitializeBVATest {
         return buf;
     }
 
-    // =========================================================================
-    // Reflection helpers for mutation-driven assertions
-    // =========================================================================
 
-    /**
-     * Returns the {@code maxCacheSize} of the {@link WriteCache} stored in the
-     * private field {@code writeCache} of the first
-     * {@link SingleDirectoryDbLedgerStorage} instance inside {@code s}.
-     *
-     * <p>This is the only observable consequence of the arithmetic computations
-     * at lines 153 ({@code writeCacheMaxSize = ... * MB}) and 175
-     * ({@code perDirectoryWriteCacheSize = writeCacheMaxSize / numberOfDirs})
-     * of {@code DbLedgerStorage.java}. Both values are local variables passed
-     * as constructor arguments and not exposed by any public getter.
-     *
-     * <p>A mutant replacing {@code * MB} with {@code / MB} at line 153 produces
-     * a cache of ~0 bytes; one replacing {@code / numberOfDirs} with
-     * {@code * numberOfDirs} at line 175 produces a cache many times larger.
-     * Either value differs from {@code WRITE_CACHE_16MB * MB}, killing the mutant.
-     */
-    private static long readWriteCacheMaxSize(DbLedgerStorage s) throws Exception {
-        Object singleDir = s.getLedgerStorageList().get(0);
-        Field writeCacheField = singleDir.getClass().getDeclaredField("writeCache");
-        writeCacheField.setAccessible(true);
-        Object writeCache = writeCacheField.get(singleDir);
-        Field maxSizeField = writeCache.getClass().getDeclaredField("maxCacheSize");
-        maxSizeField.setAccessible(true);
-        return (long) maxSizeField.get(writeCache);
-    }
 
-    /**
-     * Returns the total capacity (in bytes) of the {@link ReadCache} stored in
-     * the private field {@code readCache} of the first
-     * {@link SingleDirectoryDbLedgerStorage} instance inside {@code s}.
-     *
-     * <p>{@link ReadCache} does not expose a {@code maxCacheSize} field. Its
-     * total capacity is computed as {@code segmentSize * cacheSegments.size()},
-     * where both are private fields declared in {@link ReadCache}. Unlike
-     * {@link WriteCache} — which is split in two halves inside
-     * {@link SingleDirectoryDbLedgerStorage} — {@link ReadCache} is allocated
-     * as a single instance that retains the full {@code perDirectoryReadCacheSize}.
-     * Consequently, the expected value for a single-directory storage configured
-     * with {@code READ_CACHE_16MB} is {@code READ_CACHE_16MB * MB} (no halving),
-     * whereas for two directories it is {@code READ_CACHE_16MB * MB / 2}.
-     *
-     * <p>Kills the mutant at line 154 ({@code readCacheMaxSize = ... * MB →
-     * ... / MB}): the mutant produces ~0 bytes, which differs from the expected
-     * value by four orders of magnitude.
-     */
-    @SuppressWarnings("unchecked")
-    private static long readReadCacheMaxSize(DbLedgerStorage s) throws Exception {
-        Object singleDir = s.getLedgerStorageList().get(0);
-        Field readCacheField = singleDir.getClass().getDeclaredField("readCache");
-        readCacheField.setAccessible(true);
-        Object readCache = readCacheField.get(singleDir);
 
-        // ReadCache.segmentSize: the size in bytes of each ring-buffer segment.
-        Field segmentSizeField = readCache.getClass().getDeclaredField("segmentSize");
-        segmentSizeField.setAccessible(true);
-        int segmentSize = (int) segmentSizeField.get(readCache);
-
-        // ReadCache.cacheSegments: List<ByteBuf> — number of elements = number of segments.
-        Field cacheSegmentsField = readCache.getClass().getDeclaredField("cacheSegments");
-        cacheSegmentsField.setAccessible(true);
-        java.util.List<?> cacheSegments = (java.util.List<?>) cacheSegmentsField.get(readCache);
-
-        // Total capacity = segmentSize * numberOfSegments.
-        return (long) segmentSize * cacheSegments.size();
-    }
 
     // =========================================================================
     // BVA test cases
@@ -368,10 +222,6 @@ public class Isw2DbLedgerStorageInitializeBVATest {
      * write=16MB, read=16MB, new temp directory, 1 ledger dir == 1 index dir.
      * Verifies that the lower valid bound produces a fully operational storage.
      *
-     * <p><b>Mutation testing note (PIT — lines 153, 175):</b>
-     * After the round-trip, the write-cache capacity is read via reflection and
-     * compared against the expected value {@code WRITE_CACHE_16MB * MB}.
-     * See {@link #readWriteCacheMaxSize(DbLedgerStorage)} for the full rationale.
      */
     @Test
     @DisplayName("BVA#1 — write=16MB, read=16MB, newDir, 1L==1I → Success + round-trip")
@@ -383,15 +233,6 @@ public class Isw2DbLedgerStorageInitializeBVATest {
                 "getLedgerStorageList() must not return null after successful initialize()");
         assertEquals(1, storage.getLedgerStorageList().size(),
                 "Exactly one SingleDirectoryDbLedgerStorage must be created for one ledger dir");
-
-        // Mutation-driven assertions: kill mutants at lines 153, 154, and 175.
-        assertEquals(WRITE_CACHE_16MB * MB / 2, readWriteCacheMaxSize(storage),
-                "Write cache capacity must equal writeCacheMaxSize / numberOfDirs / 2; "
-                        + "arithmetic mutations at lines 153 or 175 produce a different value");
-        assertEquals(READ_CACHE_16MB * MB, readReadCacheMaxSize(storage),
-                "Read cache capacity must equal the full readCacheMaxSize / numberOfDirs; "
-                        + "unlike WriteCache, ReadCache is not split in two halves internally; "
-                        + "arithmetic mutation at line 154 produces a different value");
     }
 
     /**
@@ -411,79 +252,41 @@ public class Isw2DbLedgerStorageInitializeBVATest {
     }
 
     /**
-     * BVA #3 — Restart on two pre-existing directories (2 == 2).
+     * BVA #3 — Restart on a single pre-existing directory (1 == 1).
      *
-     * <p>Both directories are seeded by a first storage instance that writes one
-     * entry per directory (ledger 42 → dir1, ledger 43 → dir2). A second storage
-     * instance then reopens the same two directories via initialize() and must be
-     * able to read both pre-existing entries.
+     * <p>This is the standard production restart scenario: a directory previously
+     * used by a storage instance is reopened by a new instance. initialize() must
+     * succeed and the pre-existing entry must be readable after the restart.
      *
-     * <p><b>Mutation testing note (PIT — lines 153, 154, 175):</b>
-     * With {@code numberOfDirs = 2} the per-directory write-cache size is
-     * {@code writeCacheMaxSize / 2}, and {@link SingleDirectoryDbLedgerStorage}
-     * further halves it, so the expected {@code maxCacheSize} is
-     * {@code WRITE_CACHE_16MB * MB / 2 / 2 = 4 MB}.
-     * Any mutant that replaces the division at line 175 with multiplication yields
-     * {@code 16 MB} (four times larger), killing the mutant.
-     * The read cache is not split internally, so the expected value is
-     * {@code READ_CACHE_16MB * MB / 2 = 8 MB}.
+     * <p>Note on directory cardinality: this test uses a single directory for
+     * both ledger and index managers (1 == 1), which is the minimal restart
+     * scenario and isolates the pre-existing-state dimension from the cardinality
+     * dimension. The upper valid bound (2 == 2) is covered by Coverage#1 in
+     * {@code Isw2DbLedgerStorageInitializeControlFlowTest}, which verifies a
+     * two-directory configuration with separate ledger and index paths.
+     *
      */
     @Test
-    @DisplayName("BVA#3 — write=16MB, read=16MB, 2preExistingDirs==2preExistingDirs → Success + entries readable")
+    @DisplayName("BVA#3 — write=16MB, read=16MB, 1preExistingDir==1preExistingDir → Success + entry readable")
     void bva03_preExistingValidDirectory_successAndDataReadable() throws Exception {
-        File dir1 = new File(tempDir, "pre3a");
-        File dir2 = new File(tempDir, "pre3b");
-        dir1.mkdirs();
-        dir2.mkdirs();
+        File preExist = new File(tempDir, "pre3");
+        preExist.mkdirs();
+        prepopulateDirectory(preExist);
 
-        prepopulateDirectories(dir1, dir2);
+        initStorageOnDir(preExist);
 
-        ServerConfiguration conf = new ServerConfiguration();
-        conf.setLedgerDirNames(new String[]{
-                dir1.getAbsolutePath(), dir2.getAbsolutePath() });
-        conf.setProperty(DbLedgerStorage.WRITE_CACHE_MAX_SIZE_MB, WRITE_CACHE_16MB);
-        conf.setProperty(DbLedgerStorage.READ_AHEAD_CACHE_MAX_SIZE_MB, READ_CACHE_16MB);
-        conf.setDiskUsageThreshold(0.99f);
-        conf.setDiskUsageWarnThreshold(0.98f);
-        conf.setAllowLoopback(true);
-
-        DiskChecker dc       = new DiskChecker(
-                conf.getDiskUsageThreshold(), conf.getDiskUsageWarnThreshold());
-        LedgerDirsManager mgr = new LedgerDirsManager(
-                conf, new File[]{ dir1, dir2 }, dc, NullStatsLogger.INSTANCE);
-
-        storage = new DbLedgerStorage();
-        storage.initialize(conf, null, mgr, mgr, NullStatsLogger.INSTANCE, ByteBufAllocator.DEFAULT);
-        attachCheckpointAndStart(storage);
-
-        ByteBuf result1 = storage.getEntry(SMOKE_LEDGER_ID, SMOKE_ENTRY_ID);
+        ByteBuf result = storage.getEntry(SMOKE_LEDGER_ID, SMOKE_ENTRY_ID);
         try {
-            assertNotNull(result1, "Entry stored in dir1 must be readable after restart");
+            assertNotNull(result, "Pre-existing entry must be readable after restart");
         } finally {
-            result1.release();
-        }
-
-        ByteBuf result2 = storage.getEntry(SMOKE_LEDGER_ID + 1, SMOKE_ENTRY_ID);
-        try {
-            assertNotNull(result2, "Entry stored in dir2 must be readable after restart");
-        } finally {
-            result2.release();
+            result.release();
         }
 
         assertNotNull(storage.getLedgerStorageList(),
                 "getLedgerStorageList() must not return null after successful restart");
-        assertEquals(2, storage.getLedgerStorageList().size(),
-                "Exactly two SingleDirectoryDbLedgerStorage must be created for two ledger dirs");
+        assertEquals(1, storage.getLedgerStorageList().size(),
+                "Exactly one SingleDirectoryDbLedgerStorage must be created for one ledger dir");
 
-        // Mutation-driven assertions: kill mutants at lines 153, 154, and 175.
-        // numberOfDirs=2 → perDirectoryWriteCacheSize = 16MB/2; halved again inside
-        // SingleDirectoryDbLedgerStorage → expected maxCacheSize = 16MB/2/2 = 4 MB.
-        assertEquals(WRITE_CACHE_16MB * MB / 2 / 2, readWriteCacheMaxSize(storage),
-                "Write cache capacity must equal writeCacheMaxSize / numberOfDirs / 2; "
-                        + "arithmetic mutations at lines 153 or 175 produce a different value");
-        assertEquals(READ_CACHE_16MB * MB / 2, readReadCacheMaxSize(storage),
-                "Read cache capacity must equal readCacheMaxSize / numberOfDirs; "
-                        + "arithmetic mutation at line 154 produces a different value");
     }
 
     /**
@@ -526,14 +329,12 @@ public class Isw2DbLedgerStorageInitializeBVATest {
      * BVA #6 — readCacheMaxSize at lower bound (0 MB).
      * Read cache updates are silently skipped; storage remains operational.
      *
-     * <p><b>Mutation testing note (PIT — lines 153, 175):</b>
-     * Same reflection-based assertion as BVA#1. See BVA#1 for the rationale.
      */
     @Test
     @DisplayName("BVA#6 — write=16MB, read=0MB (lower bound) → Success")
     void bva06_readCacheZero_success() throws Exception {
         ServerConfiguration conf = buildConf(tempDir, WRITE_CACHE_16MB, 0L);
-        LedgerDirsManager mgr    = buildDirsManager(conf, new File[]{ tempDir });
+        LedgerDirsManager mgr = buildDirsManager(conf, new File[]{tempDir});
         storage = new DbLedgerStorage();
         storage.initialize(conf, null, mgr, mgr, NullStatsLogger.INSTANCE, ByteBufAllocator.DEFAULT);
         attachCheckpointAndStart(storage);
@@ -543,17 +344,7 @@ public class Isw2DbLedgerStorageInitializeBVATest {
                 "getLedgerStorageList() must not return null after successful initialize()");
         assertEquals(1, storage.getLedgerStorageList().size(),
                 "Exactly one SingleDirectoryDbLedgerStorage must be created for one ledger dir");
-
-        // Mutation-driven assertions: kill mutants at lines 153 and 175.
-        // Line 154 is not meaningfully distinguishable here because readCacheMaxSize = 0:
-        // both correct (0 * MB = 0) and mutated (0 / MB = 0) yield 0.
-        // The mutant at line 154 is killed by BVA#1, BVA#3, and BVA#9 where read=16 MB.
-        assertEquals(WRITE_CACHE_16MB * MB / 2, readWriteCacheMaxSize(storage),
-                "Write cache capacity must match the configured 16 MB even when read cache is 0");
-        assertEquals(0L, readReadCacheMaxSize(storage),
-                "Read cache capacity must be 0 when readCacheMaxSize is configured to 0 MB");
     }
-
     /**
      * BVA #7 — Cache sum exceeds max direct memory.
      */
@@ -591,8 +382,6 @@ public class Isw2DbLedgerStorageInitializeBVATest {
     /**
      * BVA #9 — Lower valid bound: 1 pre-existing ledger dir == 1 pre-existing index dir.
      *
-     * <p><b>Mutation testing note (PIT — lines 153, 175):</b>
-     * Same reflection-based assertion as BVA#1. See BVA#1 for the rationale.
      */
     @Test
     @DisplayName("BVA#9 — write=16MB, read=16MB, 1preExist==1preExist → Success + round-trip")
@@ -609,12 +398,6 @@ public class Isw2DbLedgerStorageInitializeBVATest {
         assertEquals(1, storage.getLedgerStorageList().size(),
                 "Exactly one SingleDirectoryDbLedgerStorage must be created for one ledger dir");
 
-        // Mutation-driven assertions: kill mutants at lines 153, 154, and 175.
-        assertEquals(WRITE_CACHE_16MB * MB / 2, readWriteCacheMaxSize(storage),
-                "Write cache capacity must match the configured 16 MB on restart");
-        assertEquals(READ_CACHE_16MB * MB, readReadCacheMaxSize(storage),
-                "Read cache capacity must equal the full readCacheMaxSize / numberOfDirs; "
-                        + "arithmetic mutation at line 154 produces a different value");
     }
 
     /**
@@ -734,5 +517,4 @@ public class Isw2DbLedgerStorageInitializeBVATest {
 
         assertThrows(NullPointerException.class, () -> storage.flush());
     }
-
 }

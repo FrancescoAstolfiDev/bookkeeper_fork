@@ -58,15 +58,16 @@ import org.junit.jupiter.api.io.TempDir;
  *
  * <h3>Category Partition table</h3>
  * <pre>
- * +----+--------------------------------------------+----------------------+-------------------------------------------------------+
- * |  # | ByteBuf                                    | Ledger state         | Expected output                                       |
- * +----+--------------------------------------------+----------------------+-------------------------------------------------------+
- * |  1 | well-formed (ledgerId + entryId + payload) | master key registered| Write successful                                      |
- * |  2 | well-formed, duplicate entryId             | master key registered| Write successful (last-write, RocksDB pointer updated)|
- * |  3 | ledgerId only (8 bytes), entryId absent    | master key registered| Exception (IndexOutOfBoundsException)                 |
- * |  4 | header only, no payload (16 bytes)         | master key registered| Exception (IndexOutOfBoundsException at payload read) |
- * |  5 | empty (0 bytes)                            | master key registered| Exception (IndexOutOfBoundsException)                 |
- * +----+--------------------------------------------+----------------------+-------------------------------------------------------+
+ * +----+----------------------------------------------------+----------------------+-------------------------------------------------------+
+ * |  # | ByteBuf                                            | Ledger state         | Expected output                                       |
+ * +----+----------------------------------------------------+----------------------+-------------------------------------------------------+
+ * |  1 | well-formed (ledgerId + entryId + payload)         | master key registered| Write successful                                      |
+ * |  2 | well-formed, duplicate entryId                     | master key registered| Write successful (last-write, RocksDB pointer updated)|
+ * |  3 | ledgerId only (8 bytes), entryId absent            | master key registered| Exception (IndexOutOfBoundsException)                 |
+ * |  4 | header only, no payload (16 bytes)                 | master key registered| Exception (IndexOutOfBoundsException at payload read) |
+ * |  5 | empty (0 bytes)                                    | master key registered| Exception (IndexOutOfBoundsException)                 |
+ * |  6 | well-formed (24 bytes), void (zero-valued) payload | master key registered| Write successful                                      |
+ * +----+----------------------------------------------------+----------------------+-------------------------------------------------------+
  * </pre>
  *
  * <h3>Boundary Value Analysis table — mapped 1-to-1 with CP rows</h3>
@@ -79,6 +80,7 @@ import org.junit.jupiter.api.io.TempDir;
  * |  3 |  8 bytes: ledgerId only, entryId absent          | Exception (below lower valid bound)                   |
  * |  4 | 16 bytes: header only, payload long absent       | Exception (one long below lower valid bound)          |
  * |  5 |  0 bytes: empty                                  | Exception (absolute lower bound)                      |
+ * |  6 | 24 bytes: ledgerId + entryId + 0L (void payload) | Write successful (valid size, zero payload content)   |
  * +----+--------------------------------------------------+-------------------------------------------------------+
  * </pre>
  */
@@ -377,6 +379,45 @@ public class Isw2DbLedgerStorageAddEntryBVATest {
                     "A zero-byte buffer must be rejected");
         } finally {
             buf.release();
+        }
+    }
+
+    /**
+     * CP #6 / BVA #6 — Well-formed buffer with void (zero-valued) payload (24 bytes).
+     *
+     * <p><b>CP:</b> well-formed buffer, zero-valued payload, master key registered.
+     * <b>BVA:</b> 24 bytes = lower valid bound; the payload field is <em>present</em>
+     * at index 16 but carries the value {@code 0L}.
+     *
+     * <p>This case is complementary to CP#4/BVA#4: case #4 fails because the buffer
+     * is only 16 bytes and the payload field is physically absent, causing
+     * {@code IndexOutOfBoundsException} at the third {@code getLong(16)} call.
+     * Here the buffer is the full 24 bytes — the payload field exists and its content
+     * happens to be zero. The implementation reads three longs regardless of their
+     * values; it does not reject a zero payload. The write must therefore succeed
+     * and {@code getEntry()} must return the stored entry with {@code 0L} at offset 16.
+     */
+    @Test
+    @DisplayName("CP#6 / BVA#6 — void payload (24 bytes, payload=0L) → Write successful")
+    void cp06_bva06_voidPayload_success() throws Exception {
+        ByteBuf buf = buildWellFormed(LEDGER_ID, 0L, 0L);
+        try {
+            storage.addEntry(buf);
+        } finally {
+            buf.release();
+        }
+        storage.flush();
+
+        ByteBuf result = storage.getEntry(LEDGER_ID, 0L);
+        try {
+            assertNotNull(result,
+                    "Entry with void payload must be retrievable after write");
+            assertEquals(MIN_VALID_SIZE, result.readableBytes(),
+                    "Retrieved buffer must be exactly 24 bytes even for a zero-valued payload");
+            assertEquals(0L, readPayload(result),
+                    "Retrieved payload must be 0L as written");
+        } finally {
+            result.release();
         }
     }
 }
