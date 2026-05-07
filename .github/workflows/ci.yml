@@ -32,4 +32,6 @@ jobs:
 
       - name: Build and Run ISW2 Tests
         #   Execute just the -isw2 tests
-        run: mvn clean install  -Dcheckstyle.skip -Dspotbugs.skip
+        run: |
+          mvn clean install -Dcheckstyle.skip -Dspotbugs.skip -DskipTests
+          mvn test -pl bookkeeper-server -Dtest=Isw2*
